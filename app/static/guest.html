@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>RadioTEDU Guest Room</title>
+  <style>
+    :root{color-scheme:dark;--bg:#091018;--panel:#111d29;--line:#294053;--text:#f5f8fb;--muted:#a9bac8;--accent:#39d98a;--danger:#ff6577}
+    *{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top,#173047,var(--bg) 50%);color:var(--text);font:16px/1.45 system-ui,sans-serif;min-height:100vh}
+    main{width:min(720px,calc(100% - 28px));margin:32px auto}.brand{letter-spacing:.12em;text-transform:uppercase;color:var(--accent);font-weight:800}.panel{background:color-mix(in srgb,var(--panel) 94%,transparent);border:1px solid var(--line);border-radius:18px;padding:22px;margin:16px 0;box-shadow:0 18px 60px #0006}
+    h1{font-size:clamp(1.8rem,6vw,3rem);margin:.2em 0}h2{margin-top:0}.muted{color:var(--muted)}label{display:grid;gap:7px;margin:14px 0;font-weight:700}input,select,button{font:inherit;border-radius:10px;border:1px solid var(--line);padding:12px;background:#0b1620;color:var(--text)}button{cursor:pointer;font-weight:800}button.primary{background:var(--accent);color:#062114;border:0}button.danger{background:var(--danger);color:#26070c;border:0}.row{display:flex;gap:10px;flex-wrap:wrap}.row>*{flex:1}.status{padding:12px;border-radius:10px;background:#0b1620;border:1px solid var(--line)}.meter{height:14px;background:#071018;border-radius:99px;overflow:hidden}.meter>span{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--accent),#f8d34a,var(--danger));transition:width .08s}.hidden{display:none!important}[aria-live]{min-height:24px}.consent{border-color:#f8d34a}.safe{color:var(--accent)}
+  </style>
+</head>
+<body>
+<main>
+  <div class="brand">RadioTEDU OnAir</div>
+  <h1>Guest Room</h1>
+  <p class="muted">Check your microphone, join the lobby, and wait for the presenter to admit you. Headphones are required to prevent echo.</p>
+
+  <section id="joinPanel" class="panel">
+    <h2>Join the lobby</h2>
+    <form id="joinForm">
+      <label>Your name<input id="displayName" maxlength="80" autocomplete="name" required placeholder="How the presenter should identify you"></label>
+      <button class="primary" type="submit">Check microphone and continue</button>
+    </form>
+  </section>
+
+  <section id="devicePanel" class="panel hidden">
+    <h2>Microphone check</h2>
+    <label>Microphone<select id="microphone"></select></label>
+    <div class="meter" aria-label="Microphone level"><span id="meterFill"></span></div>
+    <p class="muted">Speak normally. The bar should move without staying in the red.</p>
+    <button id="connectButton" class="primary" type="button">Join guest lobby</button>
+  </section>
+
+  <section id="roomPanel" class="panel hidden">
+    <h2 id="roomHeading">Connecting…</h2>
+    <div id="roomStatus" class="status" aria-live="polite">Establishing a protected connection.</div>
+    <div class="row" style="margin-top:14px">
+      <button id="muteButton" type="button">Mute myself</button>
+      <button id="leaveButton" class="danger" type="button">Leave</button>
+    </div>
+    <audio id="returnAudio" autoplay></audio>
+  </section>
+
+  <section id="consentPanel" class="panel consent hidden">
+    <h2>Recording permission</h2>
+    <p>The presenter wants to record the complete on-air program. Recording will not start unless every admitted guest agrees.</p>
+    <div class="row"><button id="consentYes" class="primary" type="button">I agree</button><button id="consentNo" class="danger" type="button">I do not agree</button></div>
+  </section>
+  <p id="message" aria-live="polite"></p>
+</main>
+<script src="/static/js/guest.js"></script>
+</body>
+</html>

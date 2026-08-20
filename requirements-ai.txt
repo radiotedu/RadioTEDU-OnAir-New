@@ -1,0 +1,23 @@
+# AI Host Dependencies
+# Install with: pip install -r requirements-ai.txt
+
+# Core ML framework
+torch>=2.0.0
+transformers==4.57.3
+accelerate>=0.30.0
+sentencepiece
+huggingface_hub>=0.36.2
+qwen-tts==0.1.1
+
+# Audio processing
+soundfile>=0.12.1
+numpy>=1.24.0
+edge-tts>=7.0.0
+
+# Qwen TTS (if available on PyPI)
+# pip install qwen-tts
+# If not on PyPI, install from source:
+# pip install git+https://github.com/QwenLM/Qwen3-TTS.git
+
+# Optional: System monitoring (for diagnostics)
+psutil>=5.9.0

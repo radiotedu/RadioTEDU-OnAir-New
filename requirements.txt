@@ -1,0 +1,12 @@
+bcrypt<4.1
+fastapi
+httpx
+passlib[bcrypt]
+pydantic
+python-multipart
+python-jose[cryptography]
+requests
+pytest
+tzdata
+uvicorn
+websockets

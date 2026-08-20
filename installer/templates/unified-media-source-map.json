@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "mediaRoot": "E:\\RadioTEDU Media",
+  "jukeMusicRoot": "E:\\RadioTEDU Media\\Juke\\Non-Turkish",
+  "votingMusicRoot": "E:\\RadioTEDU Media\\Voting",
+  "managedFolders": {
+    "sources": "Sources",
+    "broadcast": "Broadcast",
+    "jukeNonTurkish": "Juke\\Non-Turkish",
+    "voting": "Voting",
+    "jingles": "Jingles",
+    "ads": "Ads",
+    "emergency": "Emergency",
+    "imports": "Imports",
+    "databases": "Databases",
+    "manifests": "Manifests",
+    "backups": "Backups"
+  },
+  "notes": "Template only. Keep credential and endpoint values out of this file."
+}

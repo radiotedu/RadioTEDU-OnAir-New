@@ -1,0 +1,955 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#101114">
+  <meta name="description" content="Deterministic RadioTEDU OnAir automation wall for any radio station">
+  <title>RadioTEDU OnAir</title>
+  <link rel="manifest" href="/static/manifest.json">
+  <link rel="stylesheet" href="/static/onair/styles.css?v=17">
+</head>
+<body>
+  <div id="authGate" class="auth-gate" hidden>
+    <form id="loginForm" class="login-card">
+      <div class="login-program-lockup">
+        <img class="onair-program-logo" src="/static/onair/assets/radiotedu-onair-logo.png" alt="RadioTEDU OnAir">
+        <div class="founder-lockup" aria-label="Built for RadioTEDU">
+          <span class="founder-tile radiotedu-tile"><img src="/static/onair/assets/radiotedu-logo.png" alt="RadioTEDU"></span>
+        </div>
+      </div>
+      <div class="eyebrow">RADIOTEDU BROADCAST AUTOMATION</div>
+      <h1>RadioTEDU OnAir sign in</h1>
+      <p>Sign in to operate your deterministic radio stations.</p>
+      <label>Username<input id="loginUsername" autocomplete="username" required></label>
+      <label>Password<input id="loginPassword" type="password" autocomplete="current-password" required></label>
+      <button id="loginButton" class="button primary" type="submit">Sign in</button>
+      <div id="loginError" class="form-error" role="alert"></div>
+    </form>
+  </div>
+
+  <div id="appShell" class="app-shell" hidden>
+    <aside id="idleTimeoutBanner" class="idle-timeout-banner" role="alert" hidden>
+      <span>Your secure operator session will lock in <b id="idleTimeoutCountdown">60</b> seconds.</span>
+      <button id="continueSessionButton" class="button secondary compact" type="button">Continue session</button>
+    </aside>
+    <header class="topbar">
+      <div class="brand-block">
+        <div class="brand-lockup" aria-label="RadioTEDU OnAir">
+          <img class="onair-brand-logo" src="/static/onair/assets/radiotedu-onair-logo.png" alt="RadioTEDU OnAir">
+        </div>
+        <div>
+          <div class="eyebrow">RADIOTEDU AUTOMATION</div>
+          <h1>RadioTEDU OnAir</h1>
+          <div class="compact-founder-lockup" aria-label="RadioTEDU">
+            <span class="founder-tile radiotedu-tile"><img src="/static/onair/assets/radiotedu-logo.png" alt="RadioTEDU"></span>
+          </div>
+        </div>
+      </div>
+      <div class="station-control">
+        <label for="stationSelect">Controlling station</label>
+        <select id="stationSelect" aria-label="Controlling station"></select>
+      </div>
+      <div class="top-actions">
+        <span id="connectionState" class="connection-pill"><span></span>Connecting</span>
+        <button id="refreshButton" class="button secondary compact" type="button">Refresh</button>
+        <button id="logoutButton" class="button ghost compact" type="button">Sign out</button>
+      </div>
+    </header>
+
+    <div class="operator-workspace">
+      <aside class="operator-sidebar" aria-label="Operator menu">
+        <nav id="operatorNavigation" class="operator-navigation">
+          <button class="operator-nav-button" type="button" data-operator-nav="onair"><span class="nav-icon" aria-hidden="true">●</span><span><b>On Air</b><small>Broadcast and timeline</small></span></button>
+          <button class="operator-nav-button" type="button" data-operator-nav="media"><span class="nav-icon" aria-hidden="true">♪</span><span><b>Media</b><small>Library and queue</small></span></button>
+          <button class="operator-nav-button" type="button" data-operator-nav="playlists"><span class="nav-icon" aria-hidden="true">PL</span><span><b>Playlists</b><small>Reusable track lists</small></span></button>
+          <button class="operator-nav-button" type="button" data-operator-nav="automation"><span class="nav-icon" aria-hidden="true">↻</span><span><b>Automation</b><small>Jingles and rules</small></span></button>
+          <button class="operator-nav-button emergency-nav" type="button" data-operator-nav="emergency"><span class="nav-icon" aria-hidden="true">!</span><span><b>Emergency</b><small>External live source</small></span></button>
+          <button class="operator-nav-button" type="button" data-operator-nav="services"><span class="nav-icon" aria-hidden="true">◆</span><span><b>Services</b><small>Ollama, AI, Voting, Juke</small></span></button>
+          <button class="operator-nav-button" type="button" data-operator-nav="settings"><span class="nav-icon" aria-hidden="true">⚙</span><span><b>Settings</b><small>Station and account</small></span></button>
+          <button class="operator-nav-button" type="button" data-operator-nav="diagnostics"><span class="nav-icon" aria-hidden="true">✓</span><span><b>Diagnostics</b><small>Readiness and activity</small></span></button>
+          <button class="operator-nav-button" type="button" data-operator-nav="stations"><span class="nav-icon" aria-hidden="true">ST</span><span><b>Stations</b><small>Fleet and outputs</small></span></button>
+          <button class="operator-nav-button" type="button" data-operator-nav="queue"><span class="nav-icon" aria-hidden="true">Q</span><span><b>Queue</b><small>Durable playout order</small></span></button>
+          <button class="operator-nav-button" type="button" data-operator-nav="scheduler"><span class="nav-icon" aria-hidden="true">SC</span><span><b>Scheduler</b><small>Exact-time events</small></span></button>
+          <button class="operator-nav-button" type="button" data-operator-nav="dayparting"><span class="nav-icon" aria-hidden="true">DP</span><span><b>Dayparting</b><small>Weekly tempo clock</small></span></button>
+          <button class="operator-nav-button" type="button" data-operator-nav="shows"><span class="nav-icon" aria-hidden="true">SH</span><span><b>Shows</b><small>Programs and presenters</small></span></button>
+          <button class="operator-nav-button" type="button" data-operator-nav="compliance"><span class="nav-icon" aria-hidden="true">CP</span><span><b>Compliance</b><small>Music-use records</small></span></button>
+          <button class="operator-nav-button" type="button" data-operator-nav="ads"><span class="nav-icon" aria-hidden="true">AD</span><span><b>Advertising</b><small>Breaks and campaigns</small></span></button>
+          <button class="operator-nav-button" type="button" data-operator-nav="streaming"><span class="nav-icon" aria-hidden="true">RX</span><span><b>Streaming</b><small>Origin health and control</small></span></button>
+          <button class="operator-nav-button" type="button" data-operator-nav="recovery"><span class="nav-icon" aria-hidden="true">BK</span><span><b>Backup / Recovery</b><small>Verified restore points</small></span></button>
+        </nav>
+        <div class="sidebar-rule"></div>
+        <div class="sidebar-principle"><b>Operator controlled</b><span>Normal broadcasting never depends on AI.</span></div>
+      </aside>
+
+      <main id="operatorMain" class="operator-main">
+        <header class="workspace-heading">
+          <div>
+            <div id="workspaceEyebrow" class="eyebrow">LIVE CONTROL</div>
+            <h2 id="workspaceTitle" tabindex="-1">On Air</h2>
+            <p id="workspaceDescription">Control the active broadcast and see what plays next.</p>
+          </div>
+          <span id="workspaceStation" class="workspace-station">Active station</span>
+        </header>
+
+      <section class="hero-grid radiotedu-hero view-fragment-grid">
+        <article class="status-card onair-card" data-operator-view="onair">
+          <div class="card-heading">
+            <div>
+              <div class="eyebrow">BROADCAST</div>
+              <h2 id="broadcastTitle">Checking output…</h2>
+            </div>
+            <div id="onAirLamp" class="status-lamp"><span></span><b>CHECKING</b></div>
+          </div>
+          <div class="now-playing">
+            <span>NOW PLAYING</span>
+            <strong id="nowPlayingTitle">—</strong>
+            <small id="nowPlayingArtist">Waiting for station state</small>
+          </div>
+          <div class="state-strip">
+              <div><span>Engine</span><b id="engineState">—</b></div>
+              <div><span>Scheduler</span><b id="loopState">—</b></div>
+              <div><span>Icecast</span><b id="icecastState">—</b></div>
+              <div><span>Recovery</span><b id="recoveryState">Idle</b></div>
+          </div>
+          <div class="button-row broadcast-buttons">
+            <button id="startBroadcastButton" class="button success" type="button" disabled>Start / resume broadcast</button>
+            <button id="stopBroadcastButton" class="button danger" type="button" disabled>Stop stream — keep playlist</button>
+          </div>
+          <label class="check-row"><input id="broadcastAutostartEnabled" type="checkbox"> Resume this station automatically when the app restarts</label>
+          <div class="field-grid two">
+            <label>Deterministic rotation key<input id="autoplayShuffleSeed" maxlength="120" placeholder="radiotedu-onair-station-1"></label>
+            <div class="field-action"><span id="deterministicPolicyState" class="mini-state">Stable rotation</span><button id="saveDeterministicPolicyButton" class="button secondary" type="button">Save deterministic policy</button></div>
+          </div>
+          <small>The same saved database state and rotation key always select the same next item. Change the key only when you intentionally want a new stable ordering.</small>
+          <small>Stopping never clears or advances the playlist. The interrupted item stays in place and restarts from its beginning when you resume.</small>
+          <p id="broadcastResult" class="action-result" aria-live="polite"></p>
+        </article>
+
+        <article class="status-card ai-card" data-operator-view="services">
+          <div class="card-heading">
+            <div>
+              <div class="eyebrow">AI HOST</div>
+              <h2 id="aiTitle">Checking AI…</h2>
+            </div>
+            <div id="aiLamp" class="status-lamp"><span></span><b>CHECKING</b></div>
+          </div>
+          <p id="aiDescription" class="card-copy">Reading the saved station setting and live readiness.</p>
+          <div class="state-strip two">
+            <div><span>Provider</span><b id="aiProvider">—</b></div>
+            <div><span>Readiness</span><b id="aiReadiness">—</b></div>
+          </div>
+          <div class="button-row">
+            <button id="enableAiButton" class="button primary" type="button">Enable AI host</button>
+            <button id="disableAiButton" class="button secondary" type="button">Disable AI host</button>
+          </div>
+          <small>AI is content-only. It cannot start or stop a stream, change this station's jingle setting, or override the operator.</small>
+          <p id="aiResult" class="action-result" aria-live="polite"></p>
+        </article>
+
+        <article class="status-card station-card" data-operator-view="stations">
+          <div class="card-heading">
+            <div>
+              <div class="eyebrow">STATIONS</div>
+              <h2>Add a working station</h2>
+            </div>
+            <span id="stationCount" class="count-badge">0</span>
+          </div>
+          <form id="stationForm" class="station-form">
+            <div class="field-grid two">
+              <label>Name<input id="stationName" required maxlength="80" placeholder="Community Radio Jazz"></label>
+              <label>Description<input id="stationDescription" maxlength="180" placeholder="Optional"></label>
+            </div>
+            <label class="check-row"><input id="configureIcecast" type="checkbox" checked> Configure internet stream now</label>
+            <div id="icecastFields" class="field-grid output-fields">
+              <label>Server type<select id="icecastProtocol"><option value="icecast">Icecast / TinyIce (Opus)</option></select></label>
+              <label>Host<input id="icecastHost" value="127.0.0.1" required></label>
+              <label>Port<input id="icecastPort" type="number" min="1" max="65535" value="8000" required></label>
+              <label>Mount<input id="icecastMount" value="/new-station" pattern="/.*" required></label>
+              <label>User<input id="icecastUser" value="source" required></label>
+              <label>Password<input id="icecastPassword" type="password" autocomplete="new-password" required></label>
+              <label>Format<select id="icecastProfile"><option value="opus_192">Opus Normal — 192 kbps</option></select></label>
+            </div>
+            <label class="check-row"><input id="activateNewStation" type="checkbox"> Make it the active broadcast target</label>
+            <button id="createStationButton" class="button primary" type="submit">Create and verify station</button>
+            <p id="stationResult" class="action-result" aria-live="polite"></p>
+          </form>
+        </article>
+      </section>
+
+      <section class="operations-grid view-fragment-grid">
+        <article class="panel emergency-panel" data-operator-view="emergency">
+          <div class="panel-heading">
+            <div><div class="eyebrow emergency-eyebrow">EMERGENCY BROADCAST</div><h2>External public-service source</h2></div>
+            <div id="emergencyLamp" class="status-lamp off"><span></span><b>OFF</b></div>
+          </div>
+          <p class="card-copy">Take over the selected station with an official public radio, government feed, press conference, or any approved HTTP/HTTPS page. Only shared audio is transmitted; video is never sent.</p>
+          <div class="emergency-preset-row">
+            <label>Verified public-service preset
+              <select id="emergencyPreset">
+                <option value="">Custom source</option>
+                <option value="https://radyo.trt.net.tr/kanallar/radyo-1">TRT Radyo 1</option>
+                <option value="https://radyo.trt.net.tr/kanallar/trt-fm">TRT FM</option>
+                <option value="https://radyo.trt.net.tr/kanallar/trt-radyo-haber">TRT Radyo Haber</option>
+              </select>
+            </label>
+            <button id="emergencyPresetButton" class="button secondary" type="button">Use selected preset</button>
+          </div>
+          <div class="path-picker-row emergency-url-row">
+            <label>Official page or approved source URL<input id="emergencyUrl" type="url" inputmode="url" placeholder="https://radyo.trt.net.tr/kanallar/radyo-1" autocomplete="url"></label>
+            <button id="previewEmergencyButton" class="button secondary" type="button">Open and preview</button>
+          </div>
+          <div class="emergency-instruction"><b>Preview first; takeover is separate.</b><span>On confirmation, select the opened source tab and turn on <strong>Share tab audio</strong>. The first red-button press arms takeover; the second press confirms it.</span></div>
+          <div class="state-strip emergency-states">
+            <div><span>Program</span><b id="emergencyProgramState">Normal</b></div>
+            <div><span>Tab signal</span><b id="emergencySignalState">Off</b></div>
+            <div><span>Buffer</span><b id="emergencyBufferState">0 ms</b></div>
+            <div><span>Source</span><b id="emergencySourceState">Not selected</b></div>
+          </div>
+          <div class="button-row emergency-buttons">
+            <button id="startEmergencyButton" class="button danger" type="button">Arm emergency takeover</button>
+            <button id="stopEmergencyButton" class="button secondary" type="button" disabled>Stop emergency audio — restore playlist</button>
+          </div>
+          <p id="emergencyResult" class="action-result" aria-live="assertive"></p>
+        </article>
+
+        <article class="panel timeline-panel" data-operator-view="onair">
+          <div class="panel-heading">
+            <div><div class="eyebrow">LIVE TIMELINE</div><h2>Remaining and forecasted songs</h2></div>
+            <div id="timelineClock" class="mini-state">--:--:--</div>
+          </div>
+          <div class="timeline-now" aria-live="polite">
+            <div class="timeline-now-copy">
+              <span>PLAYING NOW</span>
+              <strong id="timelineNowTitle">Waiting for playout</strong>
+              <small id="timelineNowArtist">--</small>
+            </div>
+            <div class="timeline-countdown">
+              <b id="timelineRemaining">--:--</b>
+              <span id="timelineEndTime">End time unavailable</span>
+            </div>
+          </div>
+          <div class="timeline-progress" aria-hidden="true"><span id="timelineProgressBar"></span></div>
+          <div class="forecast-heading"><span>UPCOMING</span><span>START / END</span></div>
+          <ol id="forecastList" class="forecast-list"></ol>
+        </article>
+      </section>
+
+      <section class="library-management-grid" data-operator-view="media">
+        <article class="panel library-profile-panel">
+          <div class="panel-heading">
+            <div><div class="eyebrow">STATION LIBRARY</div><h2>Managed music folder</h2></div>
+            <div id="libraryProfileState" class="mini-state">Not configured</div>
+          </div>
+          <p class="card-copy">Give each station its own folder. Exact replacement makes autoplay and the pending queue use only music from that folder while allowing the current song to finish cleanly.</p>
+          <div id="libraryManagedPath" class="managed-path">Choose a folder below, then sync and verify it.</div>
+          <form id="libraryFolderForm" class="library-folder-form">
+            <div class="path-picker-row"><label>Music folder<input id="libraryFolder" type="text" required autocomplete="off" placeholder="D:\Radio\Music\Pop"></label><button id="browseLibraryFolderButton" class="button secondary" type="button">Browse folders</button></div>
+            <div class="field-grid profile-fields">
+              <label>Profile label<input id="libraryProfileLabel" type="text" maxlength="80" placeholder="Rock, Pop, Jazz, News..."></label>
+              <label>Default genre<input id="libraryDefaultGenre" type="text" maxlength="80" placeholder="Rock"></label>
+              <label>Default language<input id="libraryDefaultLanguage" type="text" maxlength="24" placeholder="en"></label>
+            </div>
+            <div class="library-sync-options">
+              <label class="check-row"><input id="libraryRecursive" type="checkbox" checked> Include subfolders</label>
+              <label class="check-row"><input id="libraryReplaceOutside" type="checkbox" checked> Exact replacement: deactivate this station's music outside the folder and remove it from the pending queue</label>
+              <label class="check-row"><input id="librarySkipUnplayable" type="checkbox"> Skip unreadable files and list them in the verified result instead of rejecting the entire folder</label>
+            </div>
+            <div class="button-row">
+              <button id="syncLibraryButton" class="button primary" type="submit">Sync folder and verify station library</button>
+              <button id="rescanLibraryButton" class="button secondary" type="button">Rescan managed folder now</button>
+            </div>
+          </form>
+          <p id="librarySyncResult" class="action-result" aria-live="polite"></p>
+        </article>
+        <article class="panel unified-media-panel">
+          <div class="panel-heading">
+            <div><div class="eyebrow">UNIFIED MEDIA ROOT</div><h2>Hardlink library views</h2></div>
+            <div id="unifiedMediaState" class="mini-state">Checking</div>
+          </div>
+          <p class="card-copy">The station uses explicit, language-labelled sources to build hardlink-only views. Rebuilding replaces prior mapped links and preserves verified operator drop-ins without copying media.</p>
+          <div id="unifiedMediaRoot" class="managed-path">Configured media root is loading…</div>
+          <div id="unifiedMediaViews" class="unified-media-views" aria-live="polite"></div>
+          <div id="unifiedMediaDetails" class="unified-media-details">No refresh has been recorded.</div>
+          <div class="product-catalog-heading"><b>Automatic product catalogs</b><small>Stable media changes are committed independently after settling.</small></div>
+          <div id="productCatalogRows" class="product-catalog-rows" aria-live="polite"></div>
+          <div class="button-row">
+            <button id="refreshUnifiedMediaButton" class="button primary" type="button">Refresh mapped views, preserve drop-ins, and queue rescan</button>
+          </div>
+          <p id="unifiedMediaResult" class="action-result" aria-live="polite"></p>
+        </article>
+      </section>
+
+      <section class="configuration-grid view-fragment-grid">
+        <article class="panel configuration-panel output-configuration-panel" data-operator-view="stations">
+          <div class="panel-heading">
+            <div><div class="eyebrow">CURRENT STATION</div><h2>Identity and broadcast output</h2></div>
+            <div id="outputConfigState" class="mini-state">Loading</div>
+          </div>
+          <p class="card-copy">Use the guided checks below. Your current stream stays unchanged unless every required safety check passes.</p>
+          <form id="currentOutputForm" class="operator-form">
+            <section class="stream-wizard-step">
+              <div class="eyebrow">STEP 1 OF 4</div><h3>Where should this station broadcast?</h3>
+              <label>Destination<select id="streamWizardDestination"><option value="saved">Use this station's saved destination</option><option value="new">New Icecast destination</option></select></label>
+              <label>Station name<input id="currentStationName" required maxlength="80" placeholder="Example: RadioTEDU Main"></label>
+            </section>
+            <section class="stream-wizard-step">
+              <div class="eyebrow">STEP 2 OF 4</div><h3>Choose listener quality</h3>
+                <label>Quality<select id="currentIcecastProfile"><option value="opus_192">Opus Normal — 192 kbps</option></select></label>
+              <small>The suffix-free station mount is always the 192 kbps Opus normal stream. Low-bandwidth output is managed separately.</small>
+            </section>
+            <section class="stream-wizard-step">
+              <div class="eyebrow">STEP 3 OF 4</div><h3>Enter the connection supplied by your stream host</h3>
+              <label class="switch-row"><span><b>Internet stream</b><small>Send this station to listeners</small></span><input id="currentIcecastEnabled" type="checkbox" checked></label>
+              <div id="currentIcecastFields" class="field-grid">
+                <label>Broadcast address<input id="currentIcecastHost" required placeholder="stream.example.org"></label>
+                <label>Stream name / mount<input id="currentIcecastMount" pattern="/.*" required placeholder="/live"></label>
+                <label>Source username<input id="currentIcecastUser" required placeholder="source"></label>
+                <label>Source password<input id="currentIcecastPassword" type="password" autocomplete="new-password" placeholder="Leave blank to keep the saved password"></label>
+              </div>
+              <small id="streamDestinationProtection">Destination details are protected. Basic operators can safely change the quality preset without exposing credentials.</small>
+              <details id="streamAdvancedSettings">
+                <summary>Advanced settings — trained operators only</summary>
+                <div class="field-grid" style="margin-top:12px">
+                  <label>Server type<select id="currentSourceProtocol"><option value="icecast">Icecast / TinyIce (Opus)</option></select></label>
+                  <label>Port<input id="currentIcecastPort" type="number" min="1" max="65535" required></label>
+                  <label>Output gain (dB)<input id="currentOutputGain" type="number" min="-30" max="12" step="0.5" value="0"></label>
+                  <label class="switch-row"><span><b>TLS encryption</b><small>Usually enabled for port 443</small></span><input id="currentIcecastTlsEnabled" type="checkbox"></label>
+                  <label class="switch-row"><span><b>Local monitor</b><small>Also play through a studio device</small></span><input id="currentLocalEnabled" type="checkbox"></label>
+                  <label id="currentDeviceLabel">Monitor device<select id="currentOutputDevice"><option value="">Choose an output device</option></select></label>
+                </div>
+              </details>
+            </section>
+            <section class="stream-wizard-step">
+              <div class="eyebrow">STEP 4 OF 4</div><h3>Review what listeners will hear</h3>
+              <div id="streamWizardSummary" class="inline-status">Choose settings, then run the safety check.</div>
+              <div id="streamWizardChecks" class="stream-wizard-checks" aria-live="polite"></div>
+              <div class="button-row">
+                <button id="testCurrentOutputButton" class="button secondary" type="button">Check my settings</button>
+                <button id="saveCurrentOutputButton" class="button primary" type="submit">Apply safely</button>
+              </div>
+            </section>
+          </form>
+          <p id="outputConfigResult" class="action-result" aria-live="polite"></p>
+          <div class="danger-zone"><button id="deleteStationButton" class="button danger compact" type="button">Delete this station</button></div>
+        </article>
+
+        <article class="panel configuration-panel" data-operator-view="services">
+          <div class="panel-heading">
+            <div><div class="eyebrow">NO-COPYRIGHT CAMPAIGN</div><h2>Genre voting and AI eligibility</h2></div>
+            <div id="campaignState" class="mini-state">Loading</div>
+          </div>
+          <p class="card-copy">Run the one-month campaign from this app. Voting chooses a genre, AI can introduce only campaign-eligible tracks, and original source titles remain in the compliance record.</p>
+          <form id="campaignForm" class="operator-form">
+            <label>Campaign name<input id="campaignName" maxlength="160" value="RadioTEDU No-Copyright Month" required></label>
+            <div class="field-grid two">
+              <label>Starts<input id="campaignStartsAt" type="datetime-local" required></label>
+              <label>Ends<input id="campaignEndsAt" type="datetime-local" required></label>
+            </div>
+            <div class="field-grid two">
+              <label class="switch-row"><span><b>Campaign enabled</b><small>Enforce the configured campaign window</small></span><input id="campaignEnabled" type="checkbox" checked></label>
+              <label class="switch-row"><span><b>Genre voting enabled</b><small>Listeners vote for classical, pop, rock, or energize</small></span><input id="campaignVotingEnabled" type="checkbox" checked></label>
+              <label class="switch-row"><span><b>AI host enabled</b><small>AI may use only eligible no-copyright tracks</small></span><input id="campaignAiEnabled" type="checkbox" checked></label>
+            </div>
+            <div id="campaignStationSummary" class="inline-status">Loading eligible track counts…</div>
+            <div class="button-row">
+              <button id="saveCampaignButton" class="button primary" type="submit">Save and activate campaign</button>
+              <button id="previewCampaignNamesButton" class="button secondary" type="button">Preview clean names</button>
+              <button id="applyCampaignNamesButton" class="button secondary" type="button">Apply clean names</button>
+              <button id="publishVotingRoundButton" class="button secondary" type="button">Open 45-second genre vote</button>
+              <button id="resolveVotingRoundButton" class="button secondary" type="button">Resolve genre vote now</button>
+            </div>
+          </form>
+          <p id="campaignResult" class="action-result" aria-live="polite"></p>
+        </article>
+
+        <article class="panel configuration-panel" data-operator-view="services">
+          <div class="panel-heading">
+            <div><div class="eyebrow">AI HOST</div><h2>Complete AI configuration</h2></div>
+            <div id="aiConfigState" class="mini-state">Loading</div>
+          </div>
+          <p class="card-copy">Everything needed to enable, tune, save, and test the station voice is available here. AI can always be disabled without stopping music.</p>
+          <form id="aiConfigForm" class="operator-form">
+            <label class="switch-row"><span><b>Enable AI host</b><small>Generate station voice and music introductions</small></span><input id="aiConfigEnabled" type="checkbox"></label>
+            <div class="field-grid two">
+              <label>Language model<input id="aiLlmModel" required placeholder="ollama:qwen2.5:0.5b"><small>Use <code>ollama:model-name</code> for the local Ollama runtime.</small></label>
+              <label>Voice provider<select id="aiTtsProvider"><option value="windows-sapi">Windows voice (offline)</option><option value="local-qwen-tts">Local Qwen TTS</option><option value="edge-tts">Edge TTS</option><option value="omnivoice">OmniVoice</option></select></label>
+              <label>Voice persona<select id="aiVoicePersona"><option value="auto">Automatic</option><option value="morning">Morning</option><option value="afternoon">Afternoon</option><option value="evening">Evening</option><option value="night">Night</option><option value="warm_radio_host">Warm radio host</option><option value="professional_announcer">Professional announcer</option></select></label>
+              <label>TTS model path<input id="aiTtsModelPath" placeholder="Optional for managed local runtime"></label>
+              <label>Maximum announcement (seconds)<input id="aiMaxSeconds" type="number" min="3" max="120" value="15" required></label>
+              <label>Station ID interval (seconds)<input id="aiStationInterval" type="number" min="60" max="86400" value="1800" required></label>
+            </div>
+            <div class="field-grid two">
+              <label class="check-row"><input id="aiIncludeHistory" type="checkbox" checked> Use music history in prompts</label>
+              <label class="check-row"><input id="aiEducational" type="checkbox"> Allow educational segments</label>
+            </div>
+            <label>Prompt template<textarea id="aiPromptTemplate" required></textarea></label>
+            <div class="button-row">
+              <button id="saveAiConfigButton" class="button primary" type="submit">Save and verify AI configuration</button>
+              <button id="testAiButton" class="button secondary" type="button">Generate and verify test voice</button>
+            </div>
+          </form>
+          <p id="aiConfigResult" class="action-result" aria-live="polite"></p>
+        </article>
+
+        <article class="panel configuration-panel" data-operator-view="services">
+          <div class="panel-heading">
+            <div><div class="eyebrow">RADIOTEDU SERVICES</div><h2>Adapters and managed services</h2></div>
+            <div id="integrationState" class="mini-state">Loading</div>
+          </div>
+          <p class="card-copy">These adapters are optional. If RadioTEDU services are unavailable, music, schedules, microphone, and streaming continue normally.</p>
+          <form id="integrationForm" class="operator-form">
+            <label class="switch-row"><span><b>Enable external Voting adapter</b><small>Optional connection to the separate RadioTEDU Voting app</small></span><input id="votingEnabled" type="checkbox"></label>
+            <div class="field-grid two">
+              <label>Voting API base URL<input id="votingBaseUrl" type="url" placeholder="https://radiotedu.com/jukebox/api/v1"></label>
+              <label>Agent device ID<input id="votingDeviceId" maxlength="120" placeholder="onair-main-studio"></label>
+              <label>Agent token<input id="votingAgentToken" type="password" autocomplete="new-password" placeholder="Leave blank to keep saved token"></label>
+            </div>
+            <label class="switch-row"><span><b>Enable Study link</b><small>Keep Study as its existing authenticated external experience</small></span><input id="studyEnabled" type="checkbox"></label>
+            <label>Study URL<input id="studyBaseUrl" type="url" placeholder="https://radiotedu.com/jukebox/api/v1/study"></label>
+            <div class="button-row">
+              <button id="saveIntegrationsButton" class="button primary" type="submit">Save integration settings</button>
+              <button id="testIntegrationsButton" class="button secondary" type="button">Test optional services</button>
+            </div>
+          </form>
+          <p id="integrationResult" class="action-result" aria-live="polite"></p>
+          <div class="service-control-heading">
+            <div>
+              <h3>Service control and database health</h3>
+              <p>Manage fixed RadioTEDU components without exposing credentials. Environment files stay outside this app and are never displayed.</p>
+            </div>
+            <div class="service-control-heading-actions">
+              <span id="serviceControlState" class="mini-state">Loading</span>
+              <button id="checkAllServicesButton" class="button secondary" type="button">Check all health</button>
+            </div>
+          </div>
+          <form id="serviceControlForm" class="operator-form">
+            <div id="serviceControlCards" class="service-control-cards" aria-live="polite"></div>
+            <button id="saveServiceControlButton" class="button primary" type="submit">Save managed service settings</button>
+          </form>
+          <p id="serviceControlResult" class="action-result" aria-live="polite"></p>
+          <div class="service-control-heading">
+            <div>
+              <h3>JukeLocal song library</h3>
+              <p>Upload, search, retire, and restore songs using only this UI. Retired files stay recoverable inside the configured library; secrets are never displayed.</p>
+            </div>
+            <div class="service-control-heading-actions">
+              <span id="jukeLibraryState" class="mini-state">Not loaded</span>
+              <button id="refreshJukeLibraryButton" class="button secondary" type="button">Load songs</button>
+            </div>
+          </div>
+          <form id="jukeLibraryUploadForm" class="operator-form">
+            <div class="field-grid two">
+              <label>Destination library<select id="jukeLibraryUploadRoot"><option value="primary">Primary music library</option><option value="overflow">Overflow music library</option></select></label>
+              <label>Optional subfolder<input id="jukeLibraryFolder" maxlength="240" placeholder="Genre or programme folder"></label>
+            </div>
+            <label>Audio files<input id="jukeLibraryFiles" type="file" accept="audio/*,.aac,.flac,.m4a,.mp3,.ogg,.opus,.wav,.webm" multiple required></label>
+            <button id="uploadJukeLibraryButton" class="button primary" type="submit">Upload and verify songs</button>
+          </form>
+          <form id="jukeLibrarySearchForm" class="operator-form">
+            <div class="field-grid two">
+              <label>Search songs<input id="jukeLibrarySearch" maxlength="240" placeholder="Filename or folder"></label>
+              <label>Library<select id="jukeLibraryRootFilter"><option value="">All configured libraries</option><option value="primary">Primary music library</option><option value="overflow">Overflow music library</option></select></label>
+            </div>
+            <label class="check-row"><input id="jukeLibraryShowRetired" type="checkbox"> Show recoverable retired songs</label>
+            <button id="searchJukeLibraryButton" class="button secondary" type="submit">Search and verify</button>
+          </form>
+          <div id="jukeLibraryList" class="record-list" aria-live="polite"><div class="empty-state">Choose Load songs to inspect JukeLocal.</div></div>
+          <p id="jukeLibraryResult" class="action-result" aria-live="polite"></p>
+        </article>
+
+        <article class="panel configuration-panel readiness-panel" data-operator-view="diagnostics">
+          <div class="panel-heading">
+            <div><div class="eyebrow">READINESS</div><h2>Installation self-check</h2></div>
+            <div id="readinessState" class="mini-state">Checking</div>
+          </div>
+          <p class="card-copy">This is the authoritative setup report for the selected station. Green checks are ready; failed checks include a direct explanation.</p>
+          <ol id="readinessList" class="readiness-list"></ol>
+          <div class="button-row">
+            <button id="refreshReadinessButton" class="button secondary" type="button">Run self-check</button>
+            <button id="repairDependenciesButton" class="button primary" type="button">Repair managed dependencies</button>
+            <button id="reloadBackendButton" class="button secondary" type="button">Reload backend safely</button>
+          </div>
+          <p id="readinessResult" class="action-result" aria-live="polite"></p>
+        </article>
+
+        <article class="panel configuration-panel" data-operator-view="diagnostics">
+          <div class="panel-heading">
+            <div><div class="eyebrow">INDEPENDENT RECOVERY</div><h2>Five-minute audio watchdog</h2></div>
+            <div id="watchdogState" class="mini-state">Checking</div>
+          </div>
+          <p class="card-copy">The Windows task decodes all six public streams, confirms failures twice, repairs authoritative H: playlists, and restarts only affected stations.</p>
+          <div id="watchdogSummary" class="inline-status" aria-live="polite">Loading watchdog evidence…</div>
+          <div class="button-row">
+            <button id="refreshWatchdogButton" class="button secondary" type="button">Refresh watchdog</button>
+            <button id="repairWatchdogButton" class="button primary" type="button">Repair confirmed problems</button>
+          </div>
+          <p id="watchdogResult" class="action-result" aria-live="polite"></p>
+        </article>
+
+        <article class="panel configuration-panel" data-operator-view="diagnostics">
+          <div class="panel-heading"><div><div class="eyebrow">SUPPORT EVIDENCE</div><h2>Redacted diagnostic bundles</h2></div><span id="diagnosticBundleCount" class="count-badge">0</span></div>
+          <p class="card-copy">Create a bounded support package with health, integrity, supervisor, worker, and log-tail evidence. Stored credentials and crash-memory contents are excluded; recognized secret values are redacted.</p>
+          <div class="button-row"><button id="createDiagnosticBundleButton" class="button primary" type="button">Create support bundle</button><button id="refreshDiagnosticBundlesButton" class="button secondary" type="button">Refresh bundles</button></div>
+          <p id="diagnosticBundleResult" class="action-result" aria-live="polite"></p>
+          <div id="diagnosticBundleList" class="media-list" aria-live="polite"></div>
+        </article>
+
+        <article class="panel configuration-panel account-panel" data-operator-view="settings">
+          <div class="panel-heading"><div><div class="eyebrow">ACCOUNT</div><h2>Change operator password</h2></div></div>
+          <p class="card-copy">Change your own password here. Existing sessions are revoked after a successful change, then you sign in again with the new password.</p>
+          <form id="passwordForm" class="operator-form account-form">
+            <label>Current password<input id="currentPassword" type="password" autocomplete="current-password" required></label>
+            <div class="field-grid two">
+              <label>New password<input id="newPassword" type="password" minlength="8" autocomplete="new-password" required></label>
+              <label>Repeat new password<input id="repeatPassword" type="password" minlength="8" autocomplete="new-password" required></label>
+            </div>
+            <button id="changePasswordButton" class="button primary" type="submit">Change password</button>
+          </form>
+          <p id="passwordResult" class="action-result" aria-live="polite"></p>
+        </article>
+
+        <article id="userAdminPanel" class="panel configuration-panel account-panel" data-operator-view="settings" hidden>
+          <div class="panel-heading"><div><div class="eyebrow">ACCESS CONTROL</div><h2>Operator accounts</h2></div><span id="userAdminCount" class="count-badge">0</span></div>
+          <p class="card-copy">Create, update, disable, and reset operator accounts. Role templates are resolved by the backend and every change is audited.</p>
+          <div id="userAdminList" class="library-list" aria-live="polite"></div>
+          <form id="userAdminForm" class="operator-form account-form">
+            <label>Edit account<select id="userAdminSelect"><option value="0">Create a new operator</option></select></label>
+            <div class="field-grid two">
+              <label>Username<input id="userAdminUsername" autocomplete="off" required></label>
+              <label>Display name<input id="userAdminDisplayName" required></label>
+            </div>
+            <div class="field-grid two">
+              <label>Legacy compatibility role<select id="userAdminLegacyRole"><option value="viewer">Viewer</option><option value="dj">DJ</option><option value="producer">Producer</option><option value="admin">Administrator</option></select></label>
+              <label id="userAdminPasswordLabel">Initial password<input id="userAdminPassword" type="password" minlength="8" autocomplete="new-password"></label>
+            </div>
+            <fieldset><legend>Role templates</legend><div id="userRoleTemplateChoices" class="permission-choice-grid"></div></fieldset>
+            <label class="switch-row"><span><b>Account active</b><small>Inactive accounts cannot sign in.</small></span><input id="userAdminActive" type="checkbox" checked></label>
+            <div class="button-row"><button id="saveUserAdminButton" class="button primary" type="submit">Create operator</button><button id="deactivateUserAdminButton" class="button danger" type="button" hidden>Deactivate operator</button></div>
+          </form>
+          <form id="resetUserPasswordForm" class="operator-form account-form" hidden>
+            <label>Temporary password<input id="resetUserPassword" type="password" minlength="8" autocomplete="new-password" required></label>
+            <button class="button secondary" type="submit">Reset selected operator password</button>
+          </form>
+          <p id="userAdminResult" class="action-result" aria-live="polite"></p>
+        </article>
+
+        <article id="roleAdminPanel" class="panel configuration-panel account-panel" data-operator-view="settings" hidden>
+          <div class="panel-heading"><div><div class="eyebrow">LEAST PRIVILEGE</div><h2>Role templates</h2></div><span id="roleAdminCount" class="count-badge">0</span></div>
+          <p class="card-copy">System templates are read-only. Custom templates can be assigned only known permissions returned by the backend catalog.</p>
+          <form id="roleAdminForm" class="operator-form account-form">
+            <label>Edit role template<select id="roleAdminSelect"><option value="0">Create a new role template</option></select></label>
+            <div class="field-grid two"><label>Name<input id="roleAdminName" required></label><label>Description<input id="roleAdminDescription"></label></div>
+            <div id="rolePermissionChoices" class="permission-groups"></div>
+            <div class="button-row"><button id="saveRoleAdminButton" class="button primary" type="submit">Create role template</button><button id="deactivateRoleAdminButton" class="button danger" type="button" hidden>Deactivate role template</button></div>
+          </form>
+          <p id="roleAdminResult" class="action-result" aria-live="polite"></p>
+        </article>
+      </section>
+
+      <section class="workspace-grid view-fragment-grid">
+        <article id="speakerMonitorPanel" class="panel" data-operator-view="stations">
+          <div class="panel-heading"><div><div class="eyebrow">CONTROL-ROOM AUDIO</div><h2>Speaker monitor station</h2></div><span id="speakerMonitorState" class="mini-state">Not loaded</span></div>
+          <p class="card-copy">Choose the single station routed to the local control-room speaker monitor. This does not change public streams.</p>
+          <form id="speakerMonitorForm" class="operator-form"><label>Monitor station<select id="speakerMonitorStation"><option value="">No station selected</option></select></label><button id="saveSpeakerMonitorButton" class="button primary" type="submit">Save and verify monitor</button></form>
+          <p id="speakerMonitorResult" class="action-result" aria-live="polite"></p>
+        </article>
+
+        <article class="panel queue-panel" data-operator-view="queue">
+          <div class="panel-heading">
+            <div><div class="eyebrow">PLAYOUT</div><h2>Broadcast queue</h2></div>
+            <button id="queueRefreshButton" class="button ghost compact" type="button">Reload</button>
+          </div>
+          <div id="queueList" class="queue-list" aria-live="polite"></div>
+          <p id="queueResult" class="action-result" aria-live="polite"></p>
+        </article>
+
+        <article class="panel library-panel" data-operator-view="media">
+          <div class="panel-heading">
+            <div><div class="eyebrow">LIBRARY</div><h2>Add tracks to queue</h2></div>
+            <span id="libraryCount" class="count-badge">0</span>
+          </div>
+          <form id="librarySearchForm" class="search-row">
+            <input id="librarySearch" type="search" placeholder="Title, artist, album…" aria-label="Search library">
+            <select id="libraryType" aria-label="Track type"><option value="">All audio</option><option value="music">Music</option><option value="jingle">Jingles</option><option value="ads">Ads</option></select>
+            <button class="button secondary compact" type="submit">Search</button>
+          </form>
+          <div id="libraryList" class="library-list" aria-live="polite"></div>
+          <div class="pagination-row">
+            <button id="libraryPrev" class="button ghost compact" type="button">Previous</button>
+            <span id="libraryPage">Page 1</span>
+            <button id="libraryNext" class="button ghost compact" type="button">Next</button>
+          </div>
+          <p id="libraryResult" class="action-result" aria-live="polite"></p>
+        </article>
+      </section>
+
+      <section class="jingle-grid view-fragment-grid">
+        <article id="ytdlpImportPanel" class="panel" data-operator-view="media">
+          <div class="panel-heading"><div><div class="eyebrow">MANAGED DOWNLOAD</div><h2>YouTube and playlist import</h2></div><span id="ytdlpDependencyState" class="mini-state">Not checked</span></div>
+          <p class="card-copy">Queue an approved URL for download into the selected station library. Jobs continue server-side when this screen is closed.</p>
+          <form id="ytdlpImportForm" class="operator-form">
+            <label>Video or playlist URL<input id="ytdlpUrl" type="url" required placeholder="https://www.youtube.com/playlist?list=..."></label>
+            <div class="field-grid two"><label>Track type<select id="ytdlpTrackType"><option value="music">Music</option><option value="jingle">Jingle</option><option value="ad">Advertising</option></select></label><label>Audio format<select id="ytdlpAudioFormat"><option value="mp3">MP3</option><option value="m4a">M4A/AAC</option><option value="flac">FLAC</option><option value="wav">WAV</option></select></label></div>
+            <div class="field-grid two"><label>Audio quality<input id="ytdlpAudioQuality" value="192" placeholder="192"></label><label>Intro cleaning<select id="ytdlpIntroPreset"><option value="normal">Normal</option><option value="conservative">Conservative</option><option value="aggressive">Aggressive</option></select></label></div>
+            <label class="check-row"><input id="ytdlpDownloadPlaylist" type="checkbox"> Download the entire playlist</label>
+            <label class="check-row"><input id="ytdlpMusicOnly" type="checkbox" checked> Music-only mode</label>
+            <label class="check-row"><input id="ytdlpAutoTrim" type="checkbox"> Trim leading/trailing silence</label>
+            <label class="check-row"><input id="ytdlpAutoIntro" type="checkbox"> Clean spoken/video intros</label>
+            <div class="button-row"><button id="queueYtdlpButton" class="button primary" type="submit">Queue import job</button><button id="refreshYtdlpButton" class="button secondary" type="button">Refresh jobs</button></div>
+          </form>
+          <div id="ytdlpJobList" class="record-list"><div class="empty-state">No download jobs loaded.</div></div>
+          <p id="ytdlpResult" class="action-result" aria-live="polite"></p>
+        </article>
+
+        <article id="metadataRulePanel" class="panel" data-operator-view="media">
+          <div class="panel-heading"><div><div class="eyebrow">LIBRARY NORMALIZATION</div><h2>Metadata rules</h2></div><span id="metadataRuleCount" class="count-badge">0</span></div>
+          <p class="card-copy">Rules affect the managed library and compliance metadata only. They never enable public stream metadata.</p>
+          <form id="metadataRuleForm" class="operator-form">
+            <div class="field-grid two"><label>Name<input id="metadataRuleName" maxlength="120" required></label><label>Field<select id="metadataRuleField"><option value="title">Title</option><option value="artist">Artist</option><option value="genre">Genre</option><option value="album">Album</option></select></label></div>
+            <div class="field-grid two"><label>Match<select id="metadataRuleMatch"><option value="contains">Contains</option><option value="equals">Equals</option><option value="regex">Regular expression</option><option value="prefix">Prefix</option><option value="suffix">Suffix</option></select></label><label>Priority<input id="metadataRulePriority" type="number" step="1" value="100"></label></div>
+            <div class="field-grid two"><label>Pattern<input id="metadataRulePattern" required></label><label>Replacement<input id="metadataRuleReplacement"></label></div>
+            <label class="check-row"><input id="metadataRuleCaseSensitive" type="checkbox"> Case sensitive</label>
+            <button id="createMetadataRuleButton" class="button primary" type="submit">Create and verify rule</button>
+          </form>
+          <div id="metadataRuleList" class="record-list"><div class="empty-state">No metadata rules loaded.</div></div>
+          <p id="metadataRuleResult" class="action-result" aria-live="polite"></p>
+        </article>
+
+        <article id="metadataMaintenancePanel" class="panel compliance-wide" data-operator-view="media">
+          <div class="panel-heading"><div><div class="eyebrow">VERIFIED MAINTENANCE</div><h2>Metadata and BPM operations</h2></div><span id="metadataMaintenanceState" class="mini-state">Idle</span></div>
+          <form id="metadataMaintenanceForm" class="operator-form">
+            <div class="field-grid two"><label>Operation<select id="metadataMaintenanceAction"><option value="normalize">Normalize metadata</option><option value="autofix">Autofix and seed rules</option><option value="itunes">Verify with iTunes</option><option value="bpm">Analyze BPM</option></select></label><label>Track limit (0 = all)<input id="metadataMaintenanceLimit" type="number" min="0" step="1" value="0"></label></div>
+            <label class="check-row"><input id="metadataItunesDryRun" type="checkbox" checked> iTunes verification dry run (no changes)</label>
+            <div class="button-row"><button id="runMetadataMaintenanceButton" class="button danger" type="submit">Arm metadata operation</button></div>
+          </form>
+          <p id="metadataMaintenanceResult" class="action-result" aria-live="polite"></p>
+        </article>
+
+        <article class="panel daypart-panel" data-operator-view="dayparting">
+          <div class="panel-heading"><div><div class="eyebrow">DAYPARTING</div><h2>Weekly tempo programs</h2></div><div id="daypartLamp" class="mini-state">—</div></div>
+          <form id="daypartForm" class="sweeper-form">
+            <label class="switch-row"><span><b>Choose music by weekday, time, and BPM</b><small>Continuity fallback prevents missing BPM data from creating dead air</small></span><input id="daypartEnabled" type="checkbox"></label>
+            <label>Schedule timezone<input id="daypartTimezone" type="text" value="Europe/Istanbul" autocomplete="off" required></label>
+            <div id="daypartCoverage" class="daypart-coverage">BPM coverage: —</div>
+            <small>Edit every program freely. Each weekday must cover 24 hours exactly once before saving.</small>
+            <div class="daypart-table-head"><span>Program</span><span>Hours</span><span>BPM</span><span></span></div>
+            <div id="daypartRules" class="daypart-rules"></div>
+            <div class="button-row"><button class="button primary" type="submit">Save and verify weekly schedule</button><button id="resetDaypartsButton" class="button secondary" type="button">Restore RadioTEDU defaults</button></div>
+          </form>
+          <p id="daypartResult" class="action-result" aria-live="polite"></p>
+        </article>
+
+        <article class="panel" data-operator-view="automation">
+          <div class="panel-heading"><div><div class="eyebrow">JINGLES</div><h2>Upload a jingle</h2></div><span id="jingleCount" class="count-badge">0</span></div>
+          <form id="jingleUploadForm" class="upload-form">
+            <label class="file-drop">Audio files<input id="jingleFiles" type="file" accept="audio/*,.mp3,.wav,.flac,.ogg,.m4a,.aac" multiple required><span id="jingleFileLabel">Choose one or more jingle files</span></label>
+            <button id="uploadJingleButton" class="button primary" type="submit">Upload and verify jingles</button>
+          </form>
+          <p id="jingleResult" class="action-result" aria-live="polite"></p>
+          <form id="jingleFolderForm" class="operator-form jingle-folder-form">
+            <div class="path-picker-row"><label>Managed jingle folder<input id="jingleFolder" type="text" autocomplete="off" placeholder="D:\Radio\Jingles"></label><button id="browseJingleFolderButton" class="button secondary" type="button">Browse folders</button></div>
+            <label class="check-row"><input id="jingleFolderReplace" type="checkbox"> Exact replacement for this station's jingles</label>
+            <button id="syncJingleFolderButton" class="button secondary" type="submit">Sync folder and verify jingles</button>
+          </form>
+          <div id="jingleList" class="jingle-list"></div>
+        </article>
+
+        <article class="panel" data-operator-view="automation">
+          <div class="panel-heading"><div><div class="eyebrow">AUTOMATION</div><h2>Automatic jingles</h2></div><div id="sweeperLamp" class="mini-state">—</div></div>
+          <form id="sweeperForm" class="sweeper-form">
+            <label class="switch-row"><span><b>Insert jingles automatically</b><small>Cycles only this station's jingles after a song finishes</small></span><input id="sweeperEnabled" type="checkbox"></label>
+            <label>Songs between jingles<input id="sweeperInterval" type="number" min="1" max="100" step="1" value="2" required></label>
+            <label>Jingle selection order
+              <select id="sweeperMode">
+                <option value="ordered">In library order</option>
+                <option value="random">Stable shuffled order (deterministic)</option>
+              </select>
+            </label>
+            <small>Default: one jingle after every 2 completed songs. Enter 3 for every 3 songs, or any value from 1 to 100. The current song always finishes first.</small>
+            <button id="saveSweeperButton" class="button primary" type="submit">Save and verify my jingle rule</button>
+          </form>
+          <p id="sweeperResult" class="action-result" aria-live="polite"></p>
+        </article>
+
+        <article class="panel" data-operator-view="scheduler">
+          <div class="panel-heading"><div><div class="eyebrow">EXACT-TIME PLAYOUT</div><h2>Schedule a track</h2></div><span id="scheduleCount" class="count-badge">0</span></div>
+          <form id="scheduleForm" class="sweeper-form">
+            <label>Track ID<input id="scheduleTrackId" type="number" min="1" step="1" required></label>
+            <label>Play at<input id="schedulePlayAt" type="datetime-local" required></label>
+            <label>Optional window end<input id="scheduleWindowEnd" type="datetime-local"></label>
+            <small>The scheduler claims each item once. If a window expires, normal continuity continues instead of replaying it late.</small>
+            <button class="button primary" type="submit">Schedule and verify</button>
+          </form>
+          <p id="scheduleResult" class="action-result" aria-live="polite"></p>
+          <div id="scheduleItems" class="media-list" aria-live="polite"></div>
+        </article>
+
+        <article class="panel" data-operator-view="recovery">
+          <div class="panel-heading"><div><div class="eyebrow">PROTECTED RECOVERY</div><h2>Verified database restore points</h2></div><span id="recoveryCount" class="count-badge">0</span></div>
+          <form id="recoveryForm" class="sweeper-form">
+            <label>Retention tier<select id="recoveryTier"><option value="hourly">Hourly</option><option value="daily" selected>Daily</option><option value="monthly">Monthly</option></select></label>
+            <small>Creation is online and atomic. Every point is hash-checked, foreign-key-checked, and opened as a temporary restore before publication.</small>
+            <div class="button-row"><button class="button primary" type="submit">Create verified point</button><button id="refreshRecoveryButton" class="button secondary" type="button">Refresh list</button></div>
+          </form>
+          <p id="recoveryResult" class="action-result" aria-live="polite"></p>
+          <div id="recoveryPoints" class="media-list" aria-live="polite"></div>
+          <p class="card-copy">A production restore is deliberately offline and requires the recovery runbook; this screen never overwrites the active database.</p>
+        </article>
+
+        <article id="playlistCatalogPanel" class="panel" data-operator-view="playlists">
+          <div class="panel-heading"><div><div class="eyebrow">PLAYLIST CATALOG</div><h2>Create and select playlists</h2></div><span id="playlistCount" class="count-badge">0</span></div>
+          <form id="playlistCreateForm" class="operator-form">
+            <div class="field-grid two"><label>Name<input id="playlistName" maxlength="120" required></label><label>Description<input id="playlistDescription" maxlength="500"></label></div>
+            <button id="createPlaylistButton" class="button primary" type="submit">Create and verify playlist</button>
+          </form>
+          <form id="playlistAutoForm" class="operator-form">
+            <div class="panel-heading"><div><div class="eyebrow">AUTO GENERATE</div><h3>Build from library metadata</h3></div></div>
+            <div class="field-grid two"><label>Name<input id="playlistAutoName" maxlength="120" required></label><label>Genre<input id="playlistAutoGenre"></label></div>
+            <div class="field-grid two"><label>Artist contains<input id="playlistAutoArtist"></label><label>Track type<select id="playlistAutoTrackType"><option value="any">Any</option><option value="music">Music</option><option value="jingle">Jingle</option><option value="ad">Ad</option></select></label></div>
+            <div class="field-grid two"><label>Minimum BPM<input id="playlistAutoBpmMin" type="number" min="0" step="0.1"></label><label>Maximum BPM<input id="playlistAutoBpmMax" type="number" min="0" step="0.1"></label></div>
+            <div class="field-grid two"><label>Maximum tracks<input id="playlistAutoLimit" type="number" min="1" max="500" step="1" value="50"></label><label>Sort<select id="playlistAutoSort"><option value="random">Random</option><option value="title">Title</option><option value="artist">Artist</option><option value="bpm">BPM</option></select></label></div>
+            <button id="generatePlaylistButton" class="button secondary" type="submit">Generate and verify playlist</button>
+          </form>
+          <p id="playlistCatalogResult" class="action-result" aria-live="polite"></p>
+        </article>
+
+        <article id="playlistEditorPanel" class="panel" data-operator-view="playlists">
+          <div class="panel-heading"><div><div class="eyebrow">PLAYLIST EDITOR</div><h2>Tracks and order</h2></div><span id="playlistItemCount" class="count-badge">0</span></div>
+          <label>Playlist<select id="playlistSelect"><option value="0">Select a playlist</option></select></label>
+          <form id="playlistAddItemForm" class="operator-form"><div class="field-grid two"><label>Add one track ID<input id="playlistTrackId" type="number" min="1" step="1" required></label><div class="button-row"><button id="playlistAddItemButton" class="button primary" type="submit">Add and verify track</button></div></div></form>
+          <form id="playlistBulkForm" class="operator-form"><label>Add track IDs in bulk<input id="playlistBulkTrackIds" placeholder="12, 18, 27" required></label><button id="playlistBulkButton" class="button secondary" type="submit">Bulk add and verify</button></form>
+          <div class="button-row"><button id="deletePlaylistButton" class="button danger" type="button" hidden>Delete playlist</button><button id="refreshPlaylistsButton" class="button secondary" type="button">Refresh playlists</button></div>
+          <div id="playlistItemList" class="record-list"><div class="empty-state">Select a playlist to edit its order.</div></div>
+          <p id="playlistEditorResult" class="action-result" aria-live="polite"></p>
+        </article>
+
+        <article id="startupSoundPanel" class="panel" data-operator-view="automation">
+          <div class="panel-heading"><div><div class="eyebrow">STARTUP AUDIO</div><h2>Station startup sound</h2></div><span id="startupSoundState" class="mini-state">Not loaded</span></div>
+          <p class="card-copy">Configure the audio played when this station starts. Uploads are copied into managed storage before they become selectable.</p>
+          <form id="startupSoundForm" class="operator-form">
+            <label class="check-row"><input id="startupSoundEnabled" type="checkbox"> Play a startup sound</label>
+            <div class="field-grid two"><label>Mode<select id="startupSoundMode"><option value="random">Deterministic approved-jingle rotation</option><option value="fixed">Fixed track</option></select></label><label>Track<select id="startupSoundTrack"><option value="0">No fixed track</option></select></label></div>
+            <button id="saveStartupSoundButton" class="button primary" type="submit">Save and verify startup sound</button>
+          </form>
+          <form id="startupSoundUploadForm" class="operator-form"><label>Upload dedicated startup audio<input id="startupSoundFile" type="file" accept="audio/*,.mp3,.wav,.flac,.ogg,.m4a,.aac" required></label><button id="uploadStartupSoundButton" class="button secondary" type="submit">Upload and verify audio</button></form>
+          <p id="startupSoundResult" class="action-result" aria-live="polite"></p>
+        </article>
+
+        <article id="showEditorPanel" class="panel" data-operator-view="shows">
+          <div class="panel-heading"><div><div class="eyebrow">PROGRAM CONTROL</div><h2>Shows and live sessions</h2></div><span id="showCount" class="count-badge">0</span></div>
+          <p class="card-copy">Create station programs, assign presenters, upload transitions, and control the live/break/end lifecycle without scripts.</p>
+          <form id="showForm" class="operator-form">
+            <label>Edit show<select id="showSelect"><option value="0">Create a new show</option></select></label>
+            <div class="field-grid two"><label>Name<input id="showName" maxlength="120" required></label><label>Colour<input id="showColor" type="color" value="#4a90d9"></label></div>
+            <label>Description<textarea id="showDescription" rows="3" maxlength="1000"></textarea></label>
+            <label class="check-row"><input id="showActive" type="checkbox" checked> Show is active and available to presenters</label>
+            <div class="button-row"><button id="saveShowButton" class="button primary" type="submit">Create show</button><button id="deleteShowButton" class="button danger" type="button" hidden>Delete show</button><button id="refreshShowsButton" class="button secondary" type="button">Refresh</button></div>
+          </form>
+          <div class="state-strip two"><div><span>Session</span><b id="showSessionState">Not live</b></div><div><span>Selected show</span><b id="showSelectedState">New show</b></div></div>
+          <div class="button-row"><button id="showGoLiveButton" class="button success" type="button" disabled>Go live</button><button id="showGoBreakButton" class="button secondary" type="button" disabled>Go to break</button><button id="showEndButton" class="button danger" type="button" disabled>End show</button></div>
+          <p id="showResult" class="action-result" aria-live="polite"></p>
+        </article>
+
+        <article id="showAssignmentsPanel" class="panel" data-operator-view="shows">
+          <div class="panel-heading"><div><div class="eyebrow">PRESENTERS</div><h2>Assignments and show audio</h2></div><span id="showAssignmentCount" class="count-badge">0</span></div>
+          <form id="showAssignmentForm" class="operator-form">
+            <div class="field-grid two"><label>Operator<select id="showAssignmentUser"><option value="">Select an operator</option></select></label><label>Show role<select id="showAssignmentRole"><option value="dj">DJ</option><option value="producer">Producer</option></select></label></div>
+            <button id="assignShowUserButton" class="button primary" type="submit">Assign operator</button>
+          </form>
+          <div id="showAssignmentList" class="record-list"><div class="empty-state">Select a saved show to manage assignments.</div></div>
+          <form id="showAudioForm" class="operator-form upload-form">
+            <div class="field-grid two"><label>Transition<select id="showAudioType"><option value="intro">Intro</option><option value="outro">Outro</option><option value="break_outro">Break outro</option><option value="break_intro">Break return</option></select></label><label>Audio file<input id="showAudioFile" type="file" accept="audio/*,.mp3,.wav,.flac,.ogg,.m4a,.aac" required></label></div>
+            <button id="uploadShowAudioButton" class="button secondary" type="submit">Upload and verify show audio</button>
+          </form>
+          <p id="showAssignmentResult" class="action-result" aria-live="polite"></p>
+        </article>
+
+        <article id="musicUsagePanel" class="panel compliance-wide" data-operator-view="compliance">
+          <div class="panel-heading"><div><div class="eyebrow">PERMANENT RECORD</div><h2>Music-use ledger</h2></div><span id="musicUsageCount" class="count-badge">0</span></div>
+          <p class="card-copy">Completed music plays are append-only and hash chained. Filtering or exporting never changes the historical ledger.</p>
+          <form id="musicUsageFilterForm" class="operator-form">
+            <div class="field-grid two"><label>From date<input id="musicUsageFrom" type="date"></label><label>Through date<input id="musicUsageTo" type="date"></label></div>
+            <label class="checkbox-row"><input id="musicUsageIncludeJuke" type="checkbox" checked><span>Include the verified Juke Local ledger from durable backup storage</span></label>
+            <div class="button-row"><button id="refreshMusicUsageButton" class="button secondary" type="submit">Refresh records</button><button id="exportMusicUsageButton" class="button primary" type="button">Download CSV for Excel</button></div>
+          </form>
+          <div id="musicUsageList" class="record-list" aria-live="polite"><div class="empty-state">Open Compliance to load records.</div></div>
+          <p id="musicUsageResult" class="action-result" aria-live="polite"></p>
+        </article>
+
+        <article id="musicMetadataPanel" class="panel" data-operator-view="compliance">
+          <div class="panel-heading"><div><div class="eyebrow">RIGHTS METADATA</div><h2>Track documentation</h2></div><div id="musicMetadataState" class="mini-state">Enter track ID</div></div>
+          <form id="musicMetadataForm" class="operator-form">
+            <label>Track ID<input id="musicMetadataTrackId" type="number" min="1" step="1" required></label>
+            <div class="button-row"><button id="loadMusicMetadataButton" class="button secondary" type="button">Load metadata</button></div>
+            <div class="field-grid two"><label>Version<input id="musicMetadataVersion" placeholder="Radio edit, album version, remix"></label><label>ISRC<input id="musicMetadataIsrc" maxlength="80"></label></div>
+            <div class="field-grid two"><label>Composer<input id="musicMetadataComposer"></label><label>Lyricist<input id="musicMetadataLyricist"></label></div>
+            <div class="field-grid two"><label>Phonogram producer<input id="musicMetadataProducer"></label><label>Label<input id="musicMetadataLabel"></label></div>
+            <div class="field-grid two"><label>Source / acquisition<input id="musicMetadataSource" placeholder="Promo email, purchase, CD"></label><label>Source type<input id="musicMetadataSourceType"></label></div>
+            <label>Invoice or permission record<input id="musicMetadataRights" placeholder="Document number or protected folder reference"></label>
+            <label>Notes<textarea id="musicMetadataNotes" rows="3" maxlength="2000"></textarea></label>
+            <button id="saveMusicMetadataButton" class="button primary" type="submit">Save and verify metadata</button>
+          </form>
+          <p id="musicMetadataResult" class="action-result" aria-live="polite"></p>
+        </article>
+
+        <article id="musicMonthlyPanel" class="panel" data-operator-view="compliance">
+          <div class="panel-heading"><div><div class="eyebrow">MONTHLY CLOSE</div><h2>Close and retain reporting periods</h2></div><span id="musicClosureCount" class="count-badge">0</span></div>
+          <form id="musicMonthlyCloseForm" class="operator-form">
+            <div class="field-grid two"><label>Year<input id="musicCloseYear" type="number" min="2000" max="2200" required></label><label>Month<select id="musicCloseMonth"><option value="1">January</option><option value="2">February</option><option value="3">March</option><option value="4">April</option><option value="5">May</option><option value="6">June</option><option value="7">July</option><option value="8">August</option><option value="9">September</option><option value="10">October</option><option value="11">November</option><option value="12">December</option></select></label></div>
+            <small>Closing is idempotent: repeating the same month returns the existing verified export instead of rewriting it.</small>
+            <button id="closeMusicMonthButton" class="button primary" type="submit">Close month and verify export</button>
+          </form>
+          <div id="musicClosureList" class="record-list"><div class="empty-state">No closed months loaded.</div></div>
+          <p id="musicClosureResult" class="action-result" aria-live="polite"></p>
+        </article>
+
+        <article id="adItemsPanel" class="panel" data-operator-view="ads">
+          <div class="panel-heading"><div><div class="eyebrow">AD QUEUE</div><h2>Scheduled advertising items</h2></div><span id="adItemCount" class="count-badge">0</span></div>
+          <p class="card-copy">Queue an approved library track for a specific time. The station and system ad-insertion policies must both be enabled.</p>
+          <form id="adItemForm" class="operator-form">
+            <div class="field-grid two"><label>Track ID<input id="adItemTrackId" type="number" min="1" step="1" required></label><label>Due at<input id="adItemDueAt" type="datetime-local" required></label></div>
+            <label>Priority<input id="adItemPriority" type="number" step="1" value="0"></label>
+            <div class="button-row"><button id="enqueueAdItemButton" class="button primary" type="submit">Queue and verify ad item</button><button id="refreshAdsButton" class="button secondary" type="button">Refresh advertising</button></div>
+          </form>
+          <div id="adItemList" class="record-list"><div class="empty-state">Open Advertising to load scheduled items.</div></div>
+          <p id="adItemResult" class="action-result" aria-live="polite"></p>
+        </article>
+
+        <article id="adRuntimePanel" class="panel" data-operator-view="ads">
+          <div class="panel-heading"><div><div class="eyebrow">RUNTIME</div><h2>Due and upcoming breaks</h2></div><span id="adRuntimeState" class="mini-state">Not loaded</span></div>
+          <div id="adRuntimeList" class="record-list"><div class="empty-state">No advertising runtime loaded.</div></div>
+        </article>
+
+        <article id="adBreakSetPanel" class="panel" data-operator-view="ads">
+          <div class="panel-heading"><div><div class="eyebrow">BREAK CLOCK</div><h2>Ad break sets</h2></div><span id="adBreakSetCount" class="count-badge">0</span></div>
+          <form id="adBreakSetForm" class="operator-form">
+            <label>Edit break set<select id="adBreakSetSelect"><option value="0">Create a new break set</option></select></label>
+            <label>Name<input id="adBreakSetName" maxlength="120" required></label>
+            <label>Description<textarea id="adBreakSetDescription" rows="2" maxlength="1000"></textarea></label>
+            <div class="field-grid two"><label>Intro jingle track ID<input id="adBreakIntroTrackId" type="number" min="1" step="1"></label><label>Outro jingle track ID<input id="adBreakOutroTrackId" type="number" min="1" step="1"></label></div>
+            <label>Slots (JSON array)<textarea id="adBreakSlots" rows="5" spellcheck="false" placeholder='[{"slot_time":"09:00","day_of_week":"*","is_active":true}]'></textarea></label>
+            <label class="check-row"><input id="adBreakSetActive" type="checkbox" checked> Break set active</label>
+            <div class="button-row"><button id="saveAdBreakSetButton" class="button primary" type="submit">Save and verify break set</button><button id="deleteAdBreakSetButton" class="button danger" type="button" hidden>Delete break set</button></div>
+          </form>
+          <p id="adBreakSetResult" class="action-result" aria-live="polite"></p>
+        </article>
+
+        <article id="adCampaignPanel" class="panel" data-operator-view="ads">
+          <div class="panel-heading"><div><div class="eyebrow">CAMPAIGN RULES</div><h2>Advertising campaigns</h2></div><span id="adCampaignCount" class="count-badge">0</span></div>
+          <form id="adCampaignForm" class="operator-form">
+            <label>Edit campaign<select id="adCampaignSelect"><option value="0">Create a new campaign</option></select></label>
+            <label>Name<input id="adCampaignName" maxlength="120" required></label>
+            <div class="field-grid two"><label>Start date<input id="adCampaignStartDate" type="date"></label><label>End date<input id="adCampaignEndDate" type="date"></label></div>
+            <div class="field-grid two"><label>Day interval<input id="adCampaignDayInterval" type="number" min="1" step="1" value="1"></label><label>Daily repeat limit<input id="adCampaignDailyLimit" type="number" min="0" step="1" value="0"></label></div>
+            <label>Priority<input id="adCampaignPriority" type="number" step="1" value="0"></label>
+            <div class="field-grid two"><label>Break-set IDs<input id="adCampaignSlotIds" placeholder="1, 2"></label><label>Track IDs<input id="adCampaignTrackIds" placeholder="17, 23"></label></div>
+            <label>Notes<textarea id="adCampaignNotes" rows="3" maxlength="2000"></textarea></label>
+            <label class="check-row"><input id="adCampaignActive" type="checkbox" checked> Campaign active</label>
+            <div class="button-row"><button id="saveAdCampaignButton" class="button primary" type="submit">Save and verify campaign</button><button id="deleteAdCampaignButton" class="button danger" type="button" hidden>Delete campaign</button></div>
+          </form>
+          <p id="adCampaignResult" class="action-result" aria-live="polite"></p>
+        </article>
+
+        <article id="streamingHealthPanel" class="panel" data-operator-view="streaming">
+          <div class="panel-heading"><div><div class="eyebrow">ORIGIN STATUS</div><h2>Streaming health</h2></div><span id="streamingHealthState" class="mini-state">Not checked</span></div>
+          <p class="card-copy">Check the configured origin through the authenticated server-side health endpoint. Stream credentials are never returned to this page.</p>
+          <div class="button-row"><button id="refreshStreamingHealthButton" class="button primary" type="button">Check origin now</button></div>
+          <div id="streamingHealthDetails" class="record-list"><div class="empty-state">Open Streaming to check the origin.</div></div>
+          <p id="streamingHealthResult" class="action-result" aria-live="polite"></p>
+        </article>
+
+        <article id="qualityOutputsPanel" class="panel compliance-wide" data-operator-view="streaming">
+          <div class="panel-heading"><div><div class="eyebrow">8 ADDITIONAL OUTPUTS</div><h2>Quality outputs</h2></div><span id="qualityOutputsState" class="mini-state">Not loaded</span></div>
+          <p class="card-copy">Operate the approved 16-mount system: six suffix-free music mounts use Opus 192 Normal, every music station adds Opus 32 Low, and only Classical plus Cazz add lossless FLAC. That is 14 mounts from this PC; `/en` and `/fr` remain the two independent AI streams. Every quality variant inherits protected source credentials and the same authoritative program timeline.</p>
+          <div class="policy-callout"><b>The suffix-free mount is the normal listener endpoint.</b><small>Public title and artist metadata remain suppressed. Compliance records one played item and records its delivered variants without duplicate broadcast counting.</small></div>
+          <form id="qualityOutputsForm" class="operator-form">
+            <div class="field-grid two"><label>Verified origin source capacity<input id="qualityOriginSourceCapacity" type="number" min="16" max="512" step="1" value="20"></label><label>System plan<input value="14 local music mounts + 2 external AI mounts = 16" disabled></label></div>
+            <div id="qualityOutputsList" class="quality-output-grid"><div class="empty-state">Open Streaming to load quality channels.</div></div>
+            <div class="button-row"><button id="prepare16MountPlanButton" class="button secondary" type="button">Select approved 16-mount plan</button><button id="saveQualityOutputsButton" class="button primary" type="submit">Save and verify quality outputs</button><button id="applyQualityOutputsButton" class="button secondary" type="button">Apply saved outputs now</button><button id="diagnoseQualityOutputsButton" class="button secondary" type="button">Run diagnostics</button><button id="refreshQualityOutputsButton" class="button secondary" type="button">Reload settings</button></div>
+          </form>
+          <div id="qualityOutputsDiagnostics" class="record-list"><div class="empty-state">Run diagnostics to check the AI bridge, station runtimes, and origin capacity.</div></div>
+          <p id="qualityOutputsResult" class="action-result" aria-live="polite"></p>
+        </article>
+
+        <article id="streamingFeaturesPanel" class="panel" data-operator-view="streaming">
+          <div class="panel-heading"><div><div class="eyebrow">SERVER FEATURES</div><h2>Origin configuration</h2></div><span id="streamingSecretState" class="mini-state">Secrets hidden</span></div>
+          <form id="streamingFeaturesForm" class="operator-form">
+            <div class="field-grid two"><label>Public stream base URL<input id="streamPublicBaseUrl" type="url" placeholder="https://radio.example.org"></label><label>Radio website URL<input id="radioWebsiteUrl" type="url" placeholder="https://example.org"></label></div>
+            <label>Origin administrator user<input id="rocketAdminUser" autocomplete="username"></label>
+            <div class="field-grid two"><label>New administrator password<input id="rocketAdminPassword" type="password" autocomplete="new-password" placeholder="Leave blank to keep current secret"></label><label>New health password<input id="rocketHealthPassword" type="password" autocomplete="new-password" placeholder="Leave blank to keep current secret"></label></div>
+            <div class="streaming-feature-grid">
+              <label class="check-row"><input id="rocketStatusPageEnabled" type="checkbox"> Status and health endpoints</label>
+              <label class="check-row"><input id="rocketHlsEnabled" type="checkbox"> HLS publication</label>
+              <label class="check-row"><input id="rocketFallbacksEnabled" type="checkbox"> Origin fallbacks</label>
+              <label class="check-row"><input id="rocketListenerAuthEnabled" type="checkbox"> Listener authentication</label>
+              <label class="check-row"><input id="rocketAdInsertionEnabled" type="checkbox"> Ad insertion</label>
+              <label class="check-row"><input id="rocketAccessLogEnabled" type="checkbox"> Access log</label>
+              <label class="check-row"><input id="rocketPlaylistLogEnabled" type="checkbox"> Playlist log</label>
+            </div>
+            <p class="card-copy">Saving updates the application policy and verifies it by reading the values back. Origin-side configuration remains a separate deployment operation.</p>
+            <button id="saveStreamingFeaturesButton" class="button primary" type="submit">Save and verify origin policy</button>
+          </form>
+          <p id="streamingFeaturesResult" class="action-result" aria-live="polite"></p>
+        </article>
+
+        <article id="streamingManagementPanel" class="panel compliance-wide" data-operator-view="streaming">
+          <div class="panel-heading"><div><div class="eyebrow">LIVE ORIGIN CONTROL</div><h2>Listeners, source, and midroll</h2></div><span id="streamingMountState" class="mini-state">No mount selected</span></div>
+          <p class="card-copy">These actions operate on the selected station only. Listener moves, source kicks, and midroll insertion require a second click within 20 seconds.</p>
+          <form id="streamingManagementForm" class="operator-form">
+            <div class="field-grid two"><label>Source mount<input id="streamingMount" placeholder="/lofi"></label><label>Move destination<input id="streamingDestination" placeholder="/lofi"></label></div>
+            <div class="button-row"><button id="moveStreamingListenersButton" class="button secondary" type="button">Arm listener move</button><button id="kickStreamingSourceButton" class="button danger" type="button">Arm source kick</button></div>
+            <label>Midroll ads (JSON array)<textarea id="streamingMidrollAds" rows="4" spellcheck="false" placeholder='[{"uri":"https://approved.example/ad.mp3"}]'></textarea></label>
+            <div class="button-row"><button id="insertStreamingMidrollButton" class="button danger" type="button">Arm midroll insertion</button></div>
+          </form>
+          <div class="policy-callout"><b>Metadata suppression remains enforced.</b><small>This operator surface does not publish song metadata to the public stream.</small></div>
+          <p id="streamingManagementResult" class="action-result" aria-live="polite"></p>
+        </article>
+
+        <article id="guestRoomPanel" class="panel guest-room-panel" data-operator-view="onair">
+          <div class="panel-heading">
+            <div><div class="eyebrow">REMOTE CONTRIBUTION</div><h2>Guest room</h2></div>
+            <div id="guestRoomState" class="mini-state">Safe off-air</div>
+          </div>
+          <p class="card-copy">Invite up to four guests. Everyone enters the lobby off-air; you decide who listeners hear.</p>
+          <div class="button-row">
+            <button id="createGuestInviteButton" class="button primary" type="button">Create one-time guest link</button>
+            <button id="allGuestsOffAirButton" class="button danger" type="button">All guests off air</button>
+          </div>
+          <p id="guestInviteResult" class="action-result" aria-live="polite"></p>
+          <div id="guestRoomParticipants" class="guest-room-participants"><p class="card-copy">Join a studio to manage remote guests.</p></div>
+          <div class="guest-room-safety">
+            <b>Private talkback</b><small>Available only while your host microphone is off-air. Hold the button while speaking.</small>
+            <button id="guestTalkbackButton" class="button secondary" type="button">Hold to talk privately</button>
+          </div>
+          <div class="button-row">
+            <button id="guestRecordButton" class="button secondary" type="button">Request consent and record</button>
+            <button id="guestStopRecordButton" class="button danger" type="button" hidden>Stop recording</button>
+          </div>
+          <p id="guestRecordingResult" class="action-result" aria-live="polite"></p>
+        </article>
+
+        <article id="guestRecordingLibraryPanel" class="panel" data-operator-view="onair">
+          <div class="panel-heading"><div><div class="eyebrow">GUEST ARCHIVE</div><h2>Guest recordings</h2></div><span id="guestRecordingCount" class="count-badge">0</span></div>
+          <p class="card-copy">Review recordings for the selected station. Downloads remain authenticated; deletion requires a second click within 20 seconds.</p>
+          <div class="button-row"><button id="refreshGuestRecordingsButton" class="button secondary" type="button">Refresh recordings</button></div>
+          <div id="guestRecordingList" class="record-list"><div class="empty-state">No guest recordings loaded.</div></div>
+          <p id="guestRecordingLibraryResult" class="action-result" aria-live="polite"></p>
+        </article>
+
+        <article class="panel activity-panel" data-operator-view="diagnostics">
+          <div class="panel-heading"><div><div class="eyebrow">CONFIRMATION</div><h2>Operator activity</h2></div><button id="clearActivityButton" class="button ghost compact" type="button">Clear</button></div>
+          <ol id="activityList" class="activity-list"></ol>
+        </article>
+      </section>
+      </main>
+    </div>
+  </div>
+
+  <div id="busyOverlay" class="busy-overlay" hidden><div class="busy-card"><span class="spinner"></span><b id="busyTitle">Working...</b><small id="busyDetail">Waiting for verified state</small></div></div>
+  <div id="toastRegion" class="toast-region" aria-live="assertive"></div>
+    <script src="/static/onair/app.js?v=39" defer></script>
+    <script src="/static/onair/guest-room.js?v=6" defer></script>
+    <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js', { scope: '/' });</script>
+</body>
+</html>

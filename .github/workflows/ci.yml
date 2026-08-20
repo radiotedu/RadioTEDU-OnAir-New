@@ -1,0 +1,49 @@
+name: verify
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Install FFmpeg tools
+        run: choco install ffmpeg --yes --no-progress
+      - name: Install Python dependencies
+        run: python -m pip install --upgrade pip && python -m pip install --only-binary=:all: -r requirements.lock
+      - name: Verify Python dependency graph
+        run: python -m pip check
+      - name: Complete Python regression suite
+        run: python -m pytest -q --disable-warnings
+      - name: JavaScript tests
+        shell: powershell
+        run: |
+          Get-ChildItem tests/js/*.test.cjs | ForEach-Object {
+            node --test $_.FullName
+            if ($LASTEXITCODE -ne 0) { throw "JavaScript test failed: $($_.FullName)" }
+          }
+      - name: Browser JavaScript syntax
+        shell: powershell
+        run: |
+          Get-ChildItem app/static -Recurse -Filter *.js | ForEach-Object {
+            node --check $_.FullName
+            if ($LASTEXITCODE -ne 0) { throw "JavaScript syntax check failed: $($_.FullName)" }
+          }
+      - name: Desktop lifecycle tests
+        run: dotnet test desktop/CleanroomRadio.Desktop.sln --configuration Release --verbosity minimal

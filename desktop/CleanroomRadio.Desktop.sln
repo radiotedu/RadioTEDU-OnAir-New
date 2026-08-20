@@ -1,0 +1,45 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CleanroomRadio.Desktop.Common", "src\CleanroomRadio.Desktop.Common\CleanroomRadio.Desktop.Common.csproj", "{A5F6A9AD-2A50-4E5B-9E8E-2D4A4A6E8DB1}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CleanroomRadio.Agent", "src\CleanroomRadio.Agent\CleanroomRadio.Agent.csproj", "{C5E4B5F1-8F69-4E1B-84C8-8A7C7D6FB8E4}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CleanroomRadio.Shell", "src\CleanroomRadio.Shell\CleanroomRadio.Shell.csproj", "{D34707C5-FEAA-49D2-AAB6-E6B413CF9D4D}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CleanroomRadio.ServiceHost", "src\CleanroomRadio.ServiceHost\CleanroomRadio.ServiceHost.csproj", "{7A1D6058-793A-42CB-89F6-1B35EB8925C1}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CleanroomRadio.Desktop.Tests", "tests\CleanroomRadio.Desktop.Tests\CleanroomRadio.Desktop.Tests.csproj", "{E48B6E5C-9B4A-4E7B-8A0C-1CE7E0F4E6C3}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{A5F6A9AD-2A50-4E5B-9E8E-2D4A4A6E8DB1}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A5F6A9AD-2A50-4E5B-9E8E-2D4A4A6E8DB1}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A5F6A9AD-2A50-4E5B-9E8E-2D4A4A6E8DB1}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A5F6A9AD-2A50-4E5B-9E8E-2D4A4A6E8DB1}.Release|Any CPU.Build.0 = Release|Any CPU
+		{C5E4B5F1-8F69-4E1B-84C8-8A7C7D6FB8E4}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{C5E4B5F1-8F69-4E1B-84C8-8A7C7D6FB8E4}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{C5E4B5F1-8F69-4E1B-84C8-8A7C7D6FB8E4}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{C5E4B5F1-8F69-4E1B-84C8-8A7C7D6FB8E4}.Release|Any CPU.Build.0 = Release|Any CPU
+		{D34707C5-FEAA-49D2-AAB6-E6B413CF9D4D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{D34707C5-FEAA-49D2-AAB6-E6B413CF9D4D}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{D34707C5-FEAA-49D2-AAB6-E6B413CF9D4D}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{D34707C5-FEAA-49D2-AAB6-E6B413CF9D4D}.Release|Any CPU.Build.0 = Release|Any CPU
+		{7A1D6058-793A-42CB-89F6-1B35EB8925C1}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{7A1D6058-793A-42CB-89F6-1B35EB8925C1}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{7A1D6058-793A-42CB-89F6-1B35EB8925C1}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{7A1D6058-793A-42CB-89F6-1B35EB8925C1}.Release|Any CPU.Build.0 = Release|Any CPU
+		{E48B6E5C-9B4A-4E7B-8A0C-1CE7E0F4E6C3}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{E48B6E5C-9B4A-4E7B-8A0C-1CE7E0F4E6C3}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{E48B6E5C-9B4A-4E7B-8A0C-1CE7E0F4E6C3}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{E48B6E5C-9B4A-4E7B-8A0C-1CE7E0F4E6C3}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+EndGlobal

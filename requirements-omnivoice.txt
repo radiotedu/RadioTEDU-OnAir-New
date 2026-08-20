@@ -1,0 +1,9 @@
+# OmniVoice runs in a separate venv because it needs a newer transformers
+# stack than qwen-tts.
+
+torch>=2.11.0
+torchaudio>=2.11.0
+soundfile>=0.13.1
+transformers==5.5.3
+huggingface_hub==1.10.1
+omnivoice==0.1.3

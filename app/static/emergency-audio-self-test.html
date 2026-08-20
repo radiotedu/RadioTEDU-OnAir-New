@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RadioTEDU Emergency Source</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: Inter, system-ui, sans-serif;
+      background: #090b10;
+      color: #f6f7fb;
+    }
+    body {
+      min-height: 100vh;
+      margin: 0;
+      display: grid;
+      place-items: center;
+      background:
+        radial-gradient(circle at 50% 25%, rgba(224, 29, 49, .22), transparent 42%),
+        #090b10;
+    }
+    main {
+      width: min(680px, calc(100% - 48px));
+      padding: 48px;
+      border: 1px solid #b51e31;
+      border-radius: 18px;
+      background: #15171d;
+      box-shadow: 0 24px 80px rgba(0, 0, 0, .48);
+    }
+    h1 { margin: 0 0 12px; font-size: clamp(2rem, 6vw, 4rem); }
+    p { color: #bec3cf; line-height: 1.6; }
+    .status {
+      display: inline-flex;
+      gap: 10px;
+      align-items: center;
+      margin: 22px 0;
+      padding: 10px 14px;
+      border-radius: 999px;
+      background: #24151a;
+      color: #ff6a79;
+      font-weight: 800;
+    }
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: currentColor;
+      box-shadow: 0 0 18px currentColor;
+    }
+    button {
+      min-height: 48px;
+      padding: 0 22px;
+      border: 0;
+      border-radius: 10px;
+      background: #e01d31;
+      color: white;
+      font: inherit;
+      font-weight: 800;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <p>RADIOTEDU · OPERATOR READINESS TOOL</p>
+    <h1>Emergency audio self-test</h1>
+    <p>
+      This page emits a low-volume two-tone signal so the operator can verify
+      arbitrary browser-page audio takeover without depending on an external
+      website. It never starts or stops a station itself.
+    </p>
+    <div class="status"><span class="dot"></span><span id="status">Starting test tone…</span></div>
+    <br>
+    <button id="toggle" type="button">Stop test tone</button>
+  </main>
+  <script>
+    let context;
+    let gain;
+    let oscillators = [];
+
+    function stopTone() {
+      oscillators.forEach((oscillator) => {
+        try { oscillator.stop(); } catch (_error) {}
+      });
+      oscillators = [];
+      document.querySelector('#status').textContent = 'Test tone stopped';
+      document.querySelector('#toggle').textContent = 'Start test tone';
+    }
+
+    async function startTone() {
+      if (!context) {
+        context = new AudioContext();
+        gain = context.createGain();
+        gain.gain.value = 0.035;
+        gain.connect(context.destination);
+      }
+      await context.resume();
+      if (oscillators.length) return;
+      [440, 660].forEach((frequency) => {
+        const oscillator = context.createOscillator();
+        oscillator.type = 'sine';
+        oscillator.frequency.value = frequency;
+        oscillator.connect(gain);
+        oscillator.start();
+        oscillators.push(oscillator);
+      });
+      document.querySelector('#status').textContent = 'Test tone playing';
+      document.querySelector('#toggle').textContent = 'Stop test tone';
+    }
+
+    document.querySelector('#toggle').addEventListener('click', () => {
+      if (oscillators.length) stopTone();
+      else startTone();
+    });
+    startTone().catch(() => {
+      document.querySelector('#status').textContent = 'Click Start test tone';
+      document.querySelector('#toggle').textContent = 'Start test tone';
+    });
+  </script>
+</body>
+</html>

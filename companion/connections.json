@@ -1,0 +1,37 @@
+{
+  "streaming_pc": {
+    "lan_ip": "10.10.1.200",
+    "onair_api": "http://10.10.1.200:18110",
+    "origin_host": "10.98.98.75",
+    "public_base_url": "http://stream.radiotedu.com:11154"
+  },
+  "components": [
+    {
+      "id": "juke_local",
+      "label": "JukeLocal",
+      "service_name": "RadioTEDU.JukeLocalMediaAgent",
+      "health_urls": ["http://127.0.0.1:3210/v1/health"],
+      "ui_url": "http://127.0.0.1:3210/v1/status"
+    },
+    {
+      "id": "voting",
+      "label": "Voting",
+      "service_name": "RadioTEDUVotingRadio",
+      "health_urls": ["http://127.0.0.1:4317/api/health"],
+      "ui_url": "http://127.0.0.1:4317"
+    },
+    {
+      "id": "ai_host",
+      "label": "AI Host Runtime",
+      "service_name": "RadioTEDU.SharedAI",
+      "health_urls": ["http://127.0.0.1:11434/api/tags"],
+      "ui_url": "http://127.0.0.1:11434/api/tags"
+    },
+    {
+      "id": "ai_radio",
+      "label": "AI Host Stations",
+      "service_name": "RadioTEDU.AIStreams",
+      "health_urls": ["http://127.0.0.1:8765/health", "http://127.0.0.1:8766/health"]
+    }
+  ]
+}
