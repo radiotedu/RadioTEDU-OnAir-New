@@ -68,7 +68,7 @@ The operator changes the rotation key in **On Air → Deterministic rotation key
 6. Add or update a test proving persistence, read-back, permissions, deterministic ordering, and rollback behavior.
 7. Run Python compilation, JavaScript syntax checking, focused Python tests, and all JavaScript tests.
 8. Bump static asset versions when HTML, CSS, or JavaScript changes.
-9. Restart `RadioTEDU.OnAir.Supervisor` only after tests pass. Confirm delayed automatic startup remains enabled.
+9. Restart `RadioTEDU.OnAir.Supervisor` only after tests pass. Confirm immediate automatic startup remains enabled.
 10. Verify the UI from `http://127.0.0.1:18110/`, then verify saved values through API read-back.
 11. For live audio, canary one station family first, then verify all 14 local mounts sequentially or with bounded concurrency. A successful TCP connection is insufficient; require decoded audio continuity and the expected codec.
 12. Verify `/en` and `/fr` only as external listener streams; never create their source connections here.

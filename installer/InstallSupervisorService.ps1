@@ -65,10 +65,10 @@ if ($Action -eq "Prepare") {
     $binaryPath = '"' + $supervisorPath + '" --service-name ' + $ServiceName + ' --config "' + $configPath + '"'
     $account = "NT SERVICE\$ServiceName"
     if ($null -eq $service) {
-        Invoke-ServiceControl create $ServiceName "binPath= $binaryPath" "start= delayed-auto" "obj= $account" "DisplayName= $productName Supervisor"
+        Invoke-ServiceControl create $ServiceName "binPath= $binaryPath" "start= auto" "obj= $account" "DisplayName= $productName Supervisor"
     }
     else {
-        Invoke-ServiceControl config $ServiceName "binPath= $binaryPath" "start= delayed-auto" "obj= $account"
+        Invoke-ServiceControl config $ServiceName "binPath= $binaryPath" "start= auto" "obj= $account"
     }
 
     Invoke-ServiceControl description $ServiceName "Supervises the local $productName backend and isolated station workers."

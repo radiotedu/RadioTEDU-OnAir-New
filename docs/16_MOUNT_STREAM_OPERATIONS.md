@@ -27,7 +27,7 @@ sc.exe query RadioTEDU.OnAir.Supervisor
 
 Expected service state:
 
-- start type is delayed automatic;
+- start type is automatic (not delayed), so source startup begins during boot;
 - the service runs as the machine-owned supervisor, not as a desktop login task;
 - failure recovery restarts the supervisor;
 - all six `broadcast_autostart_enabled` settings are `true`;

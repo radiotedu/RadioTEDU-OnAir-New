@@ -29,7 +29,7 @@ App boundary: `RadioTEDU-OnAir-Radio` only; the older `RadioTEDU-OnAir` tree is 
 
 ## 4. Harden continuity and recovery
 
-- [x] Install delayed-auto LocalSystem supervisors with bounded recovery for OnAir and AI.
+- [x] Install the OnAir LocalSystem supervisor as immediate automatic with bounded recovery; auxiliary agents may remain delayed-auto.
 - [x] Add paced source writes, bounded quality queues, stale-audio drop/resync, last-valid AI playlist startup, and station isolation.
 - [x] Use immutable content-addressed AI playlists, BOM-tolerant config reads, concurrent atomic status writes with bounded Windows sharing retries, and background catalog refresh.
 - [x] Index the mature AI announcement cache off the one-second station scheduler; prevent the 6,945-file metadata scan from blocking track advance/recovery and verify bounded scheduler/PCM ages on all six installed timelines.

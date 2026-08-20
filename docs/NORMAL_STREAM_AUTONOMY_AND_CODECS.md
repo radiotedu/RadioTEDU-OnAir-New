@@ -41,7 +41,7 @@ stop decoded playout or trigger destructive whole-station restart loops.
 
 `RadioTEDU.OnAir.Supervisor` is the machine-owned service. In its normal state:
 
-- Windows starts it automatically after boot with delayed automatic startup.
+- Windows starts it during boot with immediate automatic startup.
 - It depends on TCP/IP and DNS so boot does not race basic networking.
 - Windows restarts service failures after 5, 15, and 60 seconds.
 - The six station-level `broadcast_autostart_enabled` settings restore normal
@@ -51,7 +51,7 @@ stop decoded playout or trigger destructive whole-station restart loops.
 - A short bounded PCM queue bridges transient source-server interruptions.
 
 The one-time 2026-08-13 cooldown task is SYSTEM-owned, uses **Start when
-available**, and restores delayed automatic startup before starting the service.
+available**, and restores immediate automatic startup before starting the service.
 This means a power interruption during the cooldown does not lose the restart.
 
 ## Operator UI workflow
