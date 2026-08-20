@@ -1,0 +1,46 @@
+# RadioTEDU OnAir deterministic Windows test/runtime dependency lock.
+#
+# Generated from requirements.txt on 2026-08-08 using the dependency graph
+# that passed the complete bounded regression suite and packaged smoke test.
+# Update this file deliberately together with requirements.txt and rerun all
+# release gates.  CI and production packaging install this file, never the
+# floating direct-dependency list.
+
+annotated-doc==0.0.4
+annotated-types==0.7.0
+anyio==4.12.1
+bcrypt==4.0.1
+certifi==2024.8.30
+cffi==2.0.0
+charset-normalizer==3.3.2
+click==8.2.1
+colorama==0.4.6
+cryptography==49.0.0
+ecdsa==0.19.2
+fastapi==0.128.0
+h11==0.16.0
+httpcore==1.0.9
+httpx==0.28.1
+idna==3.10
+iniconfig==2.3.0
+packaging==25.0
+passlib==1.7.4
+pluggy==1.6.0
+pyasn1==0.6.3
+pycparser==2.23
+pydantic==2.12.5
+pydantic-core==2.41.5
+pygments==2.19.2
+pytest==9.1.1
+python-jose==3.5.0
+python-multipart==0.0.21
+requests==2.32.3
+rsa==4.9.1
+six==1.17.0
+starlette==0.50.0
+typing-extensions==4.15.0
+typing-inspection==0.4.2
+tzdata==2025.3
+urllib3==2.2.3
+uvicorn==0.40.0
+websockets==16.0
