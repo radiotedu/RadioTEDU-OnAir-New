@@ -34,6 +34,10 @@ The unsuffixed mount is always the normal stream. Low-bandwidth streams use `-lo
 
 This PC owns 14 local music sources: six normal, six low, and two FLAC. The externally operated `/en` and `/fr` AI sources bring the complete RadioTEDU plan to 16 mounts. Retired `-normal`, `-high`, and non-approved FLAC branches are removed during commissioning.
 
+### HLS readiness
+
+HLS is represented in **Settings → HLS** as a future delivery option and is intentionally locked **Off**. The reserved profile is **HE-AAC at 192 kbps**. No `.m3u8` playlist, segment writer, listener route, encoder branch, or additional origin source is created until an HLS runtime is implemented, tested, and separately authorized.
+
 ## Designed to survive a reboot
 
 The stream is not tied to the desktop window. `RadioTEDU.OnAir.Supervisor` is an immediate automatic Windows service with failure recovery. At machine startup it launches the backend, restores the six operator-authorized station workers, and starts the actual Icecast source pipelines—even if nobody signs in or opens the app.

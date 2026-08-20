@@ -509,6 +509,21 @@
           <p id="passwordResult" class="action-result" aria-live="polite"></p>
         </article>
 
+        <article id="hlsSettingsPanel" class="panel configuration-panel" data-operator-view="settings">
+          <div class="panel-heading"><div><div class="eyebrow">PLANNED DELIVERY</div><h2>HLS</h2></div><span id="hlsSettingsState" class="mini-state">Off · planned</span></div>
+          <p class="card-copy">Reserve the future HLS policy without publishing a playlist or media segment. Current Icecast mounts and the approved 16-mount plan are unchanged.</p>
+          <form id="hlsSettingsForm" class="operator-form">
+            <label class="switch-row"><span><b>Enable HLS</b><small>Unavailable until an HLS runtime is implemented and separately authorized.</small></span><input id="hlsEnabled" type="checkbox" disabled></label>
+            <div class="field-grid two">
+              <label>Planned codec<select id="hlsCodecProfile" disabled><option value="he_aac_192">HE-AAC · 192 kbps</option></select></label>
+              <label>Runtime status<input id="hlsRuntimeStatus" value="Not installed" disabled></label>
+            </div>
+            <div class="policy-callout"><b>HLS is not active.</b><small>The saved guard remains Off. No `.m3u8` playlist, segment writer, listener endpoint, or additional source is created.</small></div>
+            <button id="saveHlsSettingsButton" class="button secondary" type="submit">Save disabled HLS policy</button>
+          </form>
+          <p id="hlsSettingsResult" class="action-result" aria-live="polite"></p>
+        </article>
+
         <article id="userAdminPanel" class="panel configuration-panel account-panel" data-operator-view="settings" hidden>
           <div class="panel-heading"><div><div class="eyebrow">ACCESS CONTROL</div><h2>Operator accounts</h2></div><span id="userAdminCount" class="count-badge">0</span></div>
           <p class="card-copy">Create, update, disable, and reset operator accounts. Role templates are resolved by the backend and every change is audited.</p>
@@ -880,7 +895,6 @@
             <div class="field-grid two"><label>New administrator password<input id="rocketAdminPassword" type="password" autocomplete="new-password" placeholder="Leave blank to keep current secret"></label><label>New health password<input id="rocketHealthPassword" type="password" autocomplete="new-password" placeholder="Leave blank to keep current secret"></label></div>
             <div class="streaming-feature-grid">
               <label class="check-row"><input id="rocketStatusPageEnabled" type="checkbox"> Status and health endpoints</label>
-              <label class="check-row"><input id="rocketHlsEnabled" type="checkbox"> HLS publication</label>
               <label class="check-row"><input id="rocketFallbacksEnabled" type="checkbox"> Origin fallbacks</label>
               <label class="check-row"><input id="rocketListenerAuthEnabled" type="checkbox"> Listener authentication</label>
               <label class="check-row"><input id="rocketAdInsertionEnabled" type="checkbox"> Ad insertion</label>
@@ -948,7 +962,7 @@
 
   <div id="busyOverlay" class="busy-overlay" hidden><div class="busy-card"><span class="spinner"></span><b id="busyTitle">Working...</b><small id="busyDetail">Waiting for verified state</small></div></div>
   <div id="toastRegion" class="toast-region" aria-live="assertive"></div>
-    <script src="/static/onair/app.js?v=39" defer></script>
+    <script src="/static/onair/app.js?v=40" defer></script>
     <script src="/static/onair/guest-room.js?v=6" defer></script>
     <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js', { scope: '/' });</script>
 </body>

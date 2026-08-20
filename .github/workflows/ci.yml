@@ -52,6 +52,7 @@ jobs:
             tests/unit/test_readme_parity_runtime_md.py `
             tests/unit/test_runtime_launcher_contract.py `
             tests/unit/test_frontend_api_route_coverage.py `
+            tests/unit/test_hls_settings.py `
             tests/unit/test_installer_contract.py `
             tests/unit/test_installer_data_acl.py `
             tests/integration/test_process_station_worker_lifecycle.py `

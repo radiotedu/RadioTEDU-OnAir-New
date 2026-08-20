@@ -185,7 +185,16 @@ def commission(
         # Origin capacity is evidence maintained by diagnostics. Preserve an
         # existing verified value; commissioning must neither manufacture nor
         # erase it while changing the local output plan.
-        updates: dict[str, str] = {}
+        updates: dict[str, str] = {
+            # HLS is a future capability only. Commissioning must explicitly
+            # neutralize the historical Rocket toggle so a machine upgrade
+            # cannot publish playlists or segments before runtime support is
+            # implemented and separately authorized.
+            "hls_enabled": "false",
+            "hls_codec_profile": "he_aac_192",
+            "hls_bitrate_kbps": "192",
+            "rocket_hls_enabled": "false",
+        }
         for key, raw in current.items():
             if not (
                 str(key).startswith("station_")

@@ -81,6 +81,7 @@ const state = {
   adCampaigns: [],
   selectedAdCampaignId: 0,
   adDeleteArmed: {},
+  hlsSettings: null,
   streamingFeatures: null,
   streamingHealth: null,
   qualityOutputs: null,
@@ -4975,12 +4976,52 @@ async function deleteAdvertisingEntity(kind) {
   } finally { setBusy(false); }
 }
 
+function renderHlsSettings() {
+  const hls = state.hlsSettings || {};
+  $('hlsEnabled').checked = false;
+  $('hlsEnabled').disabled = true;
+  $('hlsCodecProfile').value = 'he_aac_192';
+  $('hlsRuntimeStatus').value = hls.runtime_available ? 'Available but disabled' : 'Not installed';
+  $('hlsSettingsState').textContent = `Off · ${hls.codec || 'HE-AAC'} ${Number(hls.bitrate_kbps || 192)} planned`;
+}
+
+async function loadHlsSettings() {
+  state.hlsSettings = await api('/api/settings/hls');
+  renderHlsSettings();
+  return state.hlsSettings;
+}
+
+async function saveHlsSettings(event) {
+  event.preventDefault();
+  setBusy(true, 'Saving disabled HLS policy...', 'Verifying that no HLS runtime or playlist can start');
+  setResult('hlsSettingsResult');
+  try {
+    await api('/api/settings/hls', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: false, codec_profile: 'he_aac_192' }),
+    });
+    const stored = await loadHlsSettings();
+    if (stored.enabled || stored.runtime_available || stored.codec_profile !== 'he_aac_192' || Number(stored.bitrate_kbps) !== 192) {
+      throw new Error('HLS disabled policy did not match read-back');
+    }
+    const message = 'Verified: HLS remains Off; HE-AAC 192 kbps is reserved as the future profile and no playlist is active.';
+    setResult('hlsSettingsResult', message, 'success');
+    logActivity(message);
+  } catch (error) {
+    const message = errorMessage(error);
+    setResult('hlsSettingsResult', message, 'error');
+    logActivity(`HLS policy save failed: ${message}`, 'error');
+  } finally {
+    setBusy(false);
+  }
+}
+
 const STREAMING_FEATURE_FIELDS = Object.freeze({
   stream_public_base_url: 'streamPublicBaseUrl',
   radio_website_url: 'radioWebsiteUrl',
   rocket_admin_user: 'rocketAdminUser',
   rocket_status_page_enabled: 'rocketStatusPageEnabled',
-  rocket_hls_enabled: 'rocketHlsEnabled',
   rocket_fallbacks_enabled: 'rocketFallbacksEnabled',
   rocket_listener_auth_enabled: 'rocketListenerAuthEnabled',
   rocket_ad_insertion_enabled: 'rocketAdInsertionEnabled',
@@ -5221,7 +5262,6 @@ function streamingFeaturePayload() {
     rocket_admin_password: $('rocketAdminPassword').value,
     rocket_health_password: $('rocketHealthPassword').value,
     rocket_status_page_enabled: $('rocketStatusPageEnabled').checked,
-    rocket_hls_enabled: $('rocketHlsEnabled').checked,
     rocket_fallbacks_enabled: $('rocketFallbacksEnabled').checked,
     rocket_listener_auth_enabled: $('rocketListenerAuthEnabled').checked,
     rocket_ad_insertion_enabled: $('rocketAdInsertionEnabled').checked,
@@ -5420,6 +5460,9 @@ async function loadOperatorViewData(view) {
   if (view === 'ads') {
     try { await loadAdvertising(); } catch (error) { setResult('adItemResult', errorMessage(error), 'error'); }
   }
+  if (view === 'settings') {
+    try { await loadHlsSettings(); } catch (error) { setResult('hlsSettingsResult', errorMessage(error), 'error'); }
+  }
   if (view === 'streaming') {
     try { await loadStreamingFeatures(); } catch (error) { setResult('streamingFeaturesResult', errorMessage(error), 'error'); }
     try { await loadQualityOutputs(); } catch (error) { setResult('qualityOutputsResult', errorMessage(error), 'error'); }
@@ -5604,6 +5647,7 @@ function bindEvents() {
   $('adCampaignSelect').addEventListener('change', () => { state.selectedAdCampaignId = Number($('adCampaignSelect').value || 0); clearAdDeleteArms(); renderAdCampaignEditor(); setResult('adCampaignResult'); });
   $('adCampaignForm').addEventListener('submit', saveAdCampaign);
   $('deleteAdCampaignButton').addEventListener('click', () => deleteAdvertisingEntity('campaign'));
+  $('hlsSettingsForm').addEventListener('submit', saveHlsSettings);
   $('streamingFeaturesForm').addEventListener('submit', saveStreamingFeatures);
   $('qualityOutputsForm').addEventListener('submit', saveQualityOutputs);
   $('prepare16MountPlanButton').addEventListener('click', prepareApproved16MountPlan);

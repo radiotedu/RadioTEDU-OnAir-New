@@ -117,6 +117,23 @@ def verify(database: Path) -> dict[str, object]:
         ]
         if unexpected_autostarts:
             issues.append("retired station autostart is enabled")
+        hls_enabled = _truthy(system_settings.get("hls_enabled", "false"))
+        legacy_hls_enabled = _truthy(
+            system_settings.get("rocket_hls_enabled", "false")
+        )
+        hls_profile = str(
+            system_settings.get("hls_codec_profile", "he_aac_192")
+        )
+        try:
+            hls_bitrate = int(
+                float(system_settings.get("hls_bitrate_kbps", "192"))
+            )
+        except (TypeError, ValueError):
+            hls_bitrate = 0
+        if hls_enabled or legacy_hls_enabled:
+            issues.append("HLS must remain disabled until runtime support is installed")
+        if hls_profile != "he_aac_192" or hls_bitrate != 192:
+            issues.append("planned HLS profile must remain HE-AAC 192 kbps")
         try:
             origin_capacity = int(
                 float(system_settings.get("quality_outputs_origin_source_capacity", "0"))
@@ -131,6 +148,13 @@ def verify(database: Path) -> dict[str, object]:
         "system_mount_count": 16,
         "origin_source_capacity": origin_capacity,
         "enabled_quality_mount_count": len(enabled_quality_mounts),
+        "hls": {
+            "enabled": hls_enabled,
+            "legacy_origin_enabled": legacy_hls_enabled,
+            "runtime_available": False,
+            "codec_profile": hls_profile,
+            "bitrate_kbps": hls_bitrate,
+        },
         "channels": channels,
         "issues": issues,
     }

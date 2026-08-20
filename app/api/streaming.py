@@ -1,5 +1,6 @@
 import base64
 import json
+from typing import Literal
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -43,6 +44,10 @@ EXTERNAL_AI_MOUNT_COUNT = 2
 SYSTEM_MOUNT_COUNT = LOCAL_MUSIC_MOUNT_COUNT + EXTERNAL_AI_MOUNT_COUNT
 REQUIRED_ORIGIN_SOURCE_SLOTS = SYSTEM_MOUNT_COUNT
 RECOMMENDED_ORIGIN_SOURCE_SLOTS = 20
+HLS_RUNTIME_AVAILABLE = False
+HLS_CODEC_PROFILE = "he_aac_192"
+HLS_CODEC_LABEL = "HE-AAC"
+HLS_BITRATE_KBPS = 192
 
 
 class StreamingFeatureSettingsUpdate(BaseModel):
@@ -52,12 +57,19 @@ class StreamingFeatureSettingsUpdate(BaseModel):
     rocket_admin_password: str = ""
     rocket_health_password: str = ""
     rocket_status_page_enabled: bool = True
-    rocket_hls_enabled: bool = True
+    # Compatibility field for older clients. HLS has no active runtime yet,
+    # so a true request is rejected and the stored value remains false.
+    rocket_hls_enabled: bool = False
     rocket_fallbacks_enabled: bool = True
     rocket_listener_auth_enabled: bool = False
     rocket_ad_insertion_enabled: bool = False
     rocket_access_log_enabled: bool = True
     rocket_playlist_log_enabled: bool = True
+
+
+class HlsSettingsUpdate(BaseModel):
+    enabled: bool = False
+    codec_profile: Literal["he_aac_192"] = HLS_CODEC_PROFILE
 
 
 class QualityVariantSettingsUpdate(BaseModel):
@@ -140,9 +152,7 @@ def _system_feature_payload(settings: dict) -> dict:
         "rocket_status_page_enabled": _truthy(
             settings.get("rocket_status_page_enabled", "true"), True
         ),
-        "rocket_hls_enabled": _truthy(
-            settings.get("rocket_hls_enabled", "true"), True
-        ),
+        "rocket_hls_enabled": False,
         "rocket_fallbacks_enabled": _truthy(
             settings.get("rocket_fallbacks_enabled", "true"), True
         ),
@@ -160,7 +170,7 @@ def _system_feature_payload(settings: dict) -> dict:
         ),
         "server_side_config_required": [
             "Enable the Rocket status and health endpoints in the origin configuration.",
-            "Enable HLS only on the mounts that should publish it.",
+            "Keep HLS disabled until the HE-AAC 192 runtime is implemented and authorized.",
             "Configure fallback mounts or files at the origin.",
             "Configure listener-auth webhooks before enforcing private streams.",
         ],
@@ -404,6 +414,19 @@ def _origin_capacity_diagnostics(
     }
 
 
+def _hls_settings_payload(settings: dict) -> dict:
+    return {
+        "enabled": False,
+        "runtime_available": HLS_RUNTIME_AVAILABLE,
+        "status": "planned",
+        "codec_profile": HLS_CODEC_PROFILE,
+        "codec": HLS_CODEC_LABEL,
+        "bitrate_kbps": HLS_BITRATE_KBPS,
+        "playlist_active": False,
+        "stored_disabled": not _truthy(settings.get("hls_enabled", "false")),
+    }
+
+
 def _refresh_quality_music_runtimes(channels: list[dict]) -> list[dict]:
     try:
         from app.api.runtime import runtime_registry
@@ -558,6 +581,47 @@ def _request_text(
         }
 
 
+@router.get("/api/settings/hls")
+def get_hls_settings(
+    _user=Depends(require_any_permission("stations.view", "stations.edit")),
+):
+    init_db()
+    conn = get_connection()
+    try:
+        settings = SettingsRepository(conn).get_system()
+        return _hls_settings_payload(settings)
+    finally:
+        conn.close()
+
+
+@router.put("/api/settings/hls")
+def update_hls_settings(
+    payload: HlsSettingsUpdate,
+    _user=Depends(require_permission("stations.edit")),
+):
+    if payload.enabled:
+        raise HTTPException(
+            status_code=409,
+            detail="HLS runtime is planned but not installed; HLS remains disabled.",
+        )
+    init_db()
+    conn = get_connection()
+    try:
+        repo = SettingsRepository(conn)
+        repo.upsert_system(
+            {
+                "hls_enabled": "false",
+                "hls_codec_profile": HLS_CODEC_PROFILE,
+                "hls_bitrate_kbps": str(HLS_BITRATE_KBPS),
+                "rocket_hls_enabled": "false",
+            }
+        )
+        stored = repo.get_system()
+        return {"ok": True, "hls": _hls_settings_payload(stored)}
+    finally:
+        conn.close()
+
+
 @router.get("/api/streaming/features")
 def get_streaming_features(
     _user=Depends(require_any_permission("stations.view", "stations.edit")),
@@ -603,6 +667,11 @@ def update_streaming_features(
     payload: StreamingFeatureSettingsUpdate,
     _user=Depends(require_permission("stations.edit")),
 ):
+    if payload.rocket_hls_enabled:
+        raise HTTPException(
+            status_code=409,
+            detail="HLS runtime is planned but not installed; HLS remains disabled.",
+        )
     init_db()
     conn = get_connection()
     try:
@@ -630,7 +699,7 @@ def update_streaming_features(
                 "rocket_status_page_enabled": str(
                     bool(payload.rocket_status_page_enabled)
                 ).lower(),
-                "rocket_hls_enabled": str(bool(payload.rocket_hls_enabled)).lower(),
+                "rocket_hls_enabled": "false",
                 "rocket_fallbacks_enabled": str(
                     bool(payload.rocket_fallbacks_enabled)
                 ).lower(),

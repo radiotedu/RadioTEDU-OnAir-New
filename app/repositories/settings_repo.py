@@ -6,6 +6,10 @@ DEFAULT_SYSTEM_SETTINGS = {
     "display_brand_name": "RadioTEDU OnAir",
     "active_station_id": "1",
     "speaker_monitor_station_id": "1",
+    "hls_enabled": "false",
+    "hls_codec_profile": "he_aac_192",
+    "hls_bitrate_kbps": "192",
+    "rocket_hls_enabled": "false",
 }
 
 

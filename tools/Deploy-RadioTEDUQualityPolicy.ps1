@@ -25,6 +25,7 @@ $Files = @(
     'app\engine\process_worker_manager.py',
     'app\engine\runtime_registry.py',
     'app\main.py',
+    'app\repositories\settings_repo.py',
     'app\repositories\station_output_repo.py',
     'app\services\quality_outputs.py',
     'app\services\replication_applier.py',

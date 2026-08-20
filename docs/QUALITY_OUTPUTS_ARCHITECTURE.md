@@ -53,6 +53,7 @@ The origin needs at least 16 simultaneous source slots; 20 is recommended for op
 | Origin offline | continue deterministic playout and independently reconnect every enabled source |
 | Encoder failure | mark only the affected branch unhealthy |
 | Service restart or boot | immediate automatic supervisor restores all six authorized workers |
+| Planned HLS | Settings reserves HE-AAC 192 kbps while runtime and publication remain disabled |
 | Invalid/stale output settings | replace canonical quality family and retain unrelated outputs |
 | Commissioning error | fail closed; recover from the verified pre-change database backup |
 
