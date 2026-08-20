@@ -31,8 +31,29 @@ jobs:
           python -m pip install --only-binary=:all: -r requirements.lock
       - name: Verify Python dependency graph
         run: python -m pip check
-      - name: Complete Python regression suite
-        run: python -m pytest -q --disable-warnings
+      - name: Broadcast, service, and repository acceptance suite
+        run: |
+          python -m pytest -q --disable-warnings `
+            tests/unit/test_quality_outputs.py `
+            tests/unit/test_multi_quality_runtime.py `
+            tests/unit/test_quality_compliance_variants.py `
+            tests/unit/test_quality_output_bridge.py `
+            tests/unit/test_station_output_repo.py `
+            tests/unit/test_station_output_api.py `
+            tests/unit/test_setup_onboarding_api.py `
+            tests/unit/test_streaming_credentials.py `
+            tests/unit/test_startup_runtime_autostart.py `
+            tests/unit/test_process_isolated_station_runtime.py `
+            tests/unit/test_radio_backend_service_runner.py `
+            tests/unit/test_radiotedu_service_control.py `
+            tests/unit/test_runtime_launcher_contract.py `
+            tests/unit/test_frontend_api_route_coverage.py `
+            tests/unit/test_installer_data_acl.py `
+            tests/integration/test_process_station_worker_lifecycle.py `
+            tests/integration/test_station_worker_runtime_integration.py `
+            tests/integration/test_multi_station_output_runtime.py `
+            tests/integration/test_station_output_api_persistence.py `
+            tests/test_broadcast_queue_autofill_durability.py
       - name: JavaScript tests
         shell: powershell
         run: |
