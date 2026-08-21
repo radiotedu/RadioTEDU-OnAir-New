@@ -51,7 +51,7 @@ def verify(database: Path) -> dict[str, object]:
             profile = str(row["stream_codec_profile"] or "")
             bitrate = int(row["stream_bitrate_kbps"] or 0)
             enabled = bool(row["icecast_enabled"])
-            if not enabled or profile != "opus_192" or bitrate != 192:
+            if not enabled or profile != "he_aac_192" or bitrate != 192:
                 issues.append(f"primary output policy mismatch: {base_mount}")
             autostart_row = conn.execute(
                 "SELECT value FROM station_settings WHERE station_id=? "

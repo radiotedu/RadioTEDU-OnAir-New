@@ -7,8 +7,15 @@ DEFAULT_SYSTEM_SETTINGS = {
     "active_station_id": "1",
     "speaker_monitor_station_id": "1",
     "hls_enabled": "false",
-    "hls_codec_profile": "he_aac_192",
+    "hls_codec_profile": "he_aac_v1_96_192",
     "hls_bitrate_kbps": "192",
+    "hls_low_bitrate_kbps": "96",
+    "hls_high_bitrate_kbps": "192",
+    "hls_segment_duration_seconds": "6",
+    "hls_playlist_size": "10",
+    # Optional absolute path to an FFmpeg build with libfdk_aac. When empty,
+    # the managed/path FFmpeg resolver is used.
+    "hls_ffmpeg_path": "",
     "rocket_hls_enabled": "false",
 }
 

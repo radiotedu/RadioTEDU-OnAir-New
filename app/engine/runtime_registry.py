@@ -387,8 +387,13 @@ def _extra_icecast_outputs(settings: dict, station_id: int, row) -> tuple[dict, 
         # also makes an older persisted opus_128 plan self-heal on restart.
         quality = str(value.get("quality") or "").strip().lower()
         if quality == "high" or mount.lower().endswith("-high"):
-            profile = "opus_192"
+            profile = "he_aac_192"
             bitrate = 192
+        elif (quality == "low" or mount.lower().endswith("-low")) and profile.lower().startswith("opus_"):
+            # Canonical low branches are HE-AAC v1. Keep FLAC untouched and
+            # self-heal any legacy persisted Ogg/Opus low setting.
+            profile = "he_aac_96"
+            bitrate = 96
         outputs.append(
             {
                 "enabled": True,
@@ -941,7 +946,7 @@ class StationRuntimeRegistry:
             "icecast_user": "source",
             "icecast_password": "",
             "output_gain_db": 0.0,
-            "stream_codec_profile": "opus_192",
+            "stream_codec_profile": "he_aac_192",
             "stream_bitrate_kbps": 192,
             "source_protocol": "icecast",
         }
@@ -1042,7 +1047,7 @@ class StationRuntimeRegistry:
         current_user = str(current["icecast_user"]) if current else "source"
         current_pass = str(current["icecast_password"]) if current else ""
         current_gain = float(current["output_gain_db"]) if current else 0.0
-        current_profile = str(current["stream_codec_profile"]) if current else "opus_192"
+        current_profile = str(current["stream_codec_profile"]) if current else "he_aac_192"
         current_bitrate = int(current["stream_bitrate_kbps"]) if current else 192
         current_protocol = str(current["source_protocol"] or "icecast") if current else "icecast"
 
@@ -1185,7 +1190,7 @@ class StationRuntimeRegistry:
             output_device_id=str(row["output_device_id"]),
             output_gain_db=float(row["output_gain_db"]),
             loudness_target_lufs=max(-24.0, min(-9.0, loudness_target_lufs)),
-            stream_codec_profile=str(row["stream_codec_profile"] or "opus_192"),
+            stream_codec_profile=str(row["stream_codec_profile"] or "he_aac_192"),
             stream_bitrate_kbps=int(row["stream_bitrate_kbps"] or 192),
             source_protocol=str(row["source_protocol"] or "icecast"),
             icecast_enabled=bool(row["icecast_enabled"]),

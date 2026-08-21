@@ -371,6 +371,18 @@ async def lifespan(_app: FastAPI):
         name="dependency-bootstrap",
     ).start()
     init_db()
+    try:
+        from app.services.codec_migration import migrate_ogg_outputs_to_he_aac
+
+        migration_conn = get_connection()
+        try:
+            migrate_ogg_outputs_to_he_aac(migration_conn, logger=logger)
+        finally:
+            migration_conn.close()
+    except Exception as exc:
+        # A codec migration must never prevent the control plane from starting;
+        # it will retry on the next startup.
+        logger.warning("Ogg-to-HE-AAC migration deferred: %s", exc)
     threading.Thread(
         target=_run_music_usage_export_background,
         daemon=True,

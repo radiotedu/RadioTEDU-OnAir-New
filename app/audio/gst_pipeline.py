@@ -16,7 +16,7 @@ class StationPipelineConfig:
     output_device_id: str
     output_gain_db: float = 0.0
     loudness_target_lufs: float | None = None
-    stream_codec_profile: str = "opus_192"
+    stream_codec_profile: str = "he_aac_192"
     stream_bitrate_kbps: int = 192
     icecast_enabled: bool = True
     stream_title: str = ""
@@ -148,24 +148,18 @@ def resolve_stream_profile(
 
     bitrate = _profile_bitrate(token, bitrate_kbps, 192, 32, 320)
     return {
-        "profile": "opus_192",
-        "codec": "opus",
+        "profile": "he_aac_192",
+        "codec": "aac",
         "bitrate_kbps": bitrate if bitrate > 0 else 192,
-        "ffmpeg_codec": "libopus",
-        "ffmpeg_filter_args": ["-af", "aresample=48000"],
-        "ffmpeg_encoder_args": [
-            "-vbr",
-            "constrained",
-            "-application",
-            "audio",
-            "-compression_level",
-            "10",
-            "-frame_duration",
-            "20",
-        ],
-        "content_type": "audio/ogg",
-        "format": "ogg",
-        "gst_encoder": f"opusenc bitrate={bitrate * 1000} ! oggmux",
+        "ffmpeg_codec": "libfdk_aac",
+        "ffmpeg_profile": "aac_he",
+        "ffmpeg_encoder_args": ["-afterburner", "1"],
+        "content_type": "audio/aac",
+        "format": "adts",
+        "gst_encoder": (
+            f"fdkaacenc bitrate={(bitrate if bitrate > 0 else 192) * 1000} afterburner=true "
+            "! audio/mpeg,mpegversion=4,stream-format=adts,profile=he-aac-v1"
+        ),
         "uses_bitrate": True,
     }
 

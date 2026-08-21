@@ -131,14 +131,14 @@ def commission(
             station_settings = settings_repo.get_station(station_id)
             needs_update = (
                 not bool(row["icecast_enabled"])
-                or str(row["stream_codec_profile"] or "") != "opus_192"
+                or str(row["stream_codec_profile"] or "") != "he_aac_192"
                 or int(row["stream_bitrate_kbps"] or 0) != 192
                 or str(station_settings.get("broadcast_autostart_enabled", "")).lower()
                 != "true"
             )
             conn.execute(
                 "UPDATE station_outputs SET icecast_enabled=1, "
-                "stream_codec_profile='opus_192', stream_bitrate_kbps=192 "
+                "stream_codec_profile='he_aac_192', stream_bitrate_kbps=192 "
                 "WHERE station_id=?",
                 (station_id,),
             )
@@ -146,7 +146,7 @@ def commission(
                 station_id,
                 {
                     "broadcast_autostart_enabled": "true",
-                    "stream_codec_profile": "opus_192",
+                    "stream_codec_profile": "he_aac_192",
                     "stream_bitrate_kbps": "192",
                 },
             )

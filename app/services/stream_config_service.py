@@ -22,6 +22,8 @@ from app.services.ha_coordinator import ha_coordinator
 from app.services.replication_journal import canonical_json, replication_journal
 
 _PROFILES = {
+    "he_aac_96": {"bitrate": 96, "label": "HE-AAC v1 Low — 96 kbps"},
+    "he_aac_192": {"bitrate": 192, "label": "HE-AAC v1 Normal — 192 kbps"},
     "opus_32": {"bitrate": 32, "label": "Opus Low — 32 kbps"},
     "opus_64": {"bitrate": 64, "label": "Opus 64 kbps (legacy)"},
     "opus_96": {"bitrate": 96, "label": "Opus 96 kbps (legacy)"},
@@ -140,7 +142,7 @@ class StreamConfigService:
         station_id = int(config.get("station_id") or 0)
         if station_id <= 0:
             raise StreamConfigError("station_id_required")
-        profile = str(config.get("stream_codec_profile") or "opus_192").strip().lower()
+        profile = str(config.get("stream_codec_profile") or "he_aac_192").strip().lower()
         if profile not in _PROFILES:
             raise StreamConfigError("unsupported_stream_profile")
         host = str(config.get("icecast_host") or "").strip()
@@ -620,7 +622,7 @@ class StreamConfigService:
                     icecast_user=str(previous.get("icecast_user") or "source"),
                     icecast_password=str(previous.get("icecast_password") or ""),
                     output_gain_db=float(previous.get("output_gain_db") or 0),
-                    stream_codec_profile=str(previous.get("stream_codec_profile") or "opus_192"),
+                    stream_codec_profile=str(previous.get("stream_codec_profile") or "he_aac_192"),
                     stream_bitrate_kbps=int(previous.get("stream_bitrate_kbps") or 192),
                     source_protocol=str(previous.get("source_protocol") or "icecast"),
                 )

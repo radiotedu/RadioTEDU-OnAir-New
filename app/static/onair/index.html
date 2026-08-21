@@ -126,6 +126,17 @@
           <p id="broadcastResult" class="action-result" aria-live="polite"></p>
         </article>
 
+        <article id="hlsHomeCard" class="status-card hls-card" data-operator-view="onair">
+          <div class="card-heading">
+            <div><div class="eyebrow">HLS DELIVERY</div><h2>HE-AAC canlı çıkış</h2></div>
+            <span id="hlsHomeState" class="mini-state">Kontrol ediliyor</span>
+          </div>
+          <p class="card-copy">Altı RadioTEDU normal mount’u → libfdk_aac HE-AAC v1 Low 96 / High 192 → Nginx <code>/hls/</code>. HLS başlatmak Icecast yayınını durdurmaz.</p>
+          <div class="state-strip two"><div><span>Encoder</span><b id="hlsHomeEncoder">libfdk_aac</b></div><div><span>Playlist</span><b id="hlsHomePlaylist">—</b></div></div>
+          <div class="button-row"><button id="startHlsHomeButton" class="button primary" type="button">Start HLS</button><button id="refreshHlsHomeButton" class="button secondary" type="button">Durumu kontrol et</button></div>
+          <p id="hlsHomeResult" class="action-result" aria-live="polite"></p>
+        </article>
+
         <article class="status-card ai-card" data-operator-view="services">
           <div class="card-heading">
             <div>
@@ -168,7 +179,7 @@
               <label>Mount<input id="icecastMount" value="/new-station" pattern="/.*" required></label>
               <label>User<input id="icecastUser" value="source" required></label>
               <label>Password<input id="icecastPassword" type="password" autocomplete="new-password" required></label>
-              <label>Format<select id="icecastProfile"><option value="opus_192">Opus Normal — 192 kbps</option></select></label>
+              <label>Format<select id="icecastProfile"><option value="he_aac_192">HE-AAC v1 Normal — 192 kbps</option><option value="he_aac_96">HE-AAC v1 Low — 96 kbps</option><option value="opus_192">Opus Normal — 192 kbps</option><option value="opus_32">Opus Low — 32 kbps</option></select></label>
             </div>
             <label class="check-row"><input id="activateNewStation" type="checkbox"> Make it the active broadcast target</label>
             <button id="createStationButton" class="button primary" type="submit">Create and verify station</button>
@@ -295,7 +306,7 @@
             </section>
             <section class="stream-wizard-step">
               <div class="eyebrow">STEP 2 OF 4</div><h3>Choose listener quality</h3>
-                <label>Quality<select id="currentIcecastProfile"><option value="opus_192">Opus Normal — 192 kbps</option></select></label>
+                <label>Quality<select id="currentIcecastProfile"><option value="he_aac_192">HE-AAC v1 Normal — 192 kbps</option><option value="he_aac_96">HE-AAC v1 Low — 96 kbps</option><option value="opus_192">Opus Normal — 192 kbps</option><option value="opus_32">Opus Low — 32 kbps</option></select></label>
               <small>The suffix-free station mount is always the 192 kbps Opus normal stream. Low-bandwidth output is managed separately.</small>
             </section>
             <section class="stream-wizard-step">
@@ -510,16 +521,17 @@
         </article>
 
         <article id="hlsSettingsPanel" class="panel configuration-panel" data-operator-view="settings">
-          <div class="panel-heading"><div><div class="eyebrow">PLANNED DELIVERY</div><h2>HLS</h2></div><span id="hlsSettingsState" class="mini-state">Off · planned</span></div>
-          <p class="card-copy">Reserve the future HLS policy without publishing a playlist or media segment. Current Icecast mounts and the approved 16-mount plan are unchanged.</p>
+          <div class="panel-heading"><div><div class="eyebrow">LIVE DELIVERY</div><h2>HLS</h2></div><span id="hlsSettingsState" class="mini-state">Off · hazır değil</span></div>
+          <p class="card-copy">RadioTEDU’nun altı normal mount’unu doğrudan okur ve yalnızca <strong>libfdk_aac ile HE-AAC v1</strong> Low 96 / High 192 kbit/s HLS üretir. Kaynak ses byte’ları doğrulanmadan hiçbir FFmpeg writer başlatılmaz; Opus fallback yoktur.</p>
           <form id="hlsSettingsForm" class="operator-form">
-            <label class="switch-row"><span><b>Enable HLS</b><small>Unavailable until an HLS runtime is implemented and separately authorized.</small></span><input id="hlsEnabled" type="checkbox" disabled></label>
+            <label class="switch-row"><span><b>HLS etkin</b><small>Durum, aşağıdaki Start/Stop düğmeleri ve persisted read-back ile doğrulanır.</small></span><input id="hlsEnabled" type="checkbox" disabled></label>
             <div class="field-grid two">
-              <label>Planned codec<select id="hlsCodecProfile" disabled><option value="he_aac_192">HE-AAC · 192 kbps</option></select></label>
-              <label>Runtime status<input id="hlsRuntimeStatus" value="Not installed" disabled></label>
+              <label>Codec profili<select id="hlsCodecProfile" disabled><option value="he_aac_v1_96_192">HE-AAC v1 · 96 / 192 kbps</option></select></label>
+              <label>Runtime durumu<input id="hlsRuntimeStatus" value="Hazır değil" disabled></label>
+              <label>HLS output root<input id="hlsOutputRoot" value="—" disabled></label>
             </div>
-            <div class="policy-callout"><b>HLS is not active.</b><small>The saved guard remains Off. No `.m3u8` playlist, segment writer, listener endpoint, or additional source is created.</small></div>
-            <button id="saveHlsSettingsButton" class="button secondary" type="submit">Save disabled HLS policy</button>
+            <div class="policy-callout"><b>HLS ayrı bir katmandır.</b><small>Icecast/TinyIce normal mount’larını kapatmaz. Her radyo için tek writer kullanılır ve HLS çıktısı Nginx’in yayınladığı yerel klasöre yazılır.</small></div>
+            <div class="button-row"><button id="startHlsButton" class="button primary" type="button">Start HLS</button><button id="stopHlsButton" class="button danger" type="button" disabled>Stop HLS</button><button id="refreshHlsButton" class="button secondary" type="button">HLS durumunu yenile</button></div>
           </form>
           <p id="hlsSettingsResult" class="action-result" aria-live="polite"></p>
         </article>
@@ -962,7 +974,7 @@
 
   <div id="busyOverlay" class="busy-overlay" hidden><div class="busy-card"><span class="spinner"></span><b id="busyTitle">Working...</b><small id="busyDetail">Waiting for verified state</small></div></div>
   <div id="toastRegion" class="toast-region" aria-live="assertive"></div>
-    <script src="/static/onair/app.js?v=40" defer></script>
+    <script src="/static/onair/app.js?v=42" defer></script>
     <script src="/static/onair/guest-room.js?v=6" defer></script>
     <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js', { scope: '/' });</script>
 </body>

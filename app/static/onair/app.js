@@ -494,7 +494,7 @@ function deterministicRotationKey(settings = state.stationSettings || {}) {
 }
 
 function streamProfileBitrate(profile) {
-  return ({ opus_32: 32, opus_64: 64, opus_96: 96, opus_192: 192 })[profile] || 192;
+  return ({ he_aac_96: 96, he_aac_192: 192, opus_32: 32, opus_64: 64, opus_96: 96, opus_192: 192 })[profile] || 192;
 }
 
 async function ensureSignedIn() {
@@ -1369,7 +1369,7 @@ function renderOutputConfiguration() {
   setCleanValue('currentIcecastMount', output.icecast_mount || `/station${state.stationId || 1}`);
   setCleanValue('currentIcecastUser', output.icecast_user || 'source');
   setCleanValue('currentIcecastPassword', output.icecast_password || '');
-  setCleanValue('currentIcecastProfile', String(output.stream_codec_profile || '').startsWith('opus_') ? output.stream_codec_profile : 'opus_192');
+  setCleanValue('currentIcecastProfile', /^(opus|he_aac)_/.test(String(output.stream_codec_profile || '')) ? output.stream_codec_profile : 'he_aac_192');
   setCleanValue('currentSourceProtocol', output.source_protocol || 'icecast');
   setCleanChecked('currentIcecastTlsEnabled', asBool(output.icecast_tls_enabled));
   setCleanChecked('currentLocalEnabled', output.local_output_enabled);
@@ -1951,7 +1951,7 @@ async function refreshAll(silent = false) {
   if (!silent) setConnection('', 'Refreshing');
   try {
     const currentView = String(state.activeView || 'onair');
-    const jobs = [loadCoreStatus(), loadQueue()];
+    const jobs = [loadCoreStatus(), loadQueue(), loadHlsSettings()];
     if (currentView === 'media') jobs.push(loadLibrary(1), loadJingles());
     if (['automation', 'stations', 'settings', 'diagnostics', 'services'].includes(currentView)) {
       jobs.push(loadOperatorConfiguration());
@@ -2559,7 +2559,7 @@ async function createStation(event) {
     await loadStations(createdId);
     $('stationForm').reset();
     $('configureIcecast').checked = true;
-    $('icecastHost').value = '127.0.0.1'; $('icecastPort').value = '8000'; $('icecastMount').value = '/new-station'; delete $('icecastMount').dataset.edited; $('icecastUser').value = 'source'; $('icecastProfile').value = 'opus_192'; $('icecastProtocol').value = 'icecast';
+    $('icecastHost').value = '127.0.0.1'; $('icecastPort').value = '8000'; $('icecastMount').value = '/new-station'; delete $('icecastMount').dataset.edited; $('icecastUser').value = 'source'; $('icecastProfile').value = 'he_aac_192'; $('icecastProtocol').value = 'icecast';
     toggleIcecastFields();
     setResult('stationResult', `Verified: ${name} was created${configure ? ' with its network output' : ''}.`, 'success');
     logActivity(`Created station ${name}${configure ? ' and verified network output' : ''}`);
@@ -2597,7 +2597,7 @@ function updateSourceProfileCompatibility(protocolId, profileId, tlsId = '') {
     [...profile.options].forEach((option) => {
       option.disabled = protocol === 'shoutcast' && option.value.startsWith('opus_');
     });
-    if (profile.selectedOptions[0]?.disabled) profile.value = 'opus_192';
+    if (profile.selectedOptions[0]?.disabled) profile.value = 'he_aac_192';
   }
   const tls = tlsId ? $(tlsId) : null;
   if (tls) {
@@ -4978,11 +4978,29 @@ async function deleteAdvertisingEntity(kind) {
 
 function renderHlsSettings() {
   const hls = state.hlsSettings || {};
-  $('hlsEnabled').checked = false;
+  const running = hls.status === 'running' && hls.playlist_active === true;
+  const available = hls.runtime_available === true;
+  $('hlsEnabled').checked = Boolean(hls.enabled);
   $('hlsEnabled').disabled = true;
-  $('hlsCodecProfile').value = 'he_aac_192';
-  $('hlsRuntimeStatus').value = hls.runtime_available ? 'Available but disabled' : 'Not installed';
-  $('hlsSettingsState').textContent = `Off · ${hls.codec || 'HE-AAC'} ${Number(hls.bitrate_kbps || 192)} planned`;
+  $('hlsCodecProfile').value = 'he_aac_v1_96_192';
+  $('hlsRuntimeStatus').value = available
+    ? (running ? 'Çalışıyor · playlist aktif' : 'Hazır · kapalı')
+    : 'libfdk_aac bulunamadı';
+  const outputRoot = $('hlsOutputRoot');
+  if (outputRoot) outputRoot.value = hls.output_root || '—';
+  $('hlsSettingsState').textContent = running
+    ? 'On · HE-AAC v1 96/192'
+    : (hls.status === 'error' ? 'Hata · başlatılamadı' : 'Off · hazır');
+  $('startHlsButton').disabled = running || !available;
+  $('stopHlsButton').disabled = !running;
+  const homeState = $('hlsHomeState');
+  if (homeState) homeState.textContent = running ? 'On · canlı' : (available ? 'Off · hazır' : 'Encoder yok');
+  const homePlaylist = $('hlsHomePlaylist');
+  if (homePlaylist) homePlaylist.textContent = hls.playlist_active ? 'Aktif' : 'Yok';
+  const homeEncoder = $('hlsHomeEncoder');
+  if (homeEncoder) homeEncoder.textContent = hls.encoder || 'libfdk_aac';
+  const homeStart = $('startHlsHomeButton');
+  if (homeStart) homeStart.disabled = running || !available;
 }
 
 async function loadHlsSettings() {
@@ -4991,29 +5009,64 @@ async function loadHlsSettings() {
   return state.hlsSettings;
 }
 
-async function saveHlsSettings(event) {
-  event.preventDefault();
-  setBusy(true, 'Saving disabled HLS policy...', 'Verifying that no HLS runtime or playlist can start');
+async function startHls() {
+  setBusy(true, 'HLS başlatılıyor...', 'Altı Icecast mount’unda ses byte’ları ve HE-AAC playlistleri doğrulanıyor');
   setResult('hlsSettingsResult');
+  setResult('hlsHomeResult');
   try {
-    await api('/api/settings/hls', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled: false, codec_profile: 'he_aac_192' }),
-    });
+    const response = await api('/api/settings/hls/start', { method: 'POST' });
     const stored = await loadHlsSettings();
-    if (stored.enabled || stored.runtime_available || stored.codec_profile !== 'he_aac_192' || Number(stored.bitrate_kbps) !== 192) {
-      throw new Error('HLS disabled policy did not match read-back');
+    if (!response?.ok || stored.status !== 'running' || !stored.playlist_active || !stored.enabled) {
+      throw new Error('HLS başlatıldı bildirimi playlist read-back ile doğrulanamadı');
     }
-    const message = 'Verified: HLS remains Off; HE-AAC 192 kbps is reserved as the future profile and no playlist is active.';
+    const message = 'Doğrulandı: HLS canlı; altı radyo için HE-AAC v1 Low 96 / High 192 playlistleri aktif.';
     setResult('hlsSettingsResult', message, 'success');
+    setResult('hlsHomeResult', message, 'success');
     logActivity(message);
   } catch (error) {
     const message = errorMessage(error);
     setResult('hlsSettingsResult', message, 'error');
+    setResult('hlsHomeResult', message, 'error');
     logActivity(`HLS policy save failed: ${message}`, 'error');
   } finally {
     setBusy(false);
+  }
+}
+
+async function stopHls() {
+  setBusy(true, 'HLS durduruluyor...', 'Yalnızca HLS writer süreçleri kapatılıyor; Icecast normal yayınları korunuyor');
+  setResult('hlsSettingsResult');
+  setResult('hlsHomeResult');
+  try {
+    await api('/api/settings/hls/stop', { method: 'POST' });
+    const stored = await loadHlsSettings();
+    if (stored.enabled || stored.status === 'running' || stored.playlist_active) {
+      throw new Error('HLS durdurma read-back ile doğrulanamadı');
+    }
+    const message = 'Doğrulandı: HLS kapalı; Icecast/TinyIce normal mount’ları etkilenmedi.';
+    setResult('hlsSettingsResult', message, 'success');
+    setResult('hlsHomeResult', message, 'success');
+    logActivity(message);
+  } catch (error) {
+    const message = errorMessage(error);
+    setResult('hlsSettingsResult', message, 'error');
+    setResult('hlsHomeResult', message, 'error');
+    logActivity(`HLS stop failed: ${message}`, 'error');
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function refreshHlsStatus() {
+  try {
+    await loadHlsSettings();
+    const message = state.hlsSettings?.status === 'running' ? 'HLS canlı durumu yenilendi.' : 'HLS hazır durumu yenilendi.';
+    setResult('hlsSettingsResult', message, 'success');
+    setResult('hlsHomeResult', message, 'success');
+  } catch (error) {
+    const message = errorMessage(error);
+    setResult('hlsSettingsResult', message, 'error');
+    setResult('hlsHomeResult', message, 'error');
   }
 }
 
@@ -5647,7 +5700,12 @@ function bindEvents() {
   $('adCampaignSelect').addEventListener('change', () => { state.selectedAdCampaignId = Number($('adCampaignSelect').value || 0); clearAdDeleteArms(); renderAdCampaignEditor(); setResult('adCampaignResult'); });
   $('adCampaignForm').addEventListener('submit', saveAdCampaign);
   $('deleteAdCampaignButton').addEventListener('click', () => deleteAdvertisingEntity('campaign'));
-  $('hlsSettingsForm').addEventListener('submit', saveHlsSettings);
+  $('hlsSettingsForm').addEventListener('submit', (event) => event.preventDefault());
+  $('startHlsButton').addEventListener('click', startHls);
+  $('stopHlsButton').addEventListener('click', stopHls);
+  $('refreshHlsButton').addEventListener('click', refreshHlsStatus);
+  $('startHlsHomeButton').addEventListener('click', startHls);
+  $('refreshHlsHomeButton').addEventListener('click', refreshHlsStatus);
   $('streamingFeaturesForm').addEventListener('submit', saveStreamingFeatures);
   $('qualityOutputsForm').addEventListener('submit', saveQualityOutputs);
   $('prepare16MountPlanButton').addEventListener('click', prepareApproved16MountPlan);

@@ -226,7 +226,7 @@
             config.output_device_id || '',
             'System default output'
         );
-        populateSelect(document.getElementById('setupStreamCodec'), state?.codec_presets || [], config.stream_codec_profile || 'opus_192');
+        populateSelect(document.getElementById('setupStreamCodec'), state?.codec_presets || [], config.stream_codec_profile || 'he_aac_192');
         populateSelect(document.getElementById('setupAiWarmth'), state?.warmth_presets || [], config.ai_warmth || 'warm');
 
         const assignments = {
@@ -359,7 +359,7 @@
             icecast_mount: fieldValue('setupIcecastMount') || '/live',
             icecast_user: fieldValue('setupIcecastUser') || 'source',
             icecast_password: fieldValue('setupIcecastPassword') || '',
-            stream_codec_profile: fieldValue('setupStreamCodec') || 'opus_192',
+            stream_codec_profile: fieldValue('setupStreamCodec') || 'he_aac_192',
             ai_enabled: fieldChecked('setupAiEnabled'),
             ai_warmth: fieldValue('setupAiWarmth') || 'warm',
         };

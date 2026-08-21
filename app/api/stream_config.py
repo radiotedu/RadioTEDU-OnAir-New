@@ -21,7 +21,7 @@ class StreamDraftPayload(BaseModel):
     icecast_password: str = ""
     icecast_tls_enabled: bool = False
     output_gain_db: float = Field(default=0, ge=-30, le=12)
-    stream_codec_profile: str = "opus_192"
+    stream_codec_profile: str = "he_aac_192"
     source_protocol: str = "icecast"
 
 

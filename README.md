@@ -12,7 +12,7 @@
   <img alt="Windows" src="https://img.shields.io/badge/Windows-boot%20service-0078D4?logo=windows">
   <img alt="Python" src="https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white">
   <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-control%20plane-009688?logo=fastapi&logoColor=white">
-  <img alt="Streaming" src="https://img.shields.io/badge/streams-Opus%20%2B%20FLAC-EA4C89">
+  <img alt="Streaming" src="https://img.shields.io/badge/streams-HE--AAC%20%2B%20FLAC-EA4C89">
 </p>
 
 RadioTEDU OnAir is the broadcast engine, operator wall, desktop shell, and Windows service used to keep RadioTEDU's music stations on air. Each station has an independent library, queue, playout worker, Icecast connection, output fan-out, and recovery loop. A failed mount reconnects independently; it does not restart the programme or interrupt sibling stations.
@@ -23,7 +23,7 @@ RadioTEDU OnAir is the broadcast engine, operator wall, desktop shell, and Windo
 
 The unsuffixed mount is always the normal stream. Low-bandwidth streams use `-low`. Lossless output is deliberately limited to Classical and Cazz.
 
-| Radio | Low — Opus 32 kbps | Normal — Opus 192 kbps | Lossless — FLAC |
+| Radio | Low — HE-AAC v1 96 kbps | Normal — HE-AAC v1 192 kbps | Lossless — FLAC |
 |---|---|---|---|
 | RadioTEDU | `/radio-low` | `/radio` | — |
 | Lo-Fi | `/lofi-low` | `/lofi` | — |
@@ -36,13 +36,13 @@ This PC owns 14 local music sources: six normal, six low, and two FLAC. The exte
 
 ### HLS readiness
 
-HLS is represented in **Settings → HLS** as a future delivery option and is intentionally locked **Off**. The reserved profile is **HE-AAC at 192 kbps**. No `.m3u8` playlist, segment writer, listener route, encoder branch, or additional origin source is created until an HLS runtime is implemented, tested, and separately authorized.
+HLS is implemented in **Settings → HLS** but remains operator-controlled and stored **Off** until the Nginx server is prepared. When started, each normal mount is read from Icecast and published as HE-AAC v1 HLS: Low 96 kbps and High 192 kbps, 48 kHz stereo, six-second segments. HLS start does not stop Icecast. The app never falls back from HE-AAC to Opus.
 
 ## Designed to survive a reboot
 
 The stream is not tied to the desktop window. `RadioTEDU.OnAir.Supervisor` is an immediate automatic Windows service with failure recovery. At machine startup it launches the backend, restores the six operator-authorized station workers, and starts the actual Icecast source pipelines—even if nobody signs in or opens the app.
 
-The commissioning command enables `broadcast_autostart_enabled` for the six music stations, enforces Opus 192 on their primary mounts, writes the approved eight additional outputs, makes an integrity-checked database backup, and preserves protected Icecast credentials.
+The commissioning command enables `broadcast_autostart_enabled` for the six music stations, enforces HE-AAC v1 192 on their primary mounts, writes the approved HE-AAC v1 96 low outputs plus the two FLAC mounts, makes an integrity-checked database backup, and preserves protected Icecast credentials. A one-time startup migration converts legacy canonical Ogg/Opus outputs without touching `/classic-flac` or `/cazz-flac`.
 
 ```powershell
 python .\tools\commission_quality_outputs.py `

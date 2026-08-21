@@ -12,6 +12,8 @@ AAC_ENCODER = "aac"
 AAC_PROFILE = "AAC-LC"
 OPUS_ENCODER = "libopus"
 OPUS_PROFILE = "Opus"
+FDK_AAC_ENCODER = "libfdk_aac"
+FDK_AAC_PROFILE = "HE-AAC v1"
 
 
 @lru_cache(maxsize=16)
@@ -96,6 +98,29 @@ def inspect_opus_encoder() -> dict[str, object]:
     }
 
 
-# Compatibility name for older callers. The returned capability is deliberately
-# labelled AAC-LC and never claims that the native encoder is AAC+ / HE-AAC.
-inspect_he_aac_encoder = inspect_aac_encoder
+def inspect_he_aac_encoder(binary_path: str | None = None) -> dict[str, object]:
+    """Check the external FDK-AAC encoder used by the HE-AAC v1 mounts."""
+
+    binary = str(binary_path or "").strip() or resolve_binary("ffmpeg.exe") or resolve_binary("ffmpeg")
+    if not binary:
+        result: dict[str, object] = {
+            "available": False,
+            "error_code": "ffmpeg_not_found",
+        }
+    else:
+        try:
+            modified_ns = Path(binary).stat().st_mtime_ns
+        except OSError:
+            modified_ns = 0
+        result = _inspect_ffmpeg(str(binary), modified_ns, FDK_AAC_ENCODER)
+    return {
+        "encoder": FDK_AAC_ENCODER,
+        "profile": FDK_AAC_PROFILE,
+        "available": bool(result.get("available")),
+        "error_code": str(result.get("error_code") or ""),
+        "credentials_exposed": False,
+    }
+
+
+# Compatibility name for older callers. Native AAC-LC remains separately
+# available as ``inspect_aac_encoder``; HE-AAC now reports FDK-AAC explicitly.

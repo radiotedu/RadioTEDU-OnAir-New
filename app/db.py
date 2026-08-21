@@ -557,7 +557,7 @@ def _migrate_station_outputs(cur) -> None:
         )
     if "stream_codec_profile" not in existing:
         cur.execute(
-            "ALTER TABLE station_outputs ADD COLUMN stream_codec_profile TEXT NOT NULL DEFAULT 'opus_192'"
+            "ALTER TABLE station_outputs ADD COLUMN stream_codec_profile TEXT NOT NULL DEFAULT 'he_aac_192'"
         )
     if "stream_bitrate_kbps" not in existing:
         cur.execute(
@@ -1353,7 +1353,7 @@ def _bootstrap_schema(cur) -> None:
         "icecast_user TEXT NOT NULL DEFAULT 'source', "
         "icecast_password TEXT NOT NULL DEFAULT '', "
         "output_gain_db REAL NOT NULL DEFAULT 0, "
-        "stream_codec_profile TEXT NOT NULL DEFAULT 'opus_192', "
+        "stream_codec_profile TEXT NOT NULL DEFAULT 'he_aac_192', "
         "stream_bitrate_kbps INTEGER NOT NULL DEFAULT 192, "
         "source_protocol TEXT NOT NULL DEFAULT 'icecast'"
         ")"

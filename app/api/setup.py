@@ -53,7 +53,7 @@ DEPLOYMENT_CERTIFICATE_SIGNATURE_KEY = "setup.deployment_certificate_signature"
 DEFAULT_AI_STACK = "ollama_local_qwen_tts"
 DEFAULT_AI_LLM_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 DEFAULT_AI_TTS_PROVIDER = "local-qwen-tts"
-DEFAULT_STREAM_CODEC_PROFILE = "opus_192"
+DEFAULT_STREAM_CODEC_PROFILE = "he_aac_192"
 DEFAULT_STREAM_BITRATE_KBPS = 192
 DEFAULT_STATION_NAME = "RadioTEDU OnAir"
 DEFAULT_STREAM_NAME = "RadioTEDU OnAir"
@@ -69,10 +69,16 @@ WARMTH_PRESET_MAP = {
 PERSONA_TO_WARMTH = {value: key for key, value in WARMTH_PRESET_MAP.items()}
 CODEC_PRESETS = [
     {
-        "id": "opus_192",
-        "label": "Opus Normal — 192 kbps",
-        "codec": "opus",
+        "id": "he_aac_192",
+        "label": "HE-AAC v1 Normal — 192 kbps",
+        "codec": "aac",
         "bitrate_kbps": 192,
+    },
+    {
+        "id": "he_aac_96",
+        "label": "HE-AAC v1 Low — 96 kbps",
+        "codec": "aac",
+        "bitrate_kbps": 96,
     },
 ]
 
@@ -143,7 +149,7 @@ def _check(name: str, label: str, ready: bool, message: str, **details: Any) -> 
 
 def _normalize_stream_profile(raw_profile: Any, raw_bitrate: Any = DEFAULT_STREAM_BITRATE_KBPS) -> tuple[str, int]:
     token = str(raw_profile or "").strip().lower().replace("-", "_").replace("+", "_plus_")
-    approved = {"opus_192": 192}
+    approved = {"he_aac_96": 96, "he_aac_192": 192, "opus_192": 192}
     if token in approved:
         return token, approved[token]
     try:

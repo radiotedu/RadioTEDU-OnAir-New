@@ -1,5 +1,6 @@
 import base64
 import json
+import logging
 from typing import Literal
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -35,19 +36,31 @@ from app.services.quality_output_bridge import (
     inspect_quality_bridge,
     write_quality_bridge,
 )
-from app.services.encoder_capabilities import inspect_opus_encoder
+from app.services.encoder_capabilities import inspect_he_aac_encoder, inspect_opus_encoder
+from app.services.hls_runtime import (
+    HLS_CODEC_PROFILE as RUNTIME_HLS_CODEC_PROFILE,
+    HLS_HIGH_BITRATE_KBPS,
+    HLS_LOW_BITRATE_KBPS,
+    HLS_RADIOS,
+    HlsRuntimeError,
+    hls_runtime_manager,
+)
 
 router = APIRouter()
+_log = logging.getLogger(__name__)
 
 LOCAL_MUSIC_MOUNT_COUNT = 14
 EXTERNAL_AI_MOUNT_COUNT = 2
 SYSTEM_MOUNT_COUNT = LOCAL_MUSIC_MOUNT_COUNT + EXTERNAL_AI_MOUNT_COUNT
 REQUIRED_ORIGIN_SOURCE_SLOTS = SYSTEM_MOUNT_COUNT
 RECOMMENDED_ORIGIN_SOURCE_SLOTS = 20
-HLS_RUNTIME_AVAILABLE = False
-HLS_CODEC_PROFILE = "he_aac_192"
-HLS_CODEC_LABEL = "HE-AAC"
-HLS_BITRATE_KBPS = 192
+# The runtime is implemented in app.services.hls_runtime. Actual availability
+# is reported by the manager after probing the configured FFmpeg/libfdk_aac
+# build; the app never falls back to Opus for HLS.
+HLS_RUNTIME_AVAILABLE = True
+HLS_CODEC_PROFILE = RUNTIME_HLS_CODEC_PROFILE
+HLS_CODEC_LABEL = "HE-AAC v1"
+HLS_BITRATE_KBPS = HLS_HIGH_BITRATE_KBPS
 
 
 class StreamingFeatureSettingsUpdate(BaseModel):
@@ -57,8 +70,9 @@ class StreamingFeatureSettingsUpdate(BaseModel):
     rocket_admin_password: str = ""
     rocket_health_password: str = ""
     rocket_status_page_enabled: bool = True
-    # Compatibility field for older clients. HLS has no active runtime yet,
-    # so a true request is rejected and the stored value remains false.
+    # Compatibility field for older Rocket-origin clients. HLS is controlled
+    # only by the dedicated HLS panel/endpoints below; this legacy toggle
+    # remains false so it cannot create a second writer.
     rocket_hls_enabled: bool = False
     rocket_fallbacks_enabled: bool = True
     rocket_listener_auth_enabled: bool = False
@@ -69,7 +83,7 @@ class StreamingFeatureSettingsUpdate(BaseModel):
 
 class HlsSettingsUpdate(BaseModel):
     enabled: bool = False
-    codec_profile: Literal["he_aac_192"] = HLS_CODEC_PROFILE
+    codec_profile: Literal["he_aac_v1_96_192", "he_aac_192"] = HLS_CODEC_PROFILE
 
 
 class QualityVariantSettingsUpdate(BaseModel):
@@ -170,7 +184,7 @@ def _system_feature_payload(settings: dict) -> dict:
         ),
         "server_side_config_required": [
             "Enable the Rocket status and health endpoints in the origin configuration.",
-            "Keep HLS disabled until the HE-AAC 192 runtime is implemented and authorized.",
+            "Configure Nginx /hls/ on the same Windows host as the selected HLS runtime owner.",
             "Configure fallback mounts or files at the origin.",
             "Configure listener-auth webhooks before enforcing private streams.",
         ],
@@ -414,17 +428,63 @@ def _origin_capacity_diagnostics(
     }
 
 
-def _hls_settings_payload(settings: dict) -> dict:
-    return {
-        "enabled": False,
-        "runtime_available": HLS_RUNTIME_AVAILABLE,
-        "status": "planned",
-        "codec_profile": HLS_CODEC_PROFILE,
-        "codec": HLS_CODEC_LABEL,
-        "bitrate_kbps": HLS_BITRATE_KBPS,
-        "playlist_active": False,
-        "stored_disabled": not _truthy(settings.get("hls_enabled", "false")),
-    }
+def _hls_sources(conn) -> list[dict]:
+    """Build the six HLS inputs from the persisted normal station outputs."""
+
+    output_repo = StationOutputRepository(conn)
+    sources: list[dict] = []
+    for station in StationRepository(conn).list_all():
+        station_id = int(station["id"])
+        output = output_repo.get(station_id)
+        if output is None or not _truthy(output["icecast_enabled"], False):
+            continue
+        mount = str(output["icecast_mount"] or "").strip()
+        radio = mount.strip("/").lower()
+        if radio not in HLS_RADIOS:
+            continue
+        try:
+            tls = _truthy(output["icecast_tls_enabled"], False)
+        except (KeyError, IndexError):
+            tls = False
+        sources.append(
+            {
+                "radio": radio,
+                "station_id": station_id,
+                "mount": f"/{radio}",
+                "host": str(output["icecast_host"] or "127.0.0.1"),
+                "port": int(output["icecast_port"] or 8000),
+                "tls": tls,
+            }
+        )
+    return sorted(sources, key=lambda item: HLS_RADIOS.index(item["radio"]))
+
+
+def _hls_settings_payload(settings: dict, sources: list[dict] | None = None) -> dict:
+    payload = hls_runtime_manager.status(settings=settings)
+    payload.update(
+        {
+            "enabled": _truthy(settings.get("hls_enabled", "false")),
+            "runtime_available": bool(payload.get("runtime_available")),
+            "status": str(payload.get("status") or "stopped"),
+            "codec_profile": HLS_CODEC_PROFILE,
+            "codec": HLS_CODEC_LABEL,
+            "bitrate_kbps": HLS_BITRATE_KBPS,
+            "low_bitrate_kbps": HLS_LOW_BITRATE_KBPS,
+            "high_bitrate_kbps": HLS_HIGH_BITRATE_KBPS,
+            "stored_disabled": not _truthy(settings.get("hls_enabled", "false")),
+            "source_mounts": [
+                str(item.get("mount") or "")
+                for item in (sources if sources is not None else [])
+            ],
+            "source_count": len(sources or []),
+            "public_base_url": str(
+                settings.get("hls_public_base_url")
+                or settings.get("stream_public_base_url")
+                or ""
+            ),
+        }
+    )
+    return payload
 
 
 def _refresh_quality_music_runtimes(channels: list[dict]) -> list[dict]:
@@ -589,9 +649,70 @@ def get_hls_settings(
     conn = get_connection()
     try:
         settings = SettingsRepository(conn).get_system()
-        return _hls_settings_payload(settings)
+        return _hls_settings_payload(settings, _hls_sources(conn))
     finally:
         conn.close()
+
+
+def _persist_hls_enabled(enabled: bool) -> tuple[dict, list[dict]]:
+    init_db()
+    conn = get_connection()
+    try:
+        repo = SettingsRepository(conn)
+        repo.upsert_system(
+            {
+                "hls_enabled": str(bool(enabled)).lower(),
+                "hls_codec_profile": HLS_CODEC_PROFILE,
+                "hls_bitrate_kbps": str(HLS_HIGH_BITRATE_KBPS),
+                "hls_low_bitrate_kbps": str(HLS_LOW_BITRATE_KBPS),
+                "hls_high_bitrate_kbps": str(HLS_HIGH_BITRATE_KBPS),
+                "hls_segment_duration_seconds": "6",
+                "hls_playlist_size": "10",
+                # Keep the legacy Rocket/origin toggle off; this runtime is
+                # controlled by the dedicated HLS manager and buttons.
+                "rocket_hls_enabled": "false",
+            }
+        )
+        stored = dict(repo.get_system())
+        return stored, _hls_sources(conn)
+    finally:
+        conn.close()
+
+
+def _start_hls_runtime() -> dict:
+    init_db()
+    conn = get_connection()
+    try:
+        settings = dict(SettingsRepository(conn).get_system())
+        sources = _hls_sources(conn)
+    finally:
+        conn.close()
+    try:
+        hls_runtime_manager.start(sources, settings=settings)
+    except HlsRuntimeError as exc:
+        detail = {"error_code": exc.error_code, "message": exc.message}
+        detail.update(exc.details)
+        raise HTTPException(status_code=409, detail=detail) from exc
+    stored, persisted_sources = _persist_hls_enabled(True)
+    return {"ok": True, "hls": _hls_settings_payload(stored, persisted_sources)}
+
+
+@router.post("/api/settings/hls/start")
+def start_hls(
+    _user=Depends(require_permission("stations.edit")),
+):
+    """Start all six HE-AAC HLS writers after verifying decoded source bytes."""
+
+    return _start_hls_runtime()
+
+
+@router.post("/api/settings/hls/stop")
+def stop_hls(
+    _user=Depends(require_permission("stations.edit")),
+):
+    hls_runtime_manager.stop()
+    stored, sources = _persist_hls_enabled(False)
+    return {"ok": True, "hls": _hls_settings_payload(stored, sources)}
 
 
 @router.put("/api/settings/hls")
@@ -599,27 +720,15 @@ def update_hls_settings(
     payload: HlsSettingsUpdate,
     _user=Depends(require_permission("stations.edit")),
 ):
+    """Persist the HLS policy; enabling it also starts and verifies the runtime."""
+
+    if payload.codec_profile not in {HLS_CODEC_PROFILE, "he_aac_192"}:
+        raise HTTPException(status_code=400, detail="Only HE-AAC v1 96/192 is supported for HLS.")
     if payload.enabled:
-        raise HTTPException(
-            status_code=409,
-            detail="HLS runtime is planned but not installed; HLS remains disabled.",
-        )
-    init_db()
-    conn = get_connection()
-    try:
-        repo = SettingsRepository(conn)
-        repo.upsert_system(
-            {
-                "hls_enabled": "false",
-                "hls_codec_profile": HLS_CODEC_PROFILE,
-                "hls_bitrate_kbps": str(HLS_BITRATE_KBPS),
-                "rocket_hls_enabled": "false",
-            }
-        )
-        stored = repo.get_system()
-        return {"ok": True, "hls": _hls_settings_payload(stored)}
-    finally:
-        conn.close()
+        return _start_hls_runtime()
+    hls_runtime_manager.stop()
+    stored, sources = _persist_hls_enabled(False)
+    return {"ok": True, "hls": _hls_settings_payload(stored, sources)}
 
 
 @router.get("/api/streaming/features")
@@ -670,7 +779,10 @@ def update_streaming_features(
     if payload.rocket_hls_enabled:
         raise HTTPException(
             status_code=409,
-            detail="HLS runtime is planned but not installed; HLS remains disabled.",
+            detail=(
+                "Use the dedicated HLS panel and Start HLS endpoint; the legacy "
+                "Rocket toggle remains disabled to prevent a duplicate writer."
+            ),
         )
     init_db()
     conn = get_connection()
@@ -766,10 +878,12 @@ def diagnose_quality_outputs(
             1
             for channel in channels
             for variant in channel.get("variants") or []
-            if variant.get("enabled") and variant.get("quality") != "flac"
+            if variant.get("enabled")
+            and variant.get("quality") != "flac"
+            and str(variant.get("stream_codec_profile") or "").startswith("opus_")
         )
-        encoder_capability = inspect_opus_encoder()
-        encoder_capability["required_by_enabled_mounts"] = enabled_opus_mounts
+        opus_capability = inspect_opus_encoder()
+        he_aac_capability = inspect_he_aac_encoder()
         configuration_issues = []
         for channel in channels:
             if not channel.get("external") and not channel.get("station_found"):
@@ -786,12 +900,27 @@ def diagnose_quality_outputs(
                     configuration_issues.append(
                         f"{channel['channel_id']}:primary_mount_disabled"
                     )
-                if primary.get("stream_codec_profile") != "opus_192":
+                if primary.get("stream_codec_profile") != "he_aac_192":
                     configuration_issues.append(
-                        f"{channel['channel_id']}:primary_mount_not_opus_192"
+                        f"{channel['channel_id']}:primary_mount_profile_invalid"
                     )
-        if enabled_opus_mounts and not encoder_capability.get("available"):
+        if enabled_opus_mounts and not opus_capability.get("available"):
             configuration_issues.append("opus_encoder_unavailable")
+        enabled_he_aac_mounts = sum(
+            1
+            for channel in channels
+            for variant in channel.get("variants") or []
+            if variant.get("enabled")
+            and str(variant.get("stream_codec_profile") or "").startswith("he_aac_")
+        ) + sum(
+            1
+            for channel in channels
+            if str(dict(channel.get("primary") or {}).get("stream_codec_profile") or "").startswith("he_aac_")
+        )
+        he_aac_capability["required_by_enabled_mounts"] = enabled_he_aac_mounts
+        opus_capability["required_by_enabled_mounts"] = enabled_opus_mounts
+        if enabled_he_aac_mounts and not he_aac_capability.get("available"):
+            configuration_issues.append("he_aac_encoder_unavailable_fallback_opus")
         bridge = inspect_quality_bridge()
         if not bridge.get("ok"):
             configuration_issues.append(str(bridge.get("error_code") or "bridge_invalid"))
@@ -828,7 +957,8 @@ def diagnose_quality_outputs(
             "enabled_local_mount_count": enabled_local_mount_count,
             "configuration_issues": configuration_issues,
             "external_bridge": bridge,
-            "opus_encoder": encoder_capability,
+            "opus_encoder": opus_capability,
+            "he_aac_encoder": he_aac_capability,
             "origin_capacity": origin_capacity,
             "runtime": runtime_diagnostics,
             "credentials_exposed": False,
@@ -977,10 +1107,20 @@ def apply_quality_outputs(
             1
             for channel in channels
             for variant in channel.get("variants") or []
-            if variant.get("enabled") and variant.get("quality") != "flac"
+            if variant.get("enabled")
+            and variant.get("quality") != "flac"
+            and str(variant.get("stream_codec_profile") or "").startswith("opus_")
         )
-        encoder_capability = inspect_opus_encoder()
-        if enabled_opus_mounts and not encoder_capability.get("available"):
+        enabled_he_aac_mounts = sum(
+            1
+            for channel in channels
+            for variant in channel.get("variants") or []
+            if variant.get("enabled")
+            and str(variant.get("stream_codec_profile") or "").startswith("he_aac_")
+        )
+        opus_capability = inspect_opus_encoder()
+        he_aac_capability = inspect_he_aac_encoder()
+        if enabled_opus_mounts and not opus_capability.get("available"):
             raise HTTPException(
                 status_code=409,
                 detail=(
@@ -989,6 +1129,10 @@ def apply_quality_outputs(
                     "outputs were applied."
                 ),
             )
+        if enabled_he_aac_mounts and not he_aac_capability.get("available"):
+            # HE-AAC is the selected on-air format. Do not silently switch a
+            # public mount back to Ogg/Opus when the FDK encoder is missing.
+            _log.warning("HE-AAC encoder unavailable; mount remains HE-AAC and will retry")
         try:
             bridge = write_quality_bridge(settings)
         except Exception:

@@ -22,7 +22,38 @@ def _managed_binary(executable_name: str) -> Path | None:
     return candidate if candidate.exists() else None
 
 
+def _configured_binary(executable_name: str) -> Path | None:
+    """Return an explicitly configured local binary before bundled tools.
+
+    The RadioTEDU HE-AAC build is intentionally kept outside the repository
+    and selected with RADIOTEDU_FFMPEG_PATH.  This also prevents a packaged
+    Opus-only ffmpeg from silently taking precedence over the operator's
+    licensed/nonfree local FDK build.
+    """
+    env_name = {
+        "ffmpeg.exe": "RADIOTEDU_FFMPEG_PATH",
+        "ffmpeg": "RADIOTEDU_FFMPEG_PATH",
+        "ffprobe.exe": "RADIOTEDU_FFPROBE_PATH",
+        "ffprobe": "RADIOTEDU_FFPROBE_PATH",
+    }.get(str(executable_name).lower())
+    if not env_name:
+        return None
+    raw = os.getenv(env_name, "").strip()
+    if not raw:
+        return None
+    candidate = Path(raw).expanduser()
+    return candidate.resolve() if candidate.is_file() else None
+
+
 def resolve_binary_details(executable_name: str) -> dict[str, str | bool]:
+    configured = _configured_binary(executable_name)
+    if configured:
+        return {
+            "found": True,
+            "path": str(configured),
+            "source": "configured",
+        }
+
     managed = _managed_binary(executable_name)
     if managed:
         return {

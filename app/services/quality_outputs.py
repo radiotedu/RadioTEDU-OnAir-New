@@ -11,9 +11,9 @@ FLAC_CHANNEL_IDS = frozenset({"classic", "cazz"})
 QUALITY_PROFILES = {
     "low": {
         "label": "Low",
-        "codec": "Opus",
-        "stream_codec_profile": "opus_32",
-        "stream_bitrate_kbps": 32,
+        "codec": "HE-AAC v1",
+        "stream_codec_profile": "he_aac_96",
+        "stream_bitrate_kbps": 96,
     },
     "flac": {
         "label": "Lossless",

@@ -22,6 +22,10 @@ _log = logging.getLogger(__name__)
 # jumps.  1024 chunks is ~21.8 s and about 4 MiB per active sink, or roughly
 # 120 MiB for the complete 30-mount local plan.
 _PCM_QUEUE_MAX_CHUNKS = 1024
+# FLAC is lossless and its Ogg pages can briefly need more write-side reserve
+# on a busy origin. Keep the larger reserve only on the two FLAC branches so
+# AAC and local programme timing remain unchanged.
+_PCM_FLAC_QUEUE_MAX_CHUNKS = 2048
 _PCM_INITIAL_PROGRAMME_GRACE_SECONDS = 0.25
 _PCM_PROGRAMME_START_RESERVE_BYTES = 48 * 1024
 _PCM_PROGRAMME_START_MAX_WAIT_SECONDS = 0.25
@@ -183,8 +187,9 @@ class IcecastAudioSink:
         self._probe_lock = threading.Lock()
         self._mount_healthy = None
         self._probe_failures = 0
+        self._pcm_queue_capacity_chunks = _PCM_QUEUE_MAX_CHUNKS
         self._pcm_queue: queue.Queue[bytes] = queue.Queue(
-            maxsize=_PCM_QUEUE_MAX_CHUNKS
+            maxsize=self._pcm_queue_capacity_chunks
         )
         self._writer_stop = threading.Event()
         self._writer_thread = None
@@ -343,7 +348,7 @@ class IcecastAudioSink:
                     else round(backpressure_age, 3)
                 ),
                 "queued_pcm_chunks": int(self._pcm_queue.qsize()),
-                "pcm_queue_capacity_chunks": int(_PCM_QUEUE_MAX_CHUNKS),
+                "pcm_queue_capacity_chunks": int(self._pcm_queue_capacity_chunks),
                 "dropped_pcm_chunks": int(self._writer_dropped_chunks),
                 "continuity_silence_chunks": int(self._writer_silence_chunks),
                 "last_write_age_seconds": (
@@ -751,6 +756,15 @@ class IcecastAudioSink:
         if self.is_running() and self._signature == signature:
             return self._process
         self.stop(preserve_probe_state=False)
+        profile = str(cfg.stream_codec_profile or "").strip().lower()
+        queue_capacity = (
+            _PCM_FLAC_QUEUE_MAX_CHUNKS
+            if profile.startswith(("ogg_flac", "flac_ogg"))
+            else _PCM_QUEUE_MAX_CHUNKS
+        )
+        if queue_capacity != self._pcm_queue_capacity_chunks:
+            self._pcm_queue_capacity_chunks = queue_capacity
+            self._pcm_queue = queue.Queue(maxsize=queue_capacity)
         _log.info(
             "Starting Icecast sink host=%s port=%s mount=%s user=%s",
             cfg.icecast_host,
