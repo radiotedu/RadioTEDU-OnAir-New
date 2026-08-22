@@ -105,6 +105,24 @@ powershell -ExecutionPolicy Bypass -File .\tools\Install-RadioTEDU-OneShot.ps1
 | `tests/` | Python, JavaScript, integration, installer, and reliability contracts |
 | `docs/` | Architecture, operations, recovery, and operator guidance |
 
+### Library metadata and safe cleanup
+
+The three library tools in `tools/` are deliberately conservative and are safe to run while the station workers are on air:
+
+* `reconcile_library_metadata.py` fills missing artist/title/album fields from the filename and (with the MusicBrainz rate limit) its local cache. It writes a tag backup before changing embedded tags.
+* `repair_bad_metadata.py` repairs clearly filename-derived or placeholder tags only; it never replaces a complete, plausible tag set.
+* `quarantine_non_audio_library_files.py` backs up and removes sidecars such as `.json`, `.nfo`, and `.txt` while explicitly excluding audio and cover-art extensions (`.jpg`, `.jpeg`, `.png`, `.webp`, `.gif`, `.gıf`, `.bmp`, `.tif`, `.tiff`). Run it with `--dry-run` first.
+
+Example (Windows PowerShell):
+
+```powershell
+py tools\reconcile_library_metadata.py --dry-run
+py tools\repair_bad_metadata.py --dry-run
+py tools\quarantine_non_audio_library_files.py --dry-run --backup-dir C:\ProgramData\RadioTEDU\OnAir\Recovery\pre-clean
+```
+
+Kapak görselleri (cover art) kütüphanenin parçasıdır ve temizleme aracı tarafından aday olarak bile alınmaz. Her değişiklikten önce `C:\ProgramData\RadioTEDU\OnAir\Recovery` altında geri dönüş kopyası oluşturulmalıdır.
+
 ## Development
 
 Use Python 3.12 on Windows. Runtime state, databases, credentials, media, generated packages, and local tool bundles do not belong in Git.
