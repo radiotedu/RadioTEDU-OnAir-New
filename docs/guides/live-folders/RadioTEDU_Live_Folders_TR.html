@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RadioTEDU OnAir — Canlı Klasör Rehberi</title>
+<style>
+:root{color-scheme:dark;--bg:#0b0d12;--card:#151a24;--line:#2b3445;--text:#f5f7fb;--muted:#b4bfd0;--accent:#61a4ff;--ok:#5ee09b;--warn:#ffd166}*{box-sizing:border-box}body{margin:0;background:linear-gradient(135deg,#0b0d12,#15101d);font:16px/1.6 Segoe UI,Arial,sans-serif;color:var(--text)}main{max-width:1100px;margin:auto;padding:34px 22px 70px}h1{font-size:clamp(2rem,5vw,3.6rem);line-height:1.05;margin:.2em 0;color:#fff}h2{margin-top:2.2em;color:#fff}h3{color:var(--accent);margin-bottom:.35em}.lead{font-size:1.15rem;color:var(--muted);max-width:850px}.badge{display:inline-block;padding:.3rem .7rem;border:1px solid var(--line);border-radius:999px;color:var(--ok);font-weight:700;margin:.25rem .3rem .25rem 0}.card{background:rgba(21,26,36,.94);border:1px solid var(--line);border-radius:16px;padding:20px;margin:18px 0;box-shadow:0 8px 30px #0004}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px}.step{border-left:4px solid var(--accent);padding:10px 14px;background:#10151e;border-radius:8px}.path{font-family:Consolas,monospace;color:#cfe2ff;background:#0a0f17;border:1px solid #263449;border-radius:6px;padding:.15rem .4rem;overflow-wrap:anywhere}.note{border-left:4px solid var(--warn);padding:12px 15px;background:#2b2413;color:#ffe9a6;border-radius:8px}.ok{border-left:4px solid var(--ok);padding:12px 15px;background:#10231c;color:#caffdf;border-radius:8px}table{width:100%;border-collapse:collapse;margin:12px 0}th,td{text-align:left;padding:10px;border-bottom:1px solid var(--line);vertical-align:top}th{color:#cfe2ff;background:#10151e}img{max-width:100%;border:1px solid var(--line);border-radius:10px;display:block;margin:12px 0}figcaption{color:var(--muted);font-size:.92rem}code{font-family:Consolas,monospace;color:#d9e8ff}li{margin:.45em 0}.small{font-size:.9rem;color:var(--muted)}@media print{body{background:#fff;color:#111}.card,.step{break-inside:avoid;background:#fff;border-color:#aaa;box-shadow:none}.lead,.small,figcaption{color:#444}th{background:#eee;color:#111}}
+</style>
+</head>
+<body><main>
+<p><span class="badge">RadioTEDU OnAir</span><span class="badge">Canlı klasörler</span><span class="badge">Türkçe</span></p>
+<h1>Şarkı ekleme ve otomatik yayın rehberi</h1>
+<p class="lead">Bu belge, teknik olmayan bir görevlinin şarkıyı doğru radyo klasörüne koymasını ve OnAir uygulamasının parçayı kendiliğinden kütüphaneye alıp sıraya eklemesini anlatır.</p>
+<div class="ok"><strong>Bu bilgisayarda doğrulandı:</strong> Bir test parçası canlı Energize klasörüne kopyalandı; yaklaşık 10–15 saniye içinde veritabanına alındı ve dosya kaldırılınca otomatik pasifleştirildi. Yayın yeniden başlatılmadı.</div>
+
+<h2>1. Hangi klasöre koymalıyım?</h2>
+<div class="card"><table><thead><tr><th>Yayın</th><th>Canlı klasör</th><th>Uygulama / mount</th><th>İçerik kuralı</th></tr></thead><tbody>
+<tr><td>Classical</td><td><span class="path">H:\RadioTEDU Songs\Classical</span></td><td><code>/classic</code>, <code>/classic-low</code>, <code>/classic-flac</code></td><td>Gerçek klasik eserler. “No Copyright”, “Royalty Free”, stok/video müziği koymayın.</td></tr>
+<tr><td>Lo-Fi</td><td><span class="path">H:\RadioTEDU Songs\lofi</span></td><td><code>/lofi</code>, <code>/lofi-low</code></td><td>Lo-Fi ve izinli bağımsız içerik. No-copyright içerik yalnızca burada kabul edilebilir.</td></tr>
+<tr><td>Pop / RadioTEDU</td><td><span class="path">H:\RadioTEDU Songs\Pop</span></td><td><code>/radio</code>, <code>/radio-low</code></td><td>Ticari/izinli pop. No-copyright veya “background/stock music” koymayın.</td></tr>
+<tr><td>Jazz / Cazz</td><td><span class="path">H:\RadioTEDU Songs\Jazz</span></td><td><code>/cazz</code>, <code>/cazz-low</code>, <code>/cazz-flac</code></td><td>Jazz. FLAC yalnızca bu istasyonda desteklenir.</td></tr>
+<tr><td>Rock</td><td><span class="path">H:\RadioTEDU Songs\Rock</span></td><td><code>/rock</code>, <code>/rock-low</code></td><td>Rock. Video başlığı, stok müzik ve no-copyright paketleri koymayın.</td></tr>
+<tr><td>Energize</td><td><span class="path">H:\RadioTEDU Songs\Energize</span></td><td><code>/energize</code>, <code>/energize-low</code></td><td>Gerçekten enerjik: dance, electronic, pop-dance, house, rock-energy vb. Şu an güvenli aktif kütüphane 84 parçadır; eski no-copyright klasörünü kullanmayın.</td></tr>
+</tbody></table></div>
+<div class="note"><strong>Önemli:</strong> <span class="path">H:\Broadcast\RadioTEDU-OnAir\Playlists\energize\audio</span> eski/legacy klasördür. İçeriğinin büyük bölümü “Copyright Free/No Copyright Music” olarak etiketli olduğundan Energize canlı klasörüne otomatik aktarılmadı.</div>
+
+<h2>2. Şarkıyı hazırlama</h2>
+<div class="grid"><div class="step"><h3>Adım A — Dosyayı tamamlayın</h3><p>Dosyayı önce bilgisayarınızda tamamen indirin/kopyalayın. Kopyalama sürerken canlı klasöre bırakmayın; dosya yarım okunabilir.</p></div><div class="step"><h3>Adım B — Etiketleri doldurun</h3><p>Artist, Title, Album ve mümkünse Genre alanlarını yazın. MusicBrainz Picard gibi bir etiketleyici kullanabilirsiniz. Türkçe parça eklemeyin.</p></div><div class="step"><h3>Adım C — Uygun format</h3><p>MP3, FLAC, M4A, AAC/ADTS, WAV, OGG/Opus ve diğer desteklenen ses uzantıları kabul edilir. Arşiv/ZIP dosyasını doğrudan koymayın.</p></div></div>
+<div class="card"><figure><img src="assets/media-library.png" alt="RadioTEDU OnAir Media ekranı"><figcaption>OnAir Media ekranı: istasyon klasörü, alt klasörler, “Sync folder and verify station library” ve “Rescan managed folder now” kontrolleri.</figcaption></figure></div>
+
+<h2>3. Canlı klasöre koyma</h2>
+<ol><li>Windows Dosya Gezgini'ni açın.</li><li>Yukarıdaki tabloda doğru istasyon klasörünü açın.</li><li>Hazırladığınız ses dosyasını klasöre kopyalayın. Alt klasörler de izlenir.</li><li>Kopyalama tamamen bitince dosya boyutunun sabit kaldığını kontrol edin.</li><li>Normalde hiçbir düğmeye basmanız gerekmez. Watcher iki aynı gözlemden sonra dosyayı doğrular; pratikte yaklaşık 10–15 saniye içinde kütüphaneye alır.</li><li>Parça mevcut şarkının ortasında kesilmez; otomatik kuyrukta uygun bir sonraki sıraya girer.</li></ol>
+<div class="ok"><strong>İşleyiş:</strong> klasör taraması → metadata/oynatılabilirlik kontrolü → istasyon kütüphanesine ekleme → kuyruk otomatik doldurma. Bilgisayarı veya yayını yeniden başlatmak gerekmez.</div>
+
+<h2>4. Kontrol etme</h2>
+<ol><li>OnAir'de ilgili istasyonu seçin ve <strong>Media</strong> sayfasına gidin.</li><li>Managed music folder alanının doğru yolu gösterdiğini kontrol edin.</li><li>Beklemek istemiyorsanız <strong>Rescan managed folder now</strong> düğmesine basın.</li><li>Sonuç “verified / watching” ve hata sayısı 0 olmalıdır.</li><li>Şarkı sıraya hemen görünmeyebilir; mevcut kuyruk doluysa parça, kuyrukta yer açıldığında seçilir. Bu, yayının kesilmesini önleyen davranıştır.</li></ol>
+<div class="card"><figure><img src="assets/settings.png" alt="RadioTEDU OnAir Settings ekranı"><figcaption>Ayarlar ekranı: yayın çıkışı, Icecast ve yerel monitör seçenekleri. Canlı klasör yolu Media sayfasından yönetilir.</figcaption></figure></div>
+
+<h2>5. Metadata ve MusicBrainz kuralı</h2>
+<ul><li>Önce dosyanın iç etiketlerini kullanın; dosya adı yalnızca yedek ipucudur.</li><li>Artist/Title kesin değilse tahmin etmeyin. MusicBrainz ile exact title + artist eşleşmesi bulunmadan parçayı canlıya almayın.</li><li>Bu bilgisayarda 28 kesin eşleşme düzeltilip dosyanın içine yazıldı; orijinal dosyalar geri dönüş yedeğinde tutuluyor.</li><li>Classical canlı kütüphanesindeki 40 adet “No Copyright/Royalty Free/Free Music” parça diğer istasyonlarda çalmaması için autoplay dışına alındı. Dosyalar silinmedi.</li><li>Artist, Title ve Album değişikliğinden sonra dosyayı yeniden adlandırmayın; yeniden tarama aynı dosyayı izler.</li></ul>
+
+<h2>6. Bilgisayar açılışı ve internet kopması</h2>
+<div class="card"><ul><li><strong>RadioTEDU.OnAir.Supervisor</strong> Windows servisi Automatic olarak kuruludur ve <strong>Tcpip + Dnscache</strong> bağımlılıklarına sahiptir.</li><li>Servis çökmesi durumunda 5, 15 ve 30 saniyelik yeniden başlatma denemeleri vardır.</li><li>Icecast bağlantısı için uygulama 1, 2, 4, 8, 15 ve 30 saniyelik artan tekrar denemeleri yapar; internet geri gelince mount yeniden bağlanır.</li><li>Altı aktif istasyonda <strong>broadcast_autostart_enabled=true</strong>; AI kapalı, voting kapalı, Juke kapalıdır.</li><li>İnternet geri gelmezse yerel program akışı korunur; bağlantı geldiğinde encoder tekrar bağlanır.</li></ul></div>
+
+<h2>7. Bir şey çalışmazsa</h2>
+<table><thead><tr><th>Belirti</th><th>Çözüm</th></tr></thead><tbody><tr><td>Dosya görünmüyor</td><td>Doğru istasyon klasörünü, ses uzantısını ve kopyalamanın bitmiş olduğunu kontrol edin; ardından Rescan düğmesine basın.</td></tr><tr><td>Metadata boş</td><td>Dosyayı MusicBrainz Picard ile etiketleyin; sonra dosya değişikliğini kaydedip watcher'ın yeniden taramasını bekleyin.</td></tr><tr><td>Şarkı hemen çalmıyor</td><td>Bu normaldir: mevcut şarkı kesilmez. Kuyrukta yer açılınca parça seçilir.</td></tr><tr><td>Mount kesildi</td><td>Bilgisayarı yeniden başlatmayın. 1–30 saniyelik Icecast yeniden bağlanma döngüsünü bekleyin ve OnAir sağlık ekranını kontrol edin.</td></tr><tr><td>Hata devam ediyor</td><td>Dosyayı canlı klasörden çıkarıp masaüstündeki karantina klasörüne alın; görevliye istasyon, dosya adı ve saat bilgisini verin.</td></tr></tbody></table>
+<p class="small">Son doğrulama: 22 Ağustos 2026. Bu kılavuzda parola, Icecast gizli anahtarı veya kullanıcı sırrı bulunmaz.</p>
+</main></body></html>

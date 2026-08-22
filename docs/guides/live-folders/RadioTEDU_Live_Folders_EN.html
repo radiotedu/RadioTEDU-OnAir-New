@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RadioTEDU OnAir — Live Folder Guide</title>
+<style>
+:root{color-scheme:dark;--bg:#0b0d12;--card:#151a24;--line:#2b3445;--text:#f5f7fb;--muted:#b4bfd0;--accent:#61a4ff;--ok:#5ee09b;--warn:#ffd166}*{box-sizing:border-box}body{margin:0;background:linear-gradient(135deg,#0b0d12,#15101d);font:16px/1.6 Segoe UI,Arial,sans-serif;color:var(--text)}main{max-width:1100px;margin:auto;padding:34px 22px 70px}h1{font-size:clamp(2rem,5vw,3.6rem);line-height:1.05;margin:.2em 0;color:#fff}h2{margin-top:2.2em;color:#fff}h3{color:var(--accent);margin-bottom:.35em}.lead{font-size:1.15rem;color:var(--muted);max-width:850px}.badge{display:inline-block;padding:.3rem .7rem;border:1px solid var(--line);border-radius:999px;color:var(--ok);font-weight:700;margin:.25rem .3rem .25rem 0}.card{background:rgba(21,26,36,.94);border:1px solid var(--line);border-radius:16px;padding:20px;margin:18px 0;box-shadow:0 8px 30px #0004}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px}.step{border-left:4px solid var(--accent);padding:10px 14px;background:#10151e;border-radius:8px}.path{font-family:Consolas,monospace;color:#cfe2ff;background:#0a0f17;border:1px solid #263449;border-radius:6px;padding:.15rem .4rem;overflow-wrap:anywhere}.note{border-left:4px solid var(--warn);padding:12px 15px;background:#2b2413;color:#ffe9a6;border-radius:8px}.ok{border-left:4px solid var(--ok);padding:12px 15px;background:#10231c;color:#caffdf;border-radius:8px}table{width:100%;border-collapse:collapse;margin:12px 0}th,td{text-align:left;padding:10px;border-bottom:1px solid var(--line);vertical-align:top}th{color:#cfe2ff;background:#10151e}img{max-width:100%;border:1px solid var(--line);border-radius:10px;display:block;margin:12px 0}figcaption{color:var(--muted);font-size:.92rem}code{font-family:Consolas,monospace;color:#d9e8ff}li{margin:.45em 0}.small{font-size:.9rem;color:var(--muted)}@media print{body{background:#fff;color:#111}.card,.step{break-inside:avoid;background:#fff;border-color:#aaa;box-shadow:none}.lead,.small,figcaption{color:#444}th{background:#eee;color:#111}}
+</style>
+</head>
+<body><main>
+<p><span class="badge">RadioTEDU OnAir</span><span class="badge">Live folders</span><span class="badge">English</span></p>
+<h1>How to add music and let OnAir queue it automatically</h1>
+<p class="lead">This guide is for non-technical staff. Put a completed audio file into the correct station folder; RadioTEDU OnAir watches the folder, validates the file, imports its metadata and makes it eligible for the next safe queue refill.</p>
+<div class="ok"><strong>Verified on this PC:</strong> A test file copied into the live Energize folder was imported in about 10–15 seconds and was automatically deactivated when removed. No station was restarted.</div>
+
+<h2>1. Choose the correct folder</h2>
+<div class="card"><table><thead><tr><th>Station</th><th>Live folder</th><th>Application / mount</th><th>Content rule</th></tr></thead><tbody>
+<tr><td>Classical</td><td><span class="path">H:\RadioTEDU Songs\Classical</span></td><td><code>/classic</code>, <code>/classic-low</code>, <code>/classic-flac</code></td><td>Genuine classical works. Do not add “No Copyright”, “Royalty Free” or stock/video music.</td></tr>
+<tr><td>Lo-Fi</td><td><span class="path">H:\RadioTEDU Songs\lofi</span></td><td><code>/lofi</code>, <code>/lofi-low</code></td><td>Lo-Fi and licensed independent material. No-copyright material is allowed only here.</td></tr>
+<tr><td>Pop / RadioTEDU</td><td><span class="path">H:\RadioTEDU Songs\Pop</span></td><td><code>/radio</code>, <code>/radio-low</code></td><td>Licensed/owned pop. Do not add no-copyright, stock or background-music packs.</td></tr>
+<tr><td>Jazz / Cazz</td><td><span class="path">H:\RadioTEDU Songs\Jazz</span></td><td><code>/cazz</code>, <code>/cazz-low</code>, <code>/cazz-flac</code></td><td>Jazz only. FLAC is enabled only for this station.</td></tr>
+<tr><td>Rock</td><td><span class="path">H:\RadioTEDU Songs\Rock</span></td><td><code>/rock</code>, <code>/rock-low</code></td><td>Rock only. Do not add video-title, stock or no-copyright packs.</td></tr>
+<tr><td>Energize</td><td><span class="path">H:\RadioTEDU Songs\Energize</span></td><td><code>/energize</code>, <code>/energize-low</code></td><td>Actually energetic: dance, electronic, pop-dance, house, energetic rock, etc. The safe active library currently has 84 tracks; do not use the legacy no-copyright folder.</td></tr>
+</tbody></table></div>
+<div class="note"><strong>Important:</strong> <span class="path">H:\Broadcast\RadioTEDU-OnAir\Playlists\energize\audio</span> is a legacy folder. Its indexed material is largely labelled “Copyright Free/No Copyright Music”, so it was not moved into the live Energize folder.</div>
+
+<h2>2. Prepare the file</h2>
+<div class="grid"><div class="step"><h3>Step A — Finish the copy</h3><p>Download or copy the file completely before placing it in a live folder. A half-written file can fail validation.</p></div><div class="step"><h3>Step B — Add tags</h3><p>Set Artist, Title, Album and, when known, Genre. MusicBrainz Picard is suitable for exact metadata matches. Do not add Turkish-language tracks for now.</p></div><div class="step"><h3>Step C — Use an audio format</h3><p>MP3, FLAC, M4A, AAC/ADTS, WAV, OGG/Opus and other supported audio extensions are accepted. Do not copy ZIP/RAR archives.</p></div></div>
+<div class="card"><figure><img src="assets/media-library.png" alt="RadioTEDU OnAir Media page"><figcaption>OnAir Media page: station folder, subfolder option, “Sync folder and verify station library” and “Rescan managed folder now”.</figcaption></figure></div>
+
+<h2>3. Put it in the live folder</h2>
+<ol><li>Open Windows File Explorer.</li><li>Open the station folder from the table.</li><li>Copy the prepared audio file into it. Subfolders are watched too.</li><li>Wait until the copy is complete and the file size stops changing.</li><li>Normally no button is required. The watcher needs two identical observations; in practice the file is imported in about 10–15 seconds.</li><li>The current song is not cut. The new file becomes eligible for a safe future queue position.</li></ol>
+<div class="ok"><strong>Pipeline:</strong> folder scan → playable/metadata validation → station library import → automatic queue refill. A PC or broadcast restart is not required.</div>
+
+<h2>4. Verify it</h2>
+<ol><li>Select the station in OnAir and open <strong>Media</strong>.</li><li>Confirm that Managed music folder shows the expected path.</li><li>If you do not want to wait, click <strong>Rescan managed folder now</strong>.</li><li>The watcher should show “verified / watching” with zero retry errors.</li><li>The file may not appear in the queue immediately. If the queue is already full, it is selected when space opens; this protects the live programme from an abrupt cut.</li></ol>
+<div class="card"><figure><img src="assets/settings.png" alt="RadioTEDU OnAir Settings page"><figcaption>Settings page: output, Icecast and local monitor controls. The live folder itself is managed on the Media page.</figcaption></figure></div>
+
+<h2>5. Metadata and MusicBrainz rule</h2>
+<ul><li>Embedded file tags are authoritative; the filename is only a fallback clue.</li><li>If Artist/Title is uncertain, do not guess. Use an exact MusicBrainz title + artist match before putting the file on air.</li><li>On this PC, 28 exact matches were corrected and written into the audio files; original files are kept in the recovery backup.</li><li>Forty “No Copyright/Royalty Free/Free Music” Classical tracks were excluded from autoplay on non-Lo-Fi stations. Files were not deleted.</li><li>After tagging, do not rename the file; the watcher follows its path.</li></ul>
+
+<h2>6. PC startup and internet recovery</h2>
+<div class="card"><ul><li><strong>RadioTEDU.OnAir.Supervisor</strong> is an Automatic Windows service and depends on <strong>Tcpip + Dnscache</strong>.</li><li>If the service crashes, Windows retries it after 5, 15 and 30 seconds.</li><li>Icecast output retries with 1, 2, 4, 8, 15 and 30-second backoff. When internet connectivity returns, the mount reconnects.</li><li>All six active stations have <strong>broadcast_autostart_enabled=true</strong>; AI, voting and Juke are disabled.</li><li>If the origin is temporarily unreachable, local programme generation continues and the encoder reconnects when the network is back.</li></ul></div>
+
+<h2>7. Troubleshooting</h2>
+<table><thead><tr><th>Symptom</th><th>Action</th></tr></thead><tbody><tr><td>File does not appear</td><td>Check the station folder, extension and completed copy; then click Rescan.</td></tr><tr><td>Metadata is blank</td><td>Tag the file with MusicBrainz Picard; save it and wait for the watcher to rescan.</td></tr><tr><td>It does not play immediately</td><td>That is expected: the current song is never cut. The file is selected when the queue needs another item.</td></tr><tr><td>Mount disconnects</td><td>Do not reboot immediately. Allow the 1–30-second Icecast retry loop to reconnect and check OnAir health.</td></tr><tr><td>Validation keeps failing</td><td>Move the file out of the live folder into a quarantine folder and report the station, filename and time.</td></tr></tbody></table>
+<p class="small">Last verified: 22 August 2026. This guide contains no passwords, Icecast secrets or operator credentials.</p>
+</main></body></html>
