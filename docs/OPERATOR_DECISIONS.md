@@ -77,3 +77,29 @@ Recovery snapshots:
 Recovery snapshot:
 
 `C:\ProgramData\RadioTEDU\OnAir\backups\aac-policy-20260823T002626`
+
+## Unattended service and Git policy — 2026-08-23
+
+- `RadioTEDU.OnAir.Supervisor` is the only enabled broadcasting service. Keep
+  it automatic and owned by `LocalSystem`; do not depend on an operator login.
+- Windows service recovery restarts the supervisor after 5 seconds, 15 seconds
+  and 60 seconds, resets its failure counter after one day, and also applies
+  recovery actions to non-crash failures.
+- The ServiceHost definition keeps `restart=true` for the backend. Station
+  workers and Icecast source transports retry with bounded backoff so a lost
+  encoder or network connection recovers without advancing or skipping the
+  current queue item.
+- Keep the independent audio watchdog enabled. A service-policy audit must not
+  restart a healthy on-air service; stage code/codec changes for the next
+  naturally required backend start.
+- The nightly play-history Git task runs at 00:15, starts when a missed run
+  becomes possible, ignores overlapping instances, and retries six times at
+  15-minute intervals. It may push only the generated history mirror; it must
+  not contact MESAM, MÜYAP or another licensor.
+- Application source is backed up to the configured GitHub repository on
+  `main`. Never add live databases, credentials, reports, cache files, media or
+  release archives to the source repository.
+
+Recovery snapshot:
+
+`C:\ProgramData\RadioTEDU\OnAir\backups\unattended-service-20260823T012204`

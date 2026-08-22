@@ -57,6 +57,7 @@ def test_unified_operator_surface_exposes_all_required_sections():
     assert "/api/playlists/auto/generate" in javascript
     assert "playback_selection_policy: 'stable_rotation'" in javascript
     assert "/api/integrations/radiotedu/juke-library/upload" in javascript
-    assert "/api/integrations/radiotedu/juke-library/${action}" in javascript
+    assert "/api/integrations/radiotedu/juke-library/retire" in javascript
+    assert "/api/integrations/radiotedu/juke-library/restore" in javascript
     assert "confirmation: 'RETIRE JUKE SONG'" in javascript
     assert "confirmation: 'RESTORE JUKE SONG'" in javascript
