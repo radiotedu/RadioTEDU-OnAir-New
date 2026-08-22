@@ -57,6 +57,22 @@ The Windows service runs with `CLEANROOM_SKIP_ICECAST_METADATA=0` so these updat
 
 HLS is implemented in **Settings → HLS** but remains operator-controlled and stored **Off** until the Nginx server is prepared. When started, each normal mount is read from Icecast and published as HE-AAC v1 HLS: Low 96 kbps and High 192 kbps, 48 kHz stereo, six-second segments. HLS start does not stop Icecast. The app never falls back from HE-AAC to Opus.
 
+### Daily play history and off-machine backup
+
+Every completed music or jingle play is committed to the append-only,
+hash-chained `music_usage_log` ledger. The exporter continuously refreshes
+`Desktop\RadioTEDU Play History` with dated all-radio event/count CSVs, current-day
+aliases, all-time totals, and an integrity manifest. Each row carries the
+station name and mount, so Classical, Lo-Fi, Pop, Jazz, Rock, and Energize are
+all retained in every daily report. The Windows tasks
+`RadioTEDU-OnAir-PlayHistory-Export` (five-minute refresh) and
+`RadioTEDU-OnAir-PlayHistory-GitHub` (nightly) use the scripts in `scripts\` to
+copy the complete folder to the dedicated private repository
+[`radiotedu/RadioTEDU-OnAir-Play-History`](https://github.com/radiotedu/RadioTEDU-OnAir-Play-History).
+See [`docs/PLAY_HISTORY_BACKUP.md`](docs/PLAY_HISTORY_BACKUP.md) for the task,
+path, validation, and recovery details. No GitHub token or password is stored
+in the application repository.
+
 ## Designed to survive a reboot
 
 The stream is not tied to the desktop window. `RadioTEDU.OnAir.Supervisor` is an immediate automatic Windows service with failure recovery. At machine startup it launches the backend, restores the six operator-authorized station workers, and starts the actual Icecast source pipelines—even if nobody signs in or opens the app.
