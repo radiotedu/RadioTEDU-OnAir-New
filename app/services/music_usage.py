@@ -12,6 +12,10 @@ import csv
 import hashlib
 import json
 import logging
+import os
+import shutil
+import threading
+import time
 from datetime import date, datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
@@ -62,6 +66,34 @@ PLAY_COUNT_COLUMNS = (
     "total_played_seconds",
     "first_broadcast_at",
     "last_broadcast_at",
+)
+
+# Human-readable exports written to the operator's Desktop.  The immutable
+# SQLite/hash-chain ledger remains the source of truth; these CSVs are a
+# convenient, continuously refreshed mirror for reporting and backup.
+PLAY_HISTORY_COLUMNS = (
+    "broadcast_at_utc",
+    "station_id",
+    "station_name",
+    "stream_mounts",
+    "track_id",
+    "song_title",
+    "artist",
+    "version",
+    "composer",
+    "lyricist",
+    "phonogram_producer",
+    "label",
+    "isrc",
+    "scheduled_duration_seconds",
+    "played_duration_seconds",
+    "play_count",
+    "source_path",
+    "program_name",
+    "presenter",
+    "delivered_variants_json",
+    "log_id",
+    "entry_hash",
 )
 
 HASH_PAYLOAD_COLUMNS = (
@@ -138,6 +170,23 @@ def _csv_safe(value) -> str:
     if text.startswith(("=", "+", "-", "@")):
         return "'" + text
     return text
+
+
+def get_play_history_root() -> Path:
+    """Return the operator-visible Desktop directory for play-history CSVs.
+
+    Windows services can run with a different profile than the interactive
+    operator.  ``RADIOTEDU_PLAY_HISTORY_ROOT`` therefore wins when supplied;
+    otherwise we use the current user's Desktop, which is the normal OnAir
+    desktop deployment.
+    """
+    configured = str(os.getenv("RADIOTEDU_PLAY_HISTORY_ROOT", "")).strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    profile = str(os.getenv("USERPROFILE", "")).strip()
+    if profile:
+        return (Path(profile) / "Desktop" / "RadioTEDU Play History").resolve()
+    return (Path.home() / "Desktop" / "RadioTEDU Play History").resolve()
 
 
 def _delivered_variants(value) -> list[dict]:
@@ -328,7 +377,16 @@ class MusicUsageService:
             if existing is not None:
                 return dict(existing)
             raise
-        return dict(self.conn.execute("SELECT * FROM music_usage_log WHERE log_id=?", (stable_log_id,)).fetchone())
+        recorded = dict(
+            self.conn.execute(
+                "SELECT * FROM music_usage_log WHERE log_id=?", (stable_log_id,)
+            ).fetchone()
+        )
+        # CSV mirrors are refreshed asynchronously so the audio worker never
+        # waits on a large all-time export.  The immutable row above is already
+        # durable before the notification is sent.
+        request_music_usage_export()
+        return recorded
 
     def list_entries(self, *, station_id: int | None = None, date_from: str | None = None, date_to: str | None = None, limit: int | None = 1000) -> list[dict]:
         where: list[str] = []
@@ -477,6 +535,209 @@ class MusicUsageService:
             )
         return output.getvalue()
 
+    def _station_context_entries(self, entries: list[dict]) -> list[dict]:
+        """Add station names and every delivered mount to user-facing rows."""
+        if not entries:
+            return []
+        station_ids = sorted(
+            {
+                int(entry.get("station_id"))
+                for entry in entries
+                if str(entry.get("station_id") or "").strip().isdigit()
+            }
+        )
+        contexts: dict[int, dict[str, str]] = {}
+        if station_ids:
+            placeholders = ",".join("?" for _ in station_ids)
+            try:
+                rows = self.conn.execute(
+                    "SELECT s.id, COALESCE(s.name, '') AS station_name, "
+                    "COALESCE(o.icecast_mount, '') AS mount "
+                    "FROM stations s LEFT JOIN station_outputs o "
+                    f"ON o.station_id=s.id WHERE s.id IN ({placeholders})",
+                    tuple(station_ids),
+                ).fetchall()
+                contexts = {
+                    int(row["id"]): {
+                        "station_name": str(row["station_name"] or ""),
+                        "mount": str(row["mount"] or ""),
+                    }
+                    for row in rows
+                }
+            except Exception:
+                # Reporting must remain available on legacy databases that do
+                # not yet have the station-output table.
+                contexts = {}
+
+        enriched: list[dict] = []
+        for entry in entries:
+            item = dict(entry)
+            try:
+                station_id = int(item.get("station_id") or 0)
+            except (TypeError, ValueError):
+                station_id = 0
+            context = contexts.get(station_id, {})
+            mounts: set[str] = set()
+            primary = str(context.get("mount") or "").strip()
+            if primary:
+                mounts.add(primary if primary.startswith("/") else f"/{primary}")
+            try:
+                variants = json.loads(str(item.get("delivered_variants_json") or "[]"))
+            except (TypeError, ValueError):
+                variants = []
+            for variant in variants if isinstance(variants, list) else []:
+                if not isinstance(variant, dict):
+                    continue
+                mount = str(variant.get("mount") or "").strip()
+                if mount:
+                    mounts.add(mount if mount.startswith("/") else f"/{mount}")
+            item["station_name"] = str(context.get("station_name") or f"Station {station_id}")
+            item["stream_mounts"] = " ".join(sorted(mounts))
+            enriched.append(item)
+        return enriched
+
+    def play_history_csv_text(self, entries: list[dict]) -> str:
+        """Render a compact, human-readable all-radio play-history CSV."""
+        output = StringIO()
+        writer = csv.writer(output, lineterminator="\n")
+        writer.writerow(PLAY_HISTORY_COLUMNS)
+        for entry in self._station_context_entries(entries):
+            values = {
+                "broadcast_at_utc": entry.get("broadcast_at", ""),
+                "station_id": entry.get("station_id", ""),
+                "station_name": entry.get("station_name", ""),
+                "stream_mounts": entry.get("stream_mounts", ""),
+                "track_id": entry.get("track_id", ""),
+                "song_title": entry.get("work_title", ""),
+                "artist": entry.get("performer", ""),
+                "version": entry.get("version", ""),
+                "composer": entry.get("composer", ""),
+                "lyricist": entry.get("lyricist", ""),
+                "phonogram_producer": entry.get("phonogram_producer", ""),
+                "label": entry.get("label", ""),
+                "isrc": entry.get("isrc", ""),
+                "scheduled_duration_seconds": entry.get("scheduled_duration_seconds", ""),
+                "played_duration_seconds": entry.get("played_duration_seconds", ""),
+                "play_count": entry.get("publication_count", 1),
+                "source_path": entry.get("source_path", ""),
+                "program_name": entry.get("program_name", ""),
+                "presenter": entry.get("presenter", ""),
+                "delivered_variants_json": entry.get("delivered_variants_json", "[]"),
+                "log_id": entry.get("log_id", ""),
+                "entry_hash": entry.get("entry_hash", ""),
+            }
+            writer.writerow([_csv_safe(values[column]) for column in PLAY_HISTORY_COLUMNS])
+        return output.getvalue()
+
+    def export_desktop_bundle(
+        self,
+        *,
+        destination: str | Path | None = None,
+        now: date | None = None,
+    ) -> dict:
+        """Refresh daily and all-time CSVs in one Desktop folder.
+
+        Existing protected exports are copied into ``legacy`` once, so a
+        previous installation's reports remain available alongside the new
+        all-radio mirror instead of being silently replaced.
+        """
+        root = Path(destination or get_play_history_root()).expanduser().resolve()
+        root.mkdir(parents=True, exist_ok=True)
+        daily_root = root / "daily"
+        legacy_root = root / "legacy"
+        daily_root.mkdir(parents=True, exist_ok=True)
+        legacy_root.mkdir(parents=True, exist_ok=True)
+
+        previous_exports = get_data_dir() / "Exports" / "MusicUsage"
+        if previous_exports.is_dir():
+            for source in previous_exports.glob("*.csv"):
+                target = legacy_root / source.name
+                if not target.exists():
+                    try:
+                        shutil.copy2(source, target)
+                    except OSError:
+                        _log.warning("Could not preserve legacy music-use export %s", source)
+
+        current_day = now or _utc_now().date()
+        day_values = [current_day]
+        previous_day = current_day - timedelta(days=1)
+        if previous_day != current_day:
+            day_values.append(previous_day)
+        daily_results: list[dict] = []
+        for day in day_values:
+            next_day = day + timedelta(days=1)
+            entries = self.list_entries(
+                date_from=day.isoformat(),
+                date_to=next_day.isoformat(),
+                limit=None,
+            )
+            label = day.isoformat()
+            event_export = self._atomic_write_text(
+                daily_root / f"{label}-all-radios.csv",
+                self.play_history_csv_text(entries),
+            )
+            counts = self.list_play_counts(
+                date_from=day.isoformat(), date_to=next_day.isoformat()
+            )
+            count_export = self._atomic_write_text(
+                daily_root / f"{label}-play-counts.csv",
+                self.play_count_csv_text(counts),
+            )
+            daily_results.append(
+                {
+                    "date": label,
+                    "events": {**event_export, "record_count": len(entries)},
+                    "play_counts": {**count_export, "record_count": len(counts)},
+                }
+            )
+
+        all_entries = self.list_entries(limit=None)
+        total_events = self._atomic_write_text(
+            root / "RadioTEDU-play-history-total.csv",
+            self.play_history_csv_text(all_entries),
+        )
+        all_counts = self.list_play_counts()
+        total_counts = self._atomic_write_text(
+            root / "RadioTEDU-play-counts-total.csv",
+            self.play_count_csv_text(all_counts),
+        )
+
+        # Stable aliases make it easy for operators and backup jobs to consume
+        # the current day without having to calculate a date in a shell.
+        today_entries = self.list_entries(
+            date_from=current_day.isoformat(),
+            date_to=(current_day + timedelta(days=1)).isoformat(),
+            limit=None,
+        )
+        today_counts = self.list_play_counts(
+            date_from=current_day.isoformat(),
+            date_to=(current_day + timedelta(days=1)).isoformat(),
+        )
+        daily_alias = self._atomic_write_text(
+            root / "RadioTEDU-play-history-daily.csv",
+            self.play_history_csv_text(today_entries),
+        )
+        daily_count_alias = self._atomic_write_text(
+            root / "RadioTEDU-play-counts-daily.csv",
+            self.play_count_csv_text(today_counts),
+        )
+        manifest = {
+            "generated_at_utc": _utc_now().isoformat().replace("+00:00", "Z"),
+            "source": "RadioTEDU OnAir immutable music_usage_log",
+            "daily": daily_results,
+            "daily_alias": {**daily_alias, "record_count": len(today_entries)},
+            "daily_count_alias": {**daily_count_alias, "record_count": len(today_counts)},
+            "total": {**total_events, "record_count": len(all_entries)},
+            "total_play_counts": {**total_counts, "record_count": len(all_counts)},
+            "integrity": self.verify_hash_chain(),
+            "legacy_exports_preserved_at": str(legacy_root),
+        }
+        manifest_export = self._atomic_write_text(
+            root / "RadioTEDU-play-history-manifest.json",
+            json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        )
+        return {"root": str(root), "manifest": manifest_export, **manifest}
+
     @staticmethod
     def _atomic_write_text(destination: str | Path, content: str) -> dict:
         target = Path(destination)
@@ -574,4 +835,82 @@ class MusicUsageService:
         if today.day == 1:
             month = previous.month
             closed = self.close_month(year=previous.year, month=month)
-        return {"daily": daily, "monthly_close": closed}
+        desktop = self.export_desktop_bundle(now=today)
+        return {"daily": daily, "monthly_close": closed, "desktop": desktop}
+
+
+class MusicUsageExportScheduler:
+    """Refresh CSV mirrors without ever blocking a station audio worker."""
+
+    def __init__(self, interval_seconds: float = 300.0, minimum_export_gap: float = 15.0):
+        self.interval_seconds = max(30.0, float(interval_seconds))
+        self.minimum_export_gap = max(1.0, float(minimum_export_gap))
+        self._stop = threading.Event()
+        self._wake = threading.Event()
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._last_export_monotonic = 0.0
+
+    def start(self) -> None:
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._stop.clear()
+            self._wake.set()
+            self._thread = threading.Thread(
+                target=self._run,
+                name="music-usage-export",
+                daemon=True,
+            )
+            self._thread.start()
+
+    def notify(self) -> None:
+        self._wake.set()
+
+    def run_once(self) -> dict | None:
+        """Run one export pass; useful to the standalone backup task/tests."""
+        try:
+            from app.db import get_connection
+
+            conn = get_connection()
+            try:
+                return MusicUsageService(conn).ensure_daily_exports()
+            finally:
+                conn.close()
+        except Exception:
+            _log.exception("Music-use export pass failed")
+            return None
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._wake.set()
+        thread = self._thread
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=5.0)
+        self._thread = None
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            now = time.monotonic()
+            wait_for = max(0.0, self.minimum_export_gap - (now - self._last_export_monotonic))
+            if wait_for > 0.0:
+                self._wake.wait(timeout=wait_for)
+                self._wake.clear()
+                if self._stop.is_set():
+                    return
+            self._last_export_monotonic = time.monotonic()
+            self.run_once()
+            self._wake.wait(timeout=self.interval_seconds)
+            self._wake.clear()
+
+
+music_usage_export_scheduler = MusicUsageExportScheduler()
+
+
+def request_music_usage_export() -> None:
+    """Signal the background exporter after an immutable play is recorded."""
+    try:
+        music_usage_export_scheduler.notify()
+    except Exception:
+        # Never allow reporting telemetry to affect playout reliability.
+        _log.debug("Could not signal music-use exporter", exc_info=True)

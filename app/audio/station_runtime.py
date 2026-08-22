@@ -908,6 +908,7 @@ class StationRuntime:
                     self.ffmpeg_bin,
                     self._spawn_process,
                     initial_connect_spread_sec=30.0,
+                    drop_on_backpressure=True,
                 )
         try:
             self._icecast_sink.ensure_started(cfg)
@@ -967,6 +968,7 @@ class StationRuntime:
                             self.ffmpeg_bin,
                             self._spawn_process,
                             initial_connect_spread_sec=30.0,
+                            drop_on_backpressure=True,
                         )
                     self._extra_icecast_sinks[branch] = sink
                 try:
@@ -1729,6 +1731,16 @@ class StationRuntime:
     def _start_crossfade(self, cfg: StationPipelineConfig) -> None:
         if self._active_cfg is None or not self.ffmpeg_bin:
             raise RuntimeError("transition backend unavailable")
+        # Validate both source files before stopping the current producer. A
+        # cold H: drive, temporary network disconnect, or a removed queue file
+        # must defer the handoff; killing the current process first turns that
+        # recoverable condition into an audible hard cut.
+        for transition_cfg in (self._active_cfg, cfg):
+            uri = str(transition_cfg.input_uri or "")
+            if not uri or "://" in uri:
+                continue
+            if not os.path.isfile(uri):
+                raise RuntimeError("transition input unavailable")
         target_signature = self._signature(cfg)
         started_monotonic = time.monotonic()
         current_offset_seconds = self._current_offset_seconds()

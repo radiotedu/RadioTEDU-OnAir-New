@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import unquote
 
+from app.audio.ffmpeg_pipeline import prefetch_fast_cached_uri
 from app.audio.virtual_sources import is_silence_input_uri
 from app.db import get_connection
 from app.engine.lease import LeaseService
@@ -46,6 +47,11 @@ _TRANSIENT_OUTPUT_FAILURE_MARKERS = (
     "remote end closed",
     "error submitting a packet to the muxer",
     "error muxing a packet",
+    "transition input unavailable",
+    "no such file",
+    "file not found",
+    "cannot open",
+    "invalid data found",
 )
 
 
@@ -80,6 +86,8 @@ class StationWorker:
     @staticmethod
     def _is_transient_output_failure(exc: Exception) -> bool:
         text = str(exc or "").strip().lower()
+        if any(marker in text for marker in ("transition input unavailable", "no such file", "file not found", "cannot open")):
+            return True
         if "icecast source failed during startup" not in text:
             return False
         return any(marker in text for marker in _TRANSIENT_OUTPUT_FAILURE_MARKERS)
@@ -1994,6 +2002,31 @@ class StationWorker:
             )
         return added
 
+    def _prefetch_upcoming_audio(self, limit: int = 3) -> None:
+        """Warm the next few H:/network tracks before a transition.
+
+        The decoder must never perform a cold-volume copy on the handoff
+        thread.  ``prefetch_fast_cached_uri`` is asynchronous and atomic, so
+        this stays cheap even when the cache is already warm.
+        """
+
+        try:
+            rows = self.conn.execute(
+                "SELECT t.file_path FROM queue_items q "
+                "JOIN tracks t ON t.id=q.track_id "
+                "WHERE q.station_id=? AND q.status='pending' "
+                "ORDER BY q.position, q.id LIMIT ?",
+                (self.station_id, max(1, min(5, int(limit)))),
+            ).fetchall()
+        except Exception:
+            return
+        for row in rows:
+            try:
+                uri = resolve_runtime_media_path(str(row["file_path"] or ""))
+                prefetch_fast_cached_uri(uri)
+            except Exception:
+                continue
+
     def _count_pending_music_since_jingle(self) -> int:
         """Count music tracks at the end of pending queue since last jingle."""
         cur = self.conn.cursor()
@@ -2348,6 +2381,11 @@ class StationWorker:
         # Auto-fill queue BEFORE advance check so that crossfade timing
         # can see the next pending track when deciding when to advance.
         self._autofill_queue()
+
+        # Warm slow-volume media while the current song is still on air. This
+        # removes the 35–40 second cold H: drive copy that used to occur
+        # exactly at the song handoff.
+        self._prefetch_upcoming_audio()
 
         # If sweeper is disabled, remove any lingering pending jingles.
         # If enabled, check if a sweeper jingle should be inserted at front.

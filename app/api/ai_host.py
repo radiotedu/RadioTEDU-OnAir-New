@@ -61,7 +61,7 @@ class AIBatchPregenPayload(BaseModel):
 async def get_ai_settings(request: Request):
     """Get AI host settings for the active station."""
     station_id = request.query_params.get("station_id", 1)
-
+    
     conn = None
     try:
         init_db()
@@ -74,7 +74,7 @@ async def get_ai_settings(request: Request):
     finally:
         if conn is not None:
             conn.close()
-
+    
     return {
         "station_id": int(station_id),
         "ai_host_enabled": str(station_settings.get("ai_host_enabled", "false")).lower() in ("1", "true", "yes", "on"),

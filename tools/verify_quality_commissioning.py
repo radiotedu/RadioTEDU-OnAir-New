@@ -122,7 +122,7 @@ def verify(database: Path) -> dict[str, object]:
             system_settings.get("rocket_hls_enabled", "false")
         )
         hls_profile = str(
-            system_settings.get("hls_codec_profile", "he_aac_192")
+            system_settings.get("hls_codec_profile", "he_aac_v1_96_192")
         )
         try:
             hls_bitrate = int(
@@ -130,10 +130,20 @@ def verify(database: Path) -> dict[str, object]:
             )
         except (TypeError, ValueError):
             hls_bitrate = 0
-        if hls_enabled or legacy_hls_enabled:
-            issues.append("HLS must remain disabled until runtime support is installed")
-        if hls_profile != "he_aac_192" or hls_bitrate != 192:
-            issues.append("planned HLS profile must remain HE-AAC 192 kbps")
+        try:
+            hls_low_bitrate = int(float(system_settings.get("hls_low_bitrate_kbps", "96")))
+        except (TypeError, ValueError):
+            hls_low_bitrate = 0
+        try:
+            hls_high_bitrate = int(float(system_settings.get("hls_high_bitrate_kbps", "192")))
+        except (TypeError, ValueError):
+            hls_high_bitrate = 0
+        if legacy_hls_enabled:
+            issues.append("legacy rocket_hls_enabled must remain disabled")
+        if hls_profile not in {"he_aac_v1_96_192", "he_aac_192"} or hls_bitrate != 192:
+            issues.append("HLS profile must be HE-AAC v1 with a 192 kbps high variant")
+        if hls_enabled and (hls_low_bitrate != 96 or hls_high_bitrate != 192):
+            issues.append("enabled HLS must use HE-AAC v1 Low 96 / High 192 kbps")
         try:
             origin_capacity = int(
                 float(system_settings.get("quality_outputs_origin_source_capacity", "0"))
@@ -151,9 +161,11 @@ def verify(database: Path) -> dict[str, object]:
         "hls": {
             "enabled": hls_enabled,
             "legacy_origin_enabled": legacy_hls_enabled,
-            "runtime_available": False,
+            "runtime_available": bool(hls_enabled),
             "codec_profile": hls_profile,
             "bitrate_kbps": hls_bitrate,
+            "low_bitrate_kbps": hls_low_bitrate,
+            "high_bitrate_kbps": hls_high_bitrate,
         },
         "channels": channels,
         "issues": issues,

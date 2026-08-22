@@ -1,5 +1,6 @@
 import logging
 import os
+import logging
 import threading
 import uuid
 from contextlib import asynccontextmanager, closing
@@ -283,18 +284,15 @@ def _run_dependency_bootstrap_background() -> None:
 
 def _run_music_usage_export_background() -> None:
     try:
-        from app.services.music_usage import MusicUsageService
+        from app.services.music_usage import music_usage_export_scheduler
 
-        usage_conn = get_connection()
-        try:
-            export_summary = MusicUsageService(usage_conn).ensure_daily_exports()
+        export_summary = music_usage_export_scheduler.run_once()
+        if export_summary:
             logger.info(
-                "Music-use daily export ready: records=%s monthly_close=%s",
+                "Music-use CSV mirrors ready: records=%s desktop=%s",
                 (export_summary.get("daily") or {}).get("record_count", 0),
-                bool(export_summary.get("monthly_close")),
+                (export_summary.get("desktop") or {}).get("root", ""),
             )
-        finally:
-            usage_conn.close()
     except Exception as exc:
         # The append-only database remains authoritative; the next background
         # pass retries without delaying the control plane or live audio.
@@ -365,6 +363,7 @@ async def lifespan(_app: FastAPI):
     shutdown_worker_loop_manager = None
     shutdown_library_watcher = None
     shutdown_product_catalog = None
+    shutdown_music_usage_export = None
     threading.Thread(
         target=_run_dependency_bootstrap_background,
         daemon=True,
@@ -383,11 +382,10 @@ async def lifespan(_app: FastAPI):
         # A codec migration must never prevent the control plane from starting;
         # it will retry on the next startup.
         logger.warning("Ogg-to-HE-AAC migration deferred: %s", exc)
-    threading.Thread(
-        target=_run_music_usage_export_background,
-        daemon=True,
-        name="music-usage-export",
-    ).start()
+    from app.services.music_usage import music_usage_export_scheduler
+
+    music_usage_export_scheduler.start()
+    shutdown_music_usage_export = music_usage_export_scheduler
     recovery_point_service.start()
     playout_checkpoint_service.start()
     from app.services.program_recording import program_recording_service
@@ -500,6 +498,8 @@ async def lifespan(_app: FastAPI):
             shutdown_library_watcher.stop()
         if shutdown_product_catalog is not None:
             shutdown_product_catalog.stop()
+        if shutdown_music_usage_export is not None:
+            shutdown_music_usage_export.stop()
         try:
             worker_stop = (
                 shutdown_worker_loop_manager.stop_all()

@@ -1,4 +1,7 @@
 import os
+import threading
+import hashlib
+import shutil
 from urllib.parse import quote
 
 from app.audio.gst_pipeline import StationPipelineConfig, resolve_stream_profile
@@ -152,6 +155,20 @@ def _silence_filter_spec() -> str:
 
 
 FAST_AUDIO_CACHE_DIR = r"C:\ProgramData\RadioTEDU\OnAir\FastAudioCache"
+_FAST_AUDIO_CACHE_MAX_BYTES = 512 * 1024 * 1024
+_FAST_AUDIO_CACHE_IN_FLIGHT: set[str] = set()
+_FAST_AUDIO_CACHE_LOCK = threading.Lock()
+
+
+def _fast_cache_key(input_uri: str) -> str:
+    """Return a stable key that changes when the source file changes."""
+
+    try:
+        stat = os.stat(input_uri)
+        material = f"{os.path.abspath(input_uri)}|{stat.st_size}|{stat.st_mtime_ns}"
+    except OSError:
+        material = os.path.abspath(input_uri)
+    return hashlib.sha256(material.encode("utf-8", "replace")).hexdigest()[:16]
 
 
 def _resolve_fast_cached_uri(input_uri: str) -> str:
@@ -163,22 +180,76 @@ def _resolve_fast_cached_uri(input_uri: str) -> str:
     try:
         os.makedirs(FAST_AUDIO_CACHE_DIR, exist_ok=True)
         filename = os.path.basename(input_uri)
-        import hashlib, shutil
-        file_hash = hashlib.md5(input_uri.encode("utf-8")).hexdigest()[:8]
+        file_hash = _fast_cache_key(input_uri)
         cached_name = f"{file_hash}_{filename}"
         cached_path = os.path.join(FAST_AUDIO_CACHE_DIR, cached_name)
         if os.path.exists(cached_path) and os.path.getsize(cached_path) == os.path.getsize(input_uri):
+            try:
+                os.utime(cached_path, None)
+            except OSError:
+                pass
             return cached_path
-        total_size = sum(os.path.getsize(os.path.join(FAST_AUDIO_CACHE_DIR, f)) for f in os.listdir(FAST_AUDIO_CACHE_DIR) if os.path.isfile(os.path.join(FAST_AUDIO_CACHE_DIR, f)))
-        if total_size > 400 * 1024 * 1024:
-            cached_files = sorted([os.path.join(FAST_AUDIO_CACHE_DIR, f) for f in os.listdir(FAST_AUDIO_CACHE_DIR)], key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0)
-            for old_f in cached_files[:10]:
+        total_size = sum(
+            os.path.getsize(os.path.join(FAST_AUDIO_CACHE_DIR, f))
+            for f in os.listdir(FAST_AUDIO_CACHE_DIR)
+            if os.path.isfile(os.path.join(FAST_AUDIO_CACHE_DIR, f))
+            and not f.endswith(".part")
+        )
+        if total_size > _FAST_AUDIO_CACHE_MAX_BYTES:
+            cached_files = sorted(
+                [
+                    os.path.join(FAST_AUDIO_CACHE_DIR, f)
+                    for f in os.listdir(FAST_AUDIO_CACHE_DIR)
+                    if os.path.isfile(os.path.join(FAST_AUDIO_CACHE_DIR, f))
+                    and not f.endswith(".part")
+                ],
+                key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0,
+            )
+            for old_f in cached_files[:20]:
                 try: os.remove(old_f)
                 except: pass
-        shutil.copy2(input_uri, cached_path)
+        # Copy to a sidecar and atomically publish it. A background prefetch
+        # must never expose a half-written file to the next FFmpeg process.
+        partial_path = f"{cached_path}.{os.getpid()}.part"
+        shutil.copy2(input_uri, partial_path)
+        os.replace(partial_path, cached_path)
         return cached_path
     except Exception:
         return input_uri
+
+
+def prefetch_fast_cached_uri(input_uri: str) -> None:
+    """Warm a slow-volume track on C: without delaying the playout worker.
+
+    Queue filling happens tens of seconds before the handoff.  Copying the
+    next H:/network-volume file synchronously at transition time was the
+    source of long silent gaps.  The copy is atomic and de-duplicated per
+    process; failures simply leave the normal source path in use.
+    """
+
+    if not input_uri or not os.path.isfile(input_uri):
+        return
+    drive, _ = os.path.splitdrive(input_uri)
+    if drive and drive.upper() == "C:":
+        return
+    key = os.path.abspath(input_uri)
+    with _FAST_AUDIO_CACHE_LOCK:
+        if key in _FAST_AUDIO_CACHE_IN_FLIGHT:
+            return
+        _FAST_AUDIO_CACHE_IN_FLIGHT.add(key)
+
+    def _worker() -> None:
+        try:
+            _resolve_fast_cached_uri(input_uri)
+        finally:
+            with _FAST_AUDIO_CACHE_LOCK:
+                _FAST_AUDIO_CACHE_IN_FLIGHT.discard(key)
+
+    threading.Thread(
+        target=_worker,
+        name="radiotedu-fast-audio-prefetch",
+        daemon=True,
+    ).start()
 
 
 def _build_input_args(

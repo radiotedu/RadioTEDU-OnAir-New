@@ -126,6 +126,9 @@ def resolve_stream_profile(
             "bitrate_kbps": bitrate,
             "ffmpeg_codec": "libfdk_aac",
             "ffmpeg_profile": "aac_he",
+            # FDK-AAC HE-AAC v1 is kept at the broadcast sample rate.  The
+            # final Icecast branch adds the shared loudness filter afterwards.
+            "ffmpeg_filter_args": ["-af", "aresample=48000"],
             "ffmpeg_encoder_args": ["-afterburner", "1"],
             "content_type": "audio/aac",
             "format": "adts",

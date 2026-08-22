@@ -19,8 +19,10 @@ _log = logging.getLogger(__name__)
 # audio to ride through a short upstream/TCP pause without deleting already
 # scheduled programme audio.  The previous 64-chunk queue was only ~1.36 s;
 # on saturation it discarded the whole queue, producing audible multi-second
-# jumps.  1024 chunks is ~21.8 s and about 4 MiB per active sink, or roughly
-# 120 MiB for the complete 30-mount local plan.
+# jumps.  1024 chunks is ~21.8 s and about 4 MiB per active sink. The cache
+# prefetch path prevents cold-volume stalls from filling this reserve.
+# Keep roughly 44 seconds of per-mount PCM reserve. This absorbs Windows
+# encoder/TCP startup stalls without deleting the already scheduled song.
 _PCM_QUEUE_MAX_CHUNKS = 1024
 # FLAC is lossless and its Ogg pages can briefly need more write-side reserve
 # on a busy origin. Keep the larger reserve only on the two FLAC branches so
@@ -158,6 +160,7 @@ class IcecastAudioSink:
         reconnect_failure_threshold: int = 12,
         source_factory: Callable[[StationPipelineConfig], object] = IcecastSourceTransport,
         initial_connect_spread_sec: float = 0.0,
+        drop_on_backpressure: bool = True,
     ) -> None:
         self.ffmpeg_bin = ffmpeg_bin
         self._spawn_process = spawn_process
@@ -175,6 +178,10 @@ class IcecastAudioSink:
         self._initial_connect_spread_sec = max(
             0.0, float(initial_connect_spread_sec)
         )
+        # Legacy/unit callers can retain the bounded live-resync policy. The
+        # real station runtime disables destructive drops so an encoder stall
+        # pauses the producer instead of jumping to a later PCM timestamp.
+        self._drop_on_backpressure = bool(drop_on_backpressure)
         self._source = None
         self._connector_thread = None
         self._network_failed = False
@@ -205,6 +212,7 @@ class IcecastAudioSink:
         self._stderr_lock = threading.Lock()
         self._last_encoder_error = ""
         self._encoder_error_count = 0
+        self._effective_stream_codec_profile = ""
 
     @property
     def process(self):
@@ -275,6 +283,20 @@ class IcecastAudioSink:
         try:
             self._pcm_queue.put_nowait(payload)
         except queue.Full:
+            if not self._drop_on_backpressure:
+                try:
+                    self._pcm_queue.put(payload, timeout=0.05)
+                    return True
+                except queue.Full:
+                    with self._writer_lock:
+                        self._writer_backpressured = True
+                        if self._writer_backpressure_started_monotonic is None:
+                            self._writer_backpressure_started_monotonic = time.monotonic()
+                        self._writer_dropped_chunks += 1
+                    # Keep the already scheduled programme reserve intact.
+                    # The caller will retry on the next PCM frame after the
+                    # encoder writer makes room.
+                    return False
             # This mount is already more than ten seconds behind.  Resync only
             # this failed branch to the newest programme window.  Waiting here
             # would stall every sibling mount because station fan-out is
@@ -356,6 +378,7 @@ class IcecastAudioSink:
                 ),
                 "last_encoder_error": self._last_encoder_error,
                 "encoder_error_count": int(self._encoder_error_count),
+                "effective_stream_codec_profile": self._effective_stream_codec_profile,
                 "network_writer_running": bool(
                     self._connector_thread and self._connector_thread.is_alive()
                 ),
@@ -568,10 +591,15 @@ class IcecastAudioSink:
                     with self._writer_lock:
                         self._writer_failed = False
                         self._last_write_monotonic = time.monotonic()
-                        if (
-                            not silence
-                            and self._pcm_queue.qsize() < _PCM_LIVE_RESYNC_CHUNKS
-                        ):
+                        clear_threshold = (
+                            _PCM_LIVE_RESYNC_CHUNKS
+                            if self._drop_on_backpressure
+                            else max(
+                                _PCM_LIVE_RESYNC_CHUNKS,
+                                self._pcm_queue_capacity_chunks // 2,
+                            )
+                        )
+                        if not silence and self._pcm_queue.qsize() < clear_threshold:
                             self._writer_backpressured = False
                             self._writer_backpressure_started_monotonic = None
                         if silence:
@@ -633,6 +661,7 @@ class IcecastAudioSink:
 
     def _start_connector_worker(self, cfg: StationPipelineConfig) -> None:
         def run() -> None:
+            effective_cfg = cfg
             delay_index = 0
             delays = (1.0, 2.0, 4.0, 8.0, 15.0, 30.0)
             initial_delay = _mount_spread_seconds(
@@ -643,7 +672,7 @@ class IcecastAudioSink:
             while not self._writer_stop.is_set():
                 connected_at = None
                 try:
-                    source = self._source_factory(cfg)
+                    source = self._source_factory(effective_cfg)
                     if self._writer_stop.is_set():
                         source.close()
                         return
@@ -651,7 +680,9 @@ class IcecastAudioSink:
                     # only the newest live reserve so the mount returns near
                     # the current programme instead of staying far behind.
                     self._trim_pcm_queue_to_latest(_PCM_LIVE_RESYNC_CHUNKS)
-                    command = build_ffmpeg_encoded_sink_cmd(cfg, self.ffmpeg_bin)
+                    command = build_ffmpeg_encoded_sink_cmd(
+                        effective_cfg, self.ffmpeg_bin
+                    )
                     proc = self._spawn_process(
                         command,
                         stdin=subprocess.PIPE,
@@ -660,7 +691,10 @@ class IcecastAudioSink:
                     )
                     self._source = source
                     self._process = proc
-                    self._start_stderr_worker(cfg)
+                    self._effective_stream_codec_profile = str(
+                        effective_cfg.stream_codec_profile or ""
+                    )
+                    self._start_stderr_worker(effective_cfg)
                     time.sleep(0.1)
                     if proc.poll() is not None:
                         raise RuntimeError("Icecast encoder exited during startup")
@@ -682,7 +716,7 @@ class IcecastAudioSink:
                             self._last_network_write_monotonic = time.monotonic()
                             self._last_network_error = ""
                 except Exception as exc:
-                    safe = self._sanitize_encoder_line(exc, cfg)
+                    safe = self._sanitize_encoder_line(exc, effective_cfg)
                     with self._writer_lock:
                         self._network_failed = True
                         self._last_network_error = safe
@@ -774,6 +808,7 @@ class IcecastAudioSink:
         )
         self._signature = signature
         self._cfg = cfg
+        self._effective_stream_codec_profile = str(cfg.stream_codec_profile or "")
         self._start_writer_worker()
         self._start_connector_worker(cfg)
         self._start_probe_worker(

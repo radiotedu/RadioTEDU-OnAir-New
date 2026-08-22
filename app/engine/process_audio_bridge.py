@@ -432,3 +432,4 @@ class ProcessAudioBridgeHost:
         except Exception:
             pass
         self._bridge.close()
+

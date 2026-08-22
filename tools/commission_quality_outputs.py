@@ -129,24 +129,25 @@ def commission(
                     f"expected {channel.base_mount}"
                 )
             station_settings = settings_repo.get_station(station_id)
+            primary_profile = "he_aac_192"
             needs_update = (
                 not bool(row["icecast_enabled"])
-                or str(row["stream_codec_profile"] or "") != "he_aac_192"
+                or str(row["stream_codec_profile"] or "") != primary_profile
                 or int(row["stream_bitrate_kbps"] or 0) != 192
                 or str(station_settings.get("broadcast_autostart_enabled", "")).lower()
                 != "true"
             )
             conn.execute(
                 "UPDATE station_outputs SET icecast_enabled=1, "
-                "stream_codec_profile='he_aac_192', stream_bitrate_kbps=192 "
+                "stream_codec_profile=?, stream_bitrate_kbps=192 "
                 "WHERE station_id=?",
-                (station_id,),
+                (primary_profile, station_id),
             )
             settings_repo.upsert_station(
                 station_id,
                 {
                     "broadcast_autostart_enabled": "true",
-                    "stream_codec_profile": "he_aac_192",
+                    "stream_codec_profile": primary_profile,
                     "stream_bitrate_kbps": "192",
                 },
             )
@@ -186,13 +187,14 @@ def commission(
         # existing verified value; commissioning must neither manufacture nor
         # erase it while changing the local output plan.
         updates: dict[str, str] = {
-            # HLS is a future capability only. Commissioning must explicitly
-            # neutralize the historical Rocket toggle so a machine upgrade
-            # cannot publish playlists or segments before runtime support is
-            # implemented and separately authorized.
-            "hls_enabled": "false",
-            "hls_codec_profile": "he_aac_192",
-            "hls_bitrate_kbps": "192",
+            # HLS is an independent, explicitly operator-controlled runtime.
+            # Quality-output commissioning must preserve its state rather than
+            # silently stopping an active HE-AAC playlist.
+            "hls_enabled": str(current.get("hls_enabled", "false")),
+            "hls_codec_profile": str(current.get("hls_codec_profile", "he_aac_v1_96_192")),
+            "hls_bitrate_kbps": str(current.get("hls_bitrate_kbps", "192")),
+            "hls_low_bitrate_kbps": str(current.get("hls_low_bitrate_kbps", "96")),
+            "hls_high_bitrate_kbps": str(current.get("hls_high_bitrate_kbps", "192")),
             "rocket_hls_enabled": "false",
         }
         for key, raw in current.items():

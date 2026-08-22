@@ -13,12 +13,6 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-# Resolve the inbox security module from PSHOME instead of relying on
-# PSModulePath.  Service hosts, virtual environments, and hardened deployment
-# shells can intentionally provide a minimal module path.
-$securityModule = Join-Path $PSHOME "Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1"
-Import-Module -Name $securityModule -ErrorAction Stop
-
 $systemSid = [System.Security.Principal.SecurityIdentifier]::new("S-1-5-18")
 $administratorsSid = [System.Security.Principal.SecurityIdentifier]::new("S-1-5-32-544")
 $currentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
