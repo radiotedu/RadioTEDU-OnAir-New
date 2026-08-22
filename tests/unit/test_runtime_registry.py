@@ -40,6 +40,34 @@ def test_stale_high_quality_profile_self_heals_to_opus_192():
     assert outputs[0]["stream_bitrate_kbps"] == 192
 
 
+def test_lofi_forces_metadata_suppression_on_all_quality_outputs():
+    settings = {
+        "station_2_extra_icecast_outputs": json.dumps(
+            [
+                {
+                    "enabled": True,
+                    "quality": "low",
+                    "icecast_mount": "/lofi-low",
+                    # A legacy explicit false must not re-enable Lo-Fi metadata.
+                    "metadata_suppressed": False,
+                }
+            ]
+        )
+    }
+    row = {
+        "icecast_host": "stream.example.test",
+        "icecast_port": 8000,
+        "icecast_user": "source",
+        "icecast_password": "secret",
+        "stream_codec_profile": "he_aac_192",
+        "stream_bitrate_kbps": 192,
+    }
+
+    outputs = runtime_registry_module._extra_icecast_outputs(settings, 2, row)
+
+    assert outputs[0]["metadata_suppressed"] is True
+
+
 def test_ai_runtime_status_uses_persisted_readiness_without_cache_scan(monkeypatch):
     original_import = builtins.__import__
 

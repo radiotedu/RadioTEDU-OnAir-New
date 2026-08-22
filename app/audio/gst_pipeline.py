@@ -38,6 +38,9 @@ class StationPipelineConfig:
     icecast_legacy_source_enabled: bool = False
     source_protocol: str = "icecast"
     extra_icecast_outputs: tuple[dict, ...] = ()
+    # Some stations intentionally expose no now-playing metadata.  This is a
+    # station/output policy and must not disable the audio encoder itself.
+    metadata_suppressed: bool = False
 
 
 def _db_to_linear(db: float) -> float:

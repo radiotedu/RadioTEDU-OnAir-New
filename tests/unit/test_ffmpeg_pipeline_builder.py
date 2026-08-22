@@ -78,6 +78,15 @@ def test_ffmpeg_command_omits_track_metadata_when_disabled(monkeypatch) -> None:
     assert "artist=Private Artist" not in joined
 
 
+def test_ffmpeg_command_omits_track_metadata_for_station_policy() -> None:
+    cfg = _cfg(title="Lo-Fi title", artist="Lo-Fi artist")
+    cfg.metadata_suppressed = True
+    cmd = build_ffmpeg_icecast_cmd(cfg, "ffmpeg.exe")
+    joined = " ".join(cmd)
+    assert "title=Lo-Fi title" not in joined
+    assert "artist=Lo-Fi artist" not in joined
+
+
 def test_ffmpeg_command_supports_internal_silence_source() -> None:
     cmd = build_ffmpeg_icecast_cmd(_cfg(input_uri="silence://continuous"), "ffmpeg.exe")
 

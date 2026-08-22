@@ -33,6 +33,8 @@ def _icecast_output_url(cfg: StationPipelineConfig) -> str:
 
 
 def _append_track_metadata(cmd: list[str], cfg: StationPipelineConfig) -> None:
+    if bool(getattr(cfg, "metadata_suppressed", False)):
+        return
     if any(
         str(os.getenv(name, "")).strip().lower() in _TRUTHY_ENV_VALUES
         for name in (

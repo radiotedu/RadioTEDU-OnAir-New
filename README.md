@@ -51,6 +51,10 @@ The source handshake sends Icecast `Ice-Name`, `Ice-Description`, `Ice-Genre`, `
 
 During playback the app updates Icecast’s supported single `song` field on each output as `Artist - Title (Album)` (empty fields are omitted). Icecast does not provide separate standard artist and album metadata fields through `/admin/metadata`, so this combined value is the portable representation used by listener clients.
 
+Lo-Fi is the exception: `/lofi` and `/lofi-low` keep their station identity
+(`RadioTEDU Lo-Fi`, genre, and description) but intentionally do not publish a
+per-track `StreamTitle`/song update.
+
 The Windows service runs with `CLEANROOM_SKIP_ICECAST_METADATA=0` so these updates are active. AI startup remains independently disabled with `CLEANROOM_SKIP_STARTUP_AI=1`; enabling metadata does not enable AI, voting, or any auxiliary service.
 
 ### HLS readiness

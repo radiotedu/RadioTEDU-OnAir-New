@@ -33,7 +33,12 @@ The folders under `H:\RadioTEDU Songs` are the six stations' authoritative music
 
 Use standard file tags for title, artist, album, genre, language, MusicBrainz recording ID, and BPM. Put same-name artwork beside a song (`Song.flac` + `Song.jpg`) or use `cover.jpg`, `folder.jpg`, or embedded artwork. Changed artwork is copied/extracted into the protected OnAir media cache.
 
-Icecast source metadata carries the current title/artist to both Opus and FLAC mounts. Icecast's source protocol has no standard per-track image field, so artwork is exposed through the OnAir now-playing/media API for compatible players; it is not injected into the audio stream.
+Icecast source metadata carries the current title/artist to the normal quality
+branches, including FLAC where configured. Lo-Fi deliberately suppresses its
+per-track `StreamTitle` on `/lofi` and `/lofi-low`, while retaining the public
+station name/genre/description. Icecast's source protocol has no standard
+per-track image field, so artwork is exposed through the OnAir now-playing/media
+API for compatible players; it is not injected into the audio stream.
 
 ## Official reports
 

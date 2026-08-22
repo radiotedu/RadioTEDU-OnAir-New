@@ -24,12 +24,18 @@ def icecast_metadata_outputs(cfg) -> list[dict]:
             "icecast_user": cfg.icecast_user,
             "icecast_password": cfg.icecast_password,
             "icecast_tls_enabled": cfg.icecast_tls_enabled,
+            "metadata_suppressed": _truthy(
+                getattr(cfg, "metadata_suppressed", False), False
+            ),
         }
     ]
     outputs.extend(
         dict(output)
         for output in getattr(cfg, "extra_icecast_outputs", ()) or ()
         if _truthy(dict(output).get("enabled"), True)
-        and not _truthy(dict(output).get("metadata_suppressed"), False)
     )
-    return outputs
+    return [
+        output
+        for output in outputs
+        if not _truthy(output.get("metadata_suppressed"), False)
+    ]

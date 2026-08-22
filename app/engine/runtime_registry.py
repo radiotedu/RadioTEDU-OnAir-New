@@ -391,6 +391,7 @@ def _extra_icecast_outputs(settings: dict, station_id: int, row) -> tuple[dict, 
     if not isinstance(values, list):
         return ()
     outputs = []
+    station_is_lofi = int(station_id) == 2
     for value in values:
         if not isinstance(value, dict) or not _truthy(value.get("enabled"), True):
             continue
@@ -443,7 +444,7 @@ def _extra_icecast_outputs(settings: dict, station_id: int, row) -> tuple[dict, 
                 "icecast_genre": str(value.get("icecast_genre") or ""),
                 "icecast_url": str(value.get("icecast_url") or ""),
                 "icecast_public": _truthy(value.get("icecast_public", "true"), True),
-                "metadata_suppressed": _truthy(
+                "metadata_suppressed": station_is_lofi or _truthy(
                     value.get("metadata_suppressed", "false"), False
                 ),
                 "icecast_user_agent": str(value.get("icecast_user_agent") or "RadioTEDU OnAir"),
@@ -1246,6 +1247,11 @@ class StationRuntimeRegistry:
             crossfade_seconds=resolved_crossfade_seconds,
             station_name=station_name,
             extra_icecast_outputs=_extra_icecast_outputs(settings, station_id, row),
+            metadata_suppressed=(
+                int(station_id) == 2
+                or str(row["icecast_mount"] or "").strip().lower().startswith("/lofi")
+                or "lo-fi" in station_name.lower()
+            ),
             **stream_features,
         )
         # Release the per-track configuration connection before process

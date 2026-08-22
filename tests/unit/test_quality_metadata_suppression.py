@@ -20,6 +20,7 @@ class QualityMetadataSuppressionTests(unittest.TestCase):
             icecast_enabled=True,
             stream_title="Internal title",
             stream_artist="Internal artist",
+            metadata_suppressed=True,
             extra_icecast_outputs=(
                 {
                     "enabled": True,
@@ -35,8 +36,29 @@ class QualityMetadataSuppressionTests(unittest.TestCase):
         )
         mounts = [item["icecast_mount"] for item in icecast_metadata_outputs(cfg)]
 
-        self.assertEqual(mounts, ["/lofi", "/generic-metadata-output"])
+        self.assertEqual(mounts, ["/generic-metadata-output"])
         self.assertNotIn("/lofi-low", mounts)
+
+    def test_unsuppressed_station_keeps_primary_and_allowed_quality_mounts(self):
+        cfg = StationPipelineConfig(
+            input_uri="test://song",
+            icecast_host="127.0.0.1",
+            icecast_port=8000,
+            icecast_mount="/radio",
+            icecast_user="source",
+            icecast_password="protected-secret",
+            local_output_enabled=False,
+            output_device_id="",
+            icecast_enabled=True,
+            stream_title="Pop title",
+            stream_artist="Pop artist",
+            extra_icecast_outputs=(
+                {"enabled": True, "icecast_mount": "/radio-low"},
+            ),
+        )
+
+        mounts = [item["icecast_mount"] for item in icecast_metadata_outputs(cfg)]
+        self.assertEqual(mounts, ["/radio", "/radio-low"])
 
 
 if __name__ == "__main__":
