@@ -57,15 +57,29 @@ PLAY_COUNT_COLUMNS = (
     "track_id",
     "work_title",
     "performer",
+    "version",
     "composer",
+    "lyricist",
+    "phonogram_producer",
     "label",
     "isrc",
+    "scheduled_duration_seconds",
     "source_path",
     "completed_play_count",
     "event_count",
     "total_played_seconds",
     "first_broadcast_at",
     "last_broadcast_at",
+)
+
+# The current MESAM radio usage form uses these four headings.  We also keep
+# the richer rights report above because phonogram licensors need identifiers
+# such as ISRC and producer/label that are not present in the minimal form.
+MESAM_RADIO_COLUMNS = (
+    "Eser Adı",
+    "İcracı",
+    "Eser Süresi",
+    "Yayın Adedi",
 )
 
 # Human-readable exports written to the operator's Desktop.  The immutable
@@ -415,9 +429,15 @@ class MusicUsageService:
         station_id: int | None = None,
         date_from: str | None = None,
         date_to: str | None = None,
+        music_only: bool = False,
     ) -> list[dict]:
         where: list[str] = []
         params: list = []
+        if music_only:
+            # Historical rows survive library cleanup.  Missing track rows are
+            # therefore treated as music, while explicitly typed jingles,
+            # promos, advertisements and speech stay out of licensor totals.
+            where.append("COALESCE(t.track_type, 'music')='music'")
         if station_id is not None:
             where.append("l.station_id=?")
             params.append(int(station_id))
@@ -433,20 +453,25 @@ class MusicUsageService:
             "CASE WHEN COALESCE(o.icecast_enabled, 0)=1 "
             "AND TRIM(COALESCE(o.icecast_mount, ''))<>'' "
             "THEN 'configured_stream' ELSE 'historical_or_disabled' END AS mount_status, "
-            "l.track_id, l.work_title, l.performer, l.composer, l.label, l.isrc, l.source_path, "
+            "l.track_id, l.work_title, l.performer, l.version, l.composer, l.lyricist, "
+            "l.phonogram_producer, l.label, l.isrc, "
+            "ROUND(MAX(COALESCE(l.scheduled_duration_seconds, 0)), 3) "
+            "AS scheduled_duration_seconds, l.source_path, "
             "SUM(COALESCE(l.publication_count, 1)) AS completed_play_count, "
             "COUNT(*) AS event_count, "
             "ROUND(SUM(COALESCE(l.played_duration_seconds, 0)), 3) AS total_played_seconds, "
             "MIN(l.broadcast_at) AS first_broadcast_at, MAX(l.broadcast_at) AS last_broadcast_at "
             "FROM music_usage_log l LEFT JOIN stations s ON s.id=l.station_id "
-            "LEFT JOIN station_outputs o ON o.station_id=l.station_id"
+            "LEFT JOIN station_outputs o ON o.station_id=l.station_id "
+            "LEFT JOIN tracks t ON t.id=l.track_id"
         )
         if where:
             sql += " WHERE " + " AND ".join(where)
         sql += (
             " GROUP BY l.station_id, s.name, o.icecast_mount, o.icecast_enabled, "
-            "l.track_id, l.work_title, l.performer, "
-            "l.composer, l.label, l.isrc, l.source_path "
+            "l.track_id, l.work_title, l.performer, l.version, "
+            "l.composer, l.lyricist, l.phonogram_producer, "
+            "l.label, l.isrc, l.source_path "
             "ORDER BY l.station_id ASC, completed_play_count DESC, "
             "LOWER(l.work_title) ASC, LOWER(l.performer) ASC, l.track_id ASC"
         )
@@ -534,6 +559,55 @@ class MusicUsageService:
                 [_csv_safe(entry.get(column, "")) for column in PLAY_COUNT_COLUMNS]
             )
         return output.getvalue()
+
+    def mesam_radio_csv_text(self, entries: list[dict]) -> str:
+        """Render one station's completed plays in MESAM's radio-form shape."""
+
+        output = StringIO()
+        writer = csv.writer(output, lineterminator="\n")
+        writer.writerow(MESAM_RADIO_COLUMNS)
+        for entry in entries:
+            duration = max(0, int(round(float(entry.get("scheduled_duration_seconds") or 0))))
+            hours, remainder = divmod(duration, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            writer.writerow(
+                (
+                    _csv_safe(entry.get("work_title", "")),
+                    _csv_safe(entry.get("performer", "")),
+                    f"{hours:02d}:{minutes:02d}:{seconds:02d}",
+                    _csv_safe(entry.get("completed_play_count", 0)),
+                )
+            )
+        # A BOM makes the Turkish headings deterministic in desktop Excel.
+        return "\ufeff" + output.getvalue()
+
+    def _export_mesam_station_forms(
+        self,
+        *,
+        destination: str | Path,
+        label: str,
+        entries: list[dict],
+    ) -> list[dict]:
+        grouped: dict[int, list[dict]] = {}
+        for entry in entries:
+            station_id = int(entry.get("station_id") or 0)
+            grouped.setdefault(station_id, []).append(entry)
+        exports: list[dict] = []
+        for station_id in sorted(grouped):
+            station_entries = grouped[station_id]
+            result = self._atomic_write_text(
+                Path(destination) / f"{label}-station-{station_id}-radio-form.csv",
+                self.mesam_radio_csv_text(station_entries),
+            )
+            exports.append(
+                {
+                    **result,
+                    "station_id": station_id,
+                    "station_name": str(station_entries[0].get("station_name") or ""),
+                    "record_count": len(station_entries),
+                }
+            )
+        return exports
 
     def _station_context_entries(self, entries: list[dict]) -> list[dict]:
         """Add station names and every delivered mount to user-facing rows."""
@@ -644,8 +718,12 @@ class MusicUsageService:
         root = Path(destination or get_play_history_root()).expanduser().resolve()
         root.mkdir(parents=True, exist_ok=True)
         daily_root = root / "daily"
+        licensor_root = root / "licensor"
+        mesam_root = licensor_root / "MESAM"
         legacy_root = root / "legacy"
         daily_root.mkdir(parents=True, exist_ok=True)
+        licensor_root.mkdir(parents=True, exist_ok=True)
+        mesam_root.mkdir(parents=True, exist_ok=True)
         legacy_root.mkdir(parents=True, exist_ok=True)
 
         previous_exports = get_data_dir() / "Exports" / "MusicUsage"
@@ -683,11 +761,30 @@ class MusicUsageService:
                 daily_root / f"{label}-play-counts.csv",
                 self.play_count_csv_text(counts),
             )
+            rights_counts = self.list_play_counts(
+                date_from=day.isoformat(),
+                date_to=next_day.isoformat(),
+                music_only=True,
+            )
+            rights_export = self._atomic_write_text(
+                licensor_root / f"{label}-all-radios-rights-report.csv",
+                self.play_count_csv_text(rights_counts),
+            )
+            mesam_exports = self._export_mesam_station_forms(
+                destination=mesam_root,
+                label=label,
+                entries=rights_counts,
+            )
             daily_results.append(
                 {
                     "date": label,
                     "events": {**event_export, "record_count": len(entries)},
                     "play_counts": {**count_export, "record_count": len(counts)},
+                    "rights_report": {
+                        **rights_export,
+                        "record_count": len(rights_counts),
+                    },
+                    "mesam_station_forms": mesam_exports,
                 }
             )
 
@@ -700,6 +797,16 @@ class MusicUsageService:
         total_counts = self._atomic_write_text(
             root / "RadioTEDU-play-counts-total.csv",
             self.play_count_csv_text(all_counts),
+        )
+        all_rights_counts = self.list_play_counts(music_only=True)
+        total_rights = self._atomic_write_text(
+            licensor_root / "RadioTEDU-rights-report-total.csv",
+            self.play_count_csv_text(all_rights_counts),
+        )
+        total_mesam = self._export_mesam_station_forms(
+            destination=mesam_root,
+            label="all-time",
+            entries=all_rights_counts,
         )
 
         # Stable aliases make it easy for operators and backup jobs to consume
@@ -721,14 +828,32 @@ class MusicUsageService:
             root / "RadioTEDU-play-counts-daily.csv",
             self.play_count_csv_text(today_counts),
         )
+        today_rights_counts = self.list_play_counts(
+            date_from=current_day.isoformat(),
+            date_to=(current_day + timedelta(days=1)).isoformat(),
+            music_only=True,
+        )
+        daily_rights_alias = self._atomic_write_text(
+            licensor_root / "RadioTEDU-rights-report-daily.csv",
+            self.play_count_csv_text(today_rights_counts),
+        )
         manifest = {
             "generated_at_utc": _utc_now().isoformat().replace("+00:00", "Z"),
             "source": "RadioTEDU OnAir immutable music_usage_log",
             "daily": daily_results,
             "daily_alias": {**daily_alias, "record_count": len(today_entries)},
             "daily_count_alias": {**daily_count_alias, "record_count": len(today_counts)},
+            "daily_rights_alias": {
+                **daily_rights_alias,
+                "record_count": len(today_rights_counts),
+            },
             "total": {**total_events, "record_count": len(all_entries)},
             "total_play_counts": {**total_counts, "record_count": len(all_counts)},
+            "total_rights_report": {
+                **total_rights,
+                "record_count": len(all_rights_counts),
+            },
+            "total_mesam_station_forms": total_mesam,
             "integrity": self.verify_hash_chain(),
             "legacy_exports_preserved_at": str(legacy_root),
         }
@@ -775,12 +900,25 @@ class MusicUsageService:
             self.play_count_csv_text(play_counts),
         )
         count_export["record_count"] = len(play_counts)
+        rights_counts = self.list_play_counts(music_only=True)
+        rights_export = self._atomic_write_text(
+            root / "RadioTEDU-rights-report-current.csv",
+            self.play_count_csv_text(rights_counts),
+        )
+        rights_export["record_count"] = len(rights_counts)
+        mesam_exports = self._export_mesam_station_forms(
+            destination=root / "MESAM",
+            label="current",
+            entries=rights_counts,
+        )
         generated_at = _utc_now().isoformat().replace("+00:00", "Z")
         manifest = {
             "generated_at_utc": generated_at,
             "integrity": integrity,
             "events": event_export,
             "play_counts": count_export,
+            "rights_report": rights_export,
+            "mesam_station_forms": mesam_exports,
             "definitions": {
                 "completed_play_count": "Sum of immutable publication_count values after playout completion.",
                 "event_count": "Number of immutable completed-play ledger rows.",
@@ -796,6 +934,8 @@ class MusicUsageService:
             "integrity": integrity,
             "events": event_export,
             "play_counts": count_export,
+            "rights_report": rights_export,
+            "mesam_station_forms": mesam_exports,
             "manifest": manifest_export,
         }
 

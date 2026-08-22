@@ -78,6 +78,15 @@ class IcecastSourceTransport:
                 if bool(getattr(cfg, "icecast_legacy_source_enabled", False))
                 else "PUT"
             )
+            bitrate_headers = ""
+            if bool(profile.get("uses_bitrate")):
+                bitrate = int(profile.get("bitrate_kbps") or 0)
+                if bitrate > 0:
+                    bitrate_headers = (
+                        f"Ice-Bitrate: {bitrate}\r\n"
+                        f"Ice-Audio-Info: ice-bitrate={bitrate};"
+                        "ice-samplerate=48000;ice-channels=2\r\n"
+                    )
             request = (
                 f"{method} {mount} HTTP/1.1\r\n"
                 f"Host: {host}:{port}\r\n"
@@ -89,6 +98,7 @@ class IcecastSourceTransport:
                 f"Ice-Genre: {_header(getattr(cfg, 'icecast_genre', ''))}\r\n"
                 f"Ice-URL: {_header(getattr(cfg, 'icecast_url', ''))}\r\n"
                 f"Ice-Public: {1 if bool(getattr(cfg, 'icecast_public', True)) else 0}\r\n"
+                f"{bitrate_headers}"
                 "Connection: close\r\n\r\n"
             ).encode("utf-8")
             source_socket.sendall(request)

@@ -1507,7 +1507,7 @@ def _sync_station_output_from_settings(conn, station_id: int, settings: dict[str
     current_user = str(current["icecast_user"]) if current else "source"
     current_pass = str(current["icecast_password"]) if current else ""
     current_gain = float(current["output_gain_db"]) if current else 0.0
-    current_profile = str(current["stream_codec_profile"]) if current else "he_aac_192"
+    current_profile = str(current["stream_codec_profile"]) if current else "aac_low_192"
     current_bitrate = int(current["stream_bitrate_kbps"]) if current else 196
 
     mode = str(settings.get("output_mode", "speaker") or "speaker").strip().lower()

@@ -921,8 +921,8 @@ def test_stream_wizard_markup_is_plain_language_and_accessible():
     script = (root / "app" / "static" / "onair" / "app.js").read_text(encoding="utf-8")
     for step in range(1, 5):
         assert f"STEP {step} OF 4" in html
-    assert "Opus Normal — 192 kbps" in html
-    assert "every music station adds Opus 32 Low" in html
+    assert "AAC-LC Normal — 192 kbps (libfdk)" in html
+    assert "every music station adds HE-AAC v2 64 Low" in html
     assert "only Classical plus Cazz add lossless FLAC" in html
     assert "Opus Normal — 96 kbps" not in html
     assert "Opus High — 192 kbps" not in html

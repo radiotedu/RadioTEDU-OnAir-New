@@ -8,6 +8,7 @@ from app.repositories.user_repo import UserRepository
 READ_ONLY_METHODS = {"GET", "HEAD", "OPTIONS"}
 _ALL_ROLES = {"admin", "dj", "producer", "viewer"}
 _PUBLIC_API_PATHS = {
+    "/api/product-profile",
     "/api/health/live",
     "/api/health/ready",
     "/api/health-wall",

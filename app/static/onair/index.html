@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#101114">
+  <meta name="onair-edition" content="radiotedu">
   <meta name="description" content="Deterministic RadioTEDU OnAir automation wall for any radio station">
   <title>RadioTEDU OnAir</title>
   <link rel="manifest" href="/static/manifest.json">
@@ -173,13 +174,13 @@
             </div>
             <label class="check-row"><input id="configureIcecast" type="checkbox" checked> Configure internet stream now</label>
             <div id="icecastFields" class="field-grid output-fields">
-              <label>Server type<select id="icecastProtocol"><option value="icecast">Icecast / TinyIce (Opus)</option></select></label>
+              <label>Server type<select id="icecastProtocol"><option value="icecast">Icecast / TinyIce (AAC)</option></select></label>
               <label>Host<input id="icecastHost" value="127.0.0.1" required></label>
               <label>Port<input id="icecastPort" type="number" min="1" max="65535" value="8000" required></label>
               <label>Mount<input id="icecastMount" value="/new-station" pattern="/.*" required></label>
               <label>User<input id="icecastUser" value="source" required></label>
               <label>Password<input id="icecastPassword" type="password" autocomplete="new-password" required></label>
-              <label>Format<select id="icecastProfile"><option value="he_aac_192">HE-AAC v1 Normal — 192 kbps</option><option value="he_aac_96">HE-AAC v1 Low — 96 kbps</option><option value="opus_192">Opus Normal — 192 kbps</option><option value="opus_32">Opus Low — 32 kbps</option></select></label>
+              <label>Format<select id="icecastProfile"><option value="aac_low_192">AAC-LC Normal — 192 kbps (libfdk)</option><option value="aac_he_v2_64">HE-AAC v2 Low — 64 kbps (libfdk)</option></select></label>
             </div>
             <label class="check-row"><input id="activateNewStation" type="checkbox"> Make it the active broadcast target</label>
             <button id="createStationButton" class="button primary" type="submit">Create and verify station</button>
@@ -306,8 +307,8 @@
             </section>
             <section class="stream-wizard-step">
               <div class="eyebrow">STEP 2 OF 4</div><h3>Choose listener quality</h3>
-                <label>Quality<select id="currentIcecastProfile"><option value="he_aac_192">HE-AAC v1 Normal — 192 kbps</option><option value="he_aac_96">HE-AAC v1 Low — 96 kbps</option><option value="opus_192">Opus Normal — 192 kbps</option><option value="opus_32">Opus Low — 32 kbps</option></select></label>
-              <small>The suffix-free station mount is always the 192 kbps Opus normal stream. Low-bandwidth output is managed separately.</small>
+                <label>Quality<select id="currentIcecastProfile"><option value="aac_low_192">AAC-LC Normal — 192 kbps (libfdk)</option><option value="aac_he_v2_64">HE-AAC v2 Low — 64 kbps (libfdk)</option></select></label>
+              <small>The suffix-free station mount uses AAC-LC at 192 kbps. Its low-bandwidth mount is managed separately as HE-AAC v2 at 64 kbps.</small>
             </section>
             <section class="stream-wizard-step">
               <div class="eyebrow">STEP 3 OF 4</div><h3>Enter the connection supplied by your stream host</h3>
@@ -322,7 +323,7 @@
               <details id="streamAdvancedSettings">
                 <summary>Advanced settings — trained operators only</summary>
                 <div class="field-grid" style="margin-top:12px">
-                  <label>Server type<select id="currentSourceProtocol"><option value="icecast">Icecast / TinyIce (Opus)</option></select></label>
+                  <label>Server type<select id="currentSourceProtocol"><option value="icecast">Icecast / TinyIce (AAC)</option></select></label>
                   <label>Port<input id="currentIcecastPort" type="number" min="1" max="65535" required></label>
                   <label>Output gain (dB)<input id="currentOutputGain" type="number" min="-30" max="12" step="0.5" value="0"></label>
                   <label class="switch-row"><span><b>TLS encryption</b><small>Usually enabled for port 443</small></span><input id="currentIcecastTlsEnabled" type="checkbox"></label>
@@ -888,7 +889,7 @@
 
         <article id="qualityOutputsPanel" class="panel compliance-wide" data-operator-view="streaming">
           <div class="panel-heading"><div><div class="eyebrow">8 ADDITIONAL OUTPUTS</div><h2>Quality outputs</h2></div><span id="qualityOutputsState" class="mini-state">Not loaded</span></div>
-          <p class="card-copy">Operate the approved 16-mount system: six suffix-free music mounts use Opus 192 Normal, every music station adds Opus 32 Low, and only Classical plus Cazz add lossless FLAC. That is 14 mounts from this PC; `/en` and `/fr` remain the two independent AI streams. Every quality variant inherits protected source credentials and the same authoritative program timeline.</p>
+          <p class="card-copy">Operate the approved 16-mount system: six suffix-free music mounts use AAC-LC 192 Normal, every music station adds HE-AAC v2 64 Low, and only Classical plus Cazz add lossless FLAC. That is 14 mounts from this PC; `/en` and `/fr` remain the two independent AI streams. Every quality variant inherits protected source credentials and the same authoritative program timeline.</p>
           <div class="policy-callout"><b>The suffix-free mount is the normal listener endpoint.</b><small>Public title and artist metadata remain suppressed. Compliance records one played item and records its delivered variants without duplicate broadcast counting.</small></div>
           <form id="qualityOutputsForm" class="operator-form">
             <div class="field-grid two"><label>Verified origin source capacity<input id="qualityOriginSourceCapacity" type="number" min="16" max="512" step="1" value="20"></label><label>System plan<input value="14 local music mounts + 2 external AI mounts = 16" disabled></label></div>

@@ -36,7 +36,7 @@ from app.services.quality_output_bridge import (
     inspect_quality_bridge,
     write_quality_bridge,
 )
-from app.services.encoder_capabilities import inspect_he_aac_encoder, inspect_opus_encoder
+from app.services.encoder_capabilities import inspect_he_aac_encoder
 from app.services.hls_runtime import (
     HLS_CODEC_PROFILE as RUNTIME_HLS_CODEC_PROFILE,
     HLS_HIGH_BITRATE_KBPS,
@@ -283,9 +283,9 @@ def _quality_channels_payload(conn, settings: dict | None = None) -> list[dict]:
         item["primary"] = {
             "mount": channel.base_mount,
             "enabled": bool(output is not None and output["icecast_enabled"]),
-            "codec": "Opus"
+            "codec": "AAC-LC"
             if output is not None
-            and str(output["stream_codec_profile"] or "").startswith("opus_")
+            and str(output["stream_codec_profile"] or "") == "aac_low_192"
             else "Other",
             "stream_codec_profile": (
                 str(output["stream_codec_profile"] or "") if output is not None else ""
@@ -874,16 +874,7 @@ def diagnose_quality_outputs(
         configured_capacity = int(
             float(settings.get("quality_outputs_origin_source_capacity") or 0)
         )
-        enabled_opus_mounts = sum(
-            1
-            for channel in channels
-            for variant in channel.get("variants") or []
-            if variant.get("enabled")
-            and variant.get("quality") != "flac"
-            and str(variant.get("stream_codec_profile") or "").startswith("opus_")
-        )
-        opus_capability = inspect_opus_encoder()
-        he_aac_capability = inspect_he_aac_encoder()
+        fdk_aac_capability = inspect_he_aac_encoder()
         configuration_issues = []
         for channel in channels:
             if not channel.get("external") and not channel.get("station_found"):
@@ -900,27 +891,32 @@ def diagnose_quality_outputs(
                     configuration_issues.append(
                         f"{channel['channel_id']}:primary_mount_disabled"
                     )
-                if primary.get("stream_codec_profile") != "he_aac_192":
+                if primary.get("stream_codec_profile") != "aac_low_192":
                     configuration_issues.append(
                         f"{channel['channel_id']}:primary_mount_profile_invalid"
                     )
-        if enabled_opus_mounts and not opus_capability.get("available"):
-            configuration_issues.append("opus_encoder_unavailable")
-        enabled_he_aac_mounts = sum(
+            for variant in channel.get("variants") or []:
+                if (
+                    variant.get("quality") == "low"
+                    and variant.get("stream_codec_profile") != "aac_he_v2_64"
+                ):
+                    configuration_issues.append(
+                        f"{channel['channel_id']}:low_mount_profile_invalid"
+                    )
+        enabled_fdk_aac_mounts = sum(
             1
             for channel in channels
             for variant in channel.get("variants") or []
             if variant.get("enabled")
-            and str(variant.get("stream_codec_profile") or "").startswith("he_aac_")
+            and variant.get("quality") == "low"
         ) + sum(
             1
             for channel in channels
-            if str(dict(channel.get("primary") or {}).get("stream_codec_profile") or "").startswith("he_aac_")
+            if dict(channel.get("primary") or {}).get("enabled")
         )
-        he_aac_capability["required_by_enabled_mounts"] = enabled_he_aac_mounts
-        opus_capability["required_by_enabled_mounts"] = enabled_opus_mounts
-        if enabled_he_aac_mounts and not he_aac_capability.get("available"):
-            configuration_issues.append("he_aac_encoder_unavailable_fallback_opus")
+        fdk_aac_capability["required_by_enabled_mounts"] = enabled_fdk_aac_mounts
+        if enabled_fdk_aac_mounts and not fdk_aac_capability.get("available"):
+            configuration_issues.append("libfdk_aac_encoder_unavailable")
         bridge = inspect_quality_bridge()
         if not bridge.get("ok"):
             configuration_issues.append(str(bridge.get("error_code") or "bridge_invalid"))
@@ -957,8 +953,8 @@ def diagnose_quality_outputs(
             "enabled_local_mount_count": enabled_local_mount_count,
             "configuration_issues": configuration_issues,
             "external_bridge": bridge,
-            "opus_encoder": opus_capability,
-            "he_aac_encoder": he_aac_capability,
+            "fdk_aac_encoder": fdk_aac_capability,
+            "he_aac_encoder": fdk_aac_capability,
             "origin_capacity": origin_capacity,
             "runtime": runtime_diagnostics,
             "credentials_exposed": False,
@@ -1103,36 +1099,23 @@ def apply_quality_outputs(
     try:
         settings = SettingsRepository(conn).get_system()
         channels = _quality_channels_payload(conn, settings)
-        enabled_opus_mounts = sum(
+        enabled_fdk_aac_mounts = sum(
             1
             for channel in channels
             for variant in channel.get("variants") or []
             if variant.get("enabled")
-            and variant.get("quality") != "flac"
-            and str(variant.get("stream_codec_profile") or "").startswith("opus_")
+            and variant.get("quality") == "low"
         )
-        enabled_he_aac_mounts = sum(
-            1
-            for channel in channels
-            for variant in channel.get("variants") or []
-            if variant.get("enabled")
-            and str(variant.get("stream_codec_profile") or "").startswith("he_aac_")
-        )
-        opus_capability = inspect_opus_encoder()
-        he_aac_capability = inspect_he_aac_encoder()
-        if enabled_opus_mounts and not opus_capability.get("available"):
+        fdk_aac_capability = inspect_he_aac_encoder()
+        if enabled_fdk_aac_mounts and not fdk_aac_capability.get("available"):
             raise HTTPException(
                 status_code=409,
                 detail=(
-                    "Opus quality outputs require the FFmpeg libopus encoder. "
+                    "AAC quality outputs require the FFmpeg libfdk_aac encoder. "
                     "The configured FFmpeg runtime does not provide it; no quality "
                     "outputs were applied."
                 ),
             )
-        if enabled_he_aac_mounts and not he_aac_capability.get("available"):
-            # HE-AAC is the selected on-air format. Do not silently switch a
-            # public mount back to Ogg/Opus when the FDK encoder is missing.
-            _log.warning("HE-AAC encoder unavailable; mount remains HE-AAC and will retry")
         try:
             bridge = write_quality_bridge(settings)
         except Exception:

@@ -90,7 +90,12 @@ function New-StrictFileAcl {
 function Assert-StrictAcl {
     param([Parameter(Mandatory = $true)][string]$Target)
 
-    $verified = Get-Acl -LiteralPath $Target
+    # Use the .NET ACL API directly.  Minimal Windows Server/PowerShell images
+    # can expose Get-Acl/Set-Acl command metadata while failing to autoload the
+    # Microsoft.PowerShell.Security module, which would make installation fail
+    # before the service starts.
+    $item = Get-Item -LiteralPath $Target -Force
+    $verified = $item.GetAccessControl()
     if (-not $verified.AreAccessRulesProtected) {
         throw "ACL inheritance is still enabled for '$Target'."
     }
@@ -152,7 +157,7 @@ foreach ($directory in $directoryTargets) {
     $target = $directory.FullName
     if (-not $VerifyOnly) {
         $acl = New-StrictDirectoryAcl
-        Set-Acl -LiteralPath $target -AclObject $acl
+        $directory.SetAccessControl($acl)
     }
     Assert-StrictAcl -Target $target
 }
@@ -161,7 +166,7 @@ foreach ($file in $fileTargets) {
     $target = $file.FullName
     if (-not $VerifyOnly) {
         $acl = New-StrictFileAcl
-        Set-Acl -LiteralPath $target -AclObject $acl
+        $file.SetAccessControl($acl)
     }
     Assert-StrictAcl -Target $target
 }

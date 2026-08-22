@@ -7,6 +7,7 @@ import subprocess
 import threading
 import time
 import zlib
+from dataclasses import replace
 from typing import Callable
 
 from app.audio.ffmpeg_pipeline import build_ffmpeg_encoded_sink_cmd
@@ -55,6 +56,27 @@ _ENCODER_ERROR_TOKENS = (
     "server returned",
     "end of file",
 )
+
+
+def current_codec_fallback(
+    cfg: StationPipelineConfig,
+) -> StationPipelineConfig | None:
+    """Return the already-proven legacy profile for a new AAC policy profile."""
+
+    token = str(cfg.stream_codec_profile or "").strip().lower().replace("-", "_")
+    if token.startswith("aac_low"):
+        return replace(
+            cfg,
+            stream_codec_profile="he_aac_192",
+            stream_bitrate_kbps=192,
+        )
+    if token.startswith(("aac_he_v2", "he_aac_v2")):
+        return replace(
+            cfg,
+            stream_codec_profile="he_aac_96",
+            stream_bitrate_kbps=96,
+        )
+    return None
 
 
 def _mount_spread_seconds(
@@ -213,6 +235,8 @@ class IcecastAudioSink:
         self._last_encoder_error = ""
         self._encoder_error_count = 0
         self._effective_stream_codec_profile = ""
+        self._requested_stream_codec_profile = ""
+        self._profile_fallback_active = False
 
     @property
     def process(self):
@@ -378,7 +402,9 @@ class IcecastAudioSink:
                 ),
                 "last_encoder_error": self._last_encoder_error,
                 "encoder_error_count": int(self._encoder_error_count),
+                "requested_stream_codec_profile": self._requested_stream_codec_profile,
                 "effective_stream_codec_profile": self._effective_stream_codec_profile,
+                "profile_fallback_active": bool(self._profile_fallback_active),
                 "network_writer_running": bool(
                     self._connector_thread and self._connector_thread.is_alive()
                 ),
@@ -662,6 +688,7 @@ class IcecastAudioSink:
     def _start_connector_worker(self, cfg: StationPipelineConfig) -> None:
         def run() -> None:
             effective_cfg = cfg
+            fallback_cfg = current_codec_fallback(cfg)
             delay_index = 0
             delays = (1.0, 2.0, 4.0, 8.0, 15.0, 30.0)
             initial_delay = _mount_spread_seconds(
@@ -671,6 +698,7 @@ class IcecastAudioSink:
                 return
             while not self._writer_stop.is_set():
                 connected_at = None
+                delivered_this_connection = False
                 try:
                     source = self._source_factory(effective_cfg)
                     if self._writer_stop.is_set():
@@ -710,6 +738,7 @@ class IcecastAudioSink:
                                 continue
                             raise RuntimeError("Icecast encoder stopped")
                         source.send(chunk)
+                        delivered_this_connection = True
                         with self._writer_lock:
                             self._network_failed = False
                             self._encoded_bytes_sent += len(chunk)
@@ -721,6 +750,17 @@ class IcecastAudioSink:
                         self._network_failed = True
                         self._last_network_error = safe
                         self._network_error_count += 1
+                    if (
+                        not delivered_this_connection
+                        and fallback_cfg is not None
+                        and effective_cfg is cfg
+                    ):
+                        effective_cfg = fallback_cfg
+                        delay_index = 0
+                        self._profile_fallback_active = True
+                        self._effective_stream_codec_profile = str(
+                            effective_cfg.stream_codec_profile or ""
+                        )
                 finally:
                     if connected_at is not None and time.monotonic() - connected_at >= 30.0:
                         delay_index = 0
@@ -808,7 +848,9 @@ class IcecastAudioSink:
         )
         self._signature = signature
         self._cfg = cfg
+        self._requested_stream_codec_profile = str(cfg.stream_codec_profile or "")
         self._effective_stream_codec_profile = str(cfg.stream_codec_profile or "")
+        self._profile_fallback_active = False
         self._start_writer_worker()
         self._start_connector_worker(cfg)
         self._start_probe_worker(

@@ -165,7 +165,9 @@ def _purge_inactive_pending_queue_items(conn, station_id: int) -> int:
         "DELETE FROM queue_items AS q "
         "WHERE q.station_id=? AND q.status='pending' AND ("
         "  NOT EXISTS (SELECT 1 FROM tracks t WHERE t.id=q.track_id) OR "
-        "  EXISTS (SELECT 1 FROM tracks t WHERE t.id=q.track_id AND COALESCE(t.is_active,0)=0)"
+        "  EXISTS (SELECT 1 FROM tracks t WHERE t.id=q.track_id "
+        "          AND COALESCE(t.is_active,0)=0 "
+        "          AND LOWER(COALESCE(t.track_type,'music'))<>'announcement')"
         ")",
         (int(station_id),),
     )

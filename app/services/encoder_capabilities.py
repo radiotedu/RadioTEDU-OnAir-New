@@ -13,7 +13,7 @@ AAC_PROFILE = "AAC-LC"
 OPUS_ENCODER = "libopus"
 OPUS_PROFILE = "Opus"
 FDK_AAC_ENCODER = "libfdk_aac"
-FDK_AAC_PROFILE = "HE-AAC v1"
+FDK_AAC_PROFILE = "AAC-LC / HE-AAC v2"
 
 
 @lru_cache(maxsize=16)
@@ -99,7 +99,7 @@ def inspect_opus_encoder() -> dict[str, object]:
 
 
 def inspect_he_aac_encoder(binary_path: str | None = None) -> dict[str, object]:
-    """Check the external FDK-AAC encoder used by the HE-AAC v1 mounts."""
+    """Check the FDK-AAC encoder used by normal and low listener mounts."""
 
     binary = str(binary_path or "").strip() or resolve_binary("ffmpeg.exe") or resolve_binary("ffmpeg")
     if not binary:

@@ -54,7 +54,7 @@ class ReplicationApplier:
             icecast_user=str(config.get("icecast_user") or "source"),
             icecast_password=protected_password,
             output_gain_db=float(config.get("output_gain_db") or 0),
-            stream_codec_profile=str(config.get("stream_codec_profile") or "he_aac_192"),
+            stream_codec_profile=str(config.get("stream_codec_profile") or "aac_low_192"),
             stream_bitrate_kbps=int(config.get("stream_bitrate_kbps") or 192),
         )
         SettingsRepository(conn).upsert_station(

@@ -1298,7 +1298,7 @@ class PlayoutHardeningTests(unittest.TestCase):
         self.assertIn("mount=%2Fmeta", calls[0]["url"])
         self.assertIn("song=Codex+Artist+-+Codex+Title", calls[0]["url"])
 
-    def test_station_settings_offer_only_the_approved_opus_profiles(self):
+    def test_station_settings_offer_only_the_approved_aac_profiles(self):
         index_html = source_file("app", "static", "onair", "index.html").read_text(
             encoding="utf-8"
         )
@@ -1309,10 +1309,12 @@ class PlayoutHardeningTests(unittest.TestCase):
 
         self.assertNotIn('value="opus_64"', index_html)
         self.assertNotIn('value="opus_96"', index_html)
-        self.assertIn('value="opus_192"', index_html)
+        self.assertNotIn('value="opus_192"', index_html)
         self.assertNotIn('value="opus_128"', index_html)
         self.assertNotIn('value="mp3_128"', index_html)
         self.assertNotIn('value="aac_lc_196"', index_html)
+        self.assertIn('value="aac_low_192"', index_html)
+        self.assertIn('value="aac_he_v2_64"', index_html)
         output_payload = self._extract_js_function(app_js, "currentOutputPayload")
         self.assertIn("currentIcecastProfile", output_payload)
         self.assertIn("stream_codec_profile: profile", output_payload)

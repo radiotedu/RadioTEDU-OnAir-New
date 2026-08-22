@@ -660,6 +660,101 @@ def _database_status(
 
 
 def _process_details_windows(pid: int) -> dict[str, Any] | None:
+    # Process tracking is part of the safety boundary for managed services: a
+    # PID is never trusted unless its creation time, executable, and command
+    # line can be fingerprinted. Starting a fresh powershell.exe process for
+    # that lookup is both slow and racy on a busy broadcast PC; the child can
+    # be healthy while the auxiliary shell is still starting. Query Windows
+    # directly first so this safety check has no helper-process dependency.
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        process_query_limited_information = 0x1000
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        kernel32.GetProcessTimes.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+        ]
+        kernel32.GetProcessTimes.restype = wintypes.BOOL
+        kernel32.QueryFullProcessImageNameW.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.LPWSTR,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+
+        handle = kernel32.OpenProcess(
+            process_query_limited_information, False, int(pid)
+        )
+        if handle:
+            try:
+                created = wintypes.FILETIME()
+                exited = wintypes.FILETIME()
+                kernel = wintypes.FILETIME()
+                user = wintypes.FILETIME()
+                if kernel32.GetProcessTimes(
+                    handle,
+                    ctypes.byref(created),
+                    ctypes.byref(exited),
+                    ctypes.byref(kernel),
+                    ctypes.byref(user),
+                ):
+                    created_ticks = (
+                        int(created.dwHighDateTime) << 32
+                    ) | int(created.dwLowDateTime)
+                    buffer = ctypes.create_unicode_buffer(32768)
+                    length = wintypes.DWORD(len(buffer))
+                    executable = ""
+                    if kernel32.QueryFullProcessImageNameW(
+                        handle, 0, buffer, ctypes.byref(length)
+                    ):
+                        executable = buffer.value
+                    return {
+                        "ProcessId": int(pid),
+                        "CreationDate": str(created_ticks),
+                        "ExecutablePath": executable,
+                        "CommandLine": "",
+                    }
+            finally:
+                kernel32.CloseHandle(handle)
+    except (AttributeError, OSError, TypeError, ValueError):
+        pass
+
+    # Optional library fallback for restricted Windows configurations.
+    try:
+        import psutil
+    except ImportError:  # pragma: no cover - packaged requirements include it
+        psutil = None
+
+    if psutil is not None:
+        try:
+            process = psutil.Process(int(pid))
+            with process.oneshot():
+                created = datetime.fromtimestamp(
+                    process.create_time(), tz=timezone.utc
+                ).isoformat()
+                executable = process.exe()
+                command = subprocess.list2cmdline(process.cmdline())
+            return {
+                "ProcessId": int(pid),
+                "CreationDate": created,
+                "ExecutablePath": executable,
+                "CommandLine": command,
+            }
+        except (psutil.Error, OSError, ValueError):
+            # Keep the older lookup as a compatibility fallback for restricted
+            # Windows environments where process inspection is denied.
+            pass
+
     script = (
         "$p=Get-Process -Id "
         + str(int(pid))

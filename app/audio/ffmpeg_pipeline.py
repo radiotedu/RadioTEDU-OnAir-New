@@ -1,7 +1,10 @@
 import os
 import threading
 import hashlib
+import logging
 import shutil
+import stat
+import time
 from urllib.parse import quote
 
 from app.audio.gst_pipeline import StationPipelineConfig, resolve_stream_profile
@@ -14,6 +17,7 @@ LOCAL_PCM_CHANNELS = 2
 LOCAL_MONITOR_INITIAL_BURST_SECONDS = 10.0
 LOCAL_MONITOR_CATCHUP_RATE = 2.0
 _TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
+_log = logging.getLogger(__name__)
 
 
 def _normalize_metadata_value(value: str) -> str:
@@ -69,22 +73,89 @@ def _pcm_output_args() -> list[str]:
     ]
 
 
-def _icecast_output_args(cfg: StationPipelineConfig) -> list[str]:
-    profile = resolve_stream_profile(cfg.stream_codec_profile, cfg.stream_bitrate_kbps)
-    args: list[str] = []
+def _broadcast_processing_filters(cfg: StationPipelineConfig) -> list[str]:
+    """Return a conservative, fail-safe web-radio processing chain.
+
+    The compressor is intentionally gentle.  Loudness normalization and the
+    true-peak limiter remain the final level controls, while the explicit
+    resampler prevents ``loudnorm``'s internal 192 kHz analysis rate from
+    leaking into an encoder.  Classical/Jazz can select ``transparent`` to
+    keep their wider dynamics without losing rumble and peak protection.
+    """
+
+    profile = str(
+        getattr(cfg, "broadcast_processing_profile", "balanced") or "balanced"
+    ).strip().lower()
+    if profile not in {"balanced", "transparent", "dense", "off"}:
+        profile = "balanced"
+
     filters: list[str] = []
-    profile_filters = [str(item) for item in profile.get("ffmpeg_filter_args", [])]
-    for index, item in enumerate(profile_filters):
-        if item == "-af" and index + 1 < len(profile_filters):
-            filters.append(profile_filters[index + 1])
+    if profile != "off":
+        filters.append("highpass=f=30")
+        if profile == "dense":
+            filters.append(
+                "acompressor=threshold=0.100:ratio=3:attack=20:release=250:"
+                "knee=2.828:makeup=1"
+            )
+        elif profile == "balanced":
+            filters.append(
+                "acompressor=threshold=0.125:ratio=2:attack=20:release=250:"
+                "knee=2.828:makeup=1"
+            )
+
     loudness_target = getattr(cfg, "loudness_target_lufs", None)
     if loudness_target is not None:
         target = max(-24.0, min(-9.0, float(loudness_target)))
-        filters.append(f"loudnorm=I={target:.1f}:TP=-1.5:LRA=11")
+        filters.append(f"loudnorm=I={target:.1f}:TP=-1.5:LRA=7")
+
+    if profile != "off":
+        # -1.5 dBTP in linear amplitude.  Disabling auto-level prevents the
+        # limiter from undoing the headroom it is meant to guarantee.
+        filters.append(
+            "alimiter=limit=0.841395:attack=5:release=50:level=false:latency=true"
+        )
+    return filters
+
+
+def _icecast_filter_chain(cfg: StationPipelineConfig) -> list[str]:
+    profile = resolve_stream_profile(cfg.stream_codec_profile, cfg.stream_bitrate_kbps)
+    filters: list[str] = []
+    final_resample_filters: list[str] = []
+    profile_filters = [str(item) for item in profile.get("ffmpeg_filter_args", [])]
+    for index, item in enumerate(profile_filters):
+        if item == "-af" and index + 1 < len(profile_filters):
+            profile_filter = profile_filters[index + 1]
+            if profile_filter.startswith("aresample="):
+                final_resample_filters.append(profile_filter)
+            else:
+                filters.append(profile_filter)
+    processing_filters = _broadcast_processing_filters(cfg)
+    limiter_filters = [
+        item for item in processing_filters if item.startswith("alimiter=")
+    ]
+    filters.extend(
+        item for item in processing_filters if not item.startswith("alimiter=")
+    )
     if abs(float(cfg.output_gain_db or 0.0)) > 0.001:
         filters.append(f"volume={float(cfg.output_gain_db):.2f}dB")
-    if filters:
-        args.extend(["-af", ",".join(filters)])
+    # Station gain must feed the safety limiter, never follow it.  A final
+    # explicit resample returns loudnorm's internal rate to the encoder rate.
+    filters.extend(limiter_filters)
+    filters.extend(final_resample_filters or [f"aresample={LOCAL_PCM_SAMPLE_RATE}"])
+    return filters
+
+
+def _icecast_output_args(
+    cfg: StationPipelineConfig,
+    *,
+    include_audio_filters: bool = True,
+) -> list[str]:
+    profile = resolve_stream_profile(cfg.stream_codec_profile, cfg.stream_bitrate_kbps)
+    args: list[str] = []
+    if include_audio_filters:
+        filters = _icecast_filter_chain(cfg)
+        if filters:
+            args.extend(["-af", ",".join(filters)])
     args.extend(["-ar", str(LOCAL_PCM_SAMPLE_RATE), "-ac", str(LOCAL_PCM_CHANNELS)])
     args.extend(["-c:a", str(profile["ffmpeg_codec"])])
     bitrate_kbps = int(profile.get("bitrate_kbps") or 0)
@@ -157,9 +228,21 @@ def _silence_filter_spec() -> str:
 
 
 FAST_AUDIO_CACHE_DIR = r"C:\ProgramData\RadioTEDU\OnAir\FastAudioCache"
-_FAST_AUDIO_CACHE_MAX_BYTES = 512 * 1024 * 1024
+_FAST_AUDIO_CACHE_MAX_BYTES = 4 * 1024 * 1024 * 1024
 _FAST_AUDIO_CACHE_IN_FLIGHT: set[str] = set()
 _FAST_AUDIO_CACHE_LOCK = threading.Lock()
+_FAST_AUDIO_CACHE_PRUNE_IN_FLIGHT = False
+_FAST_AUDIO_CACHE_PRUNE_LOCK = threading.Lock()
+
+
+def _fast_cache_max_bytes() -> int:
+    raw = str(os.getenv("CLEANROOM_FAST_AUDIO_CACHE_MAX_BYTES", "") or "").strip()
+    if raw:
+        try:
+            return max(256 * 1024 * 1024, int(raw))
+        except (TypeError, ValueError):
+            pass
+    return int(_FAST_AUDIO_CACHE_MAX_BYTES)
 
 
 def _fast_cache_key(input_uri: str) -> str:
@@ -173,6 +256,159 @@ def _fast_cache_key(input_uri: str) -> str:
     return hashlib.sha256(material.encode("utf-8", "replace")).hexdigest()[:16]
 
 
+def _fast_cached_path(input_uri: str) -> str:
+    filename = os.path.basename(input_uri)
+    return os.path.join(
+        FAST_AUDIO_CACHE_DIR,
+        f"{_fast_cache_key(input_uri)}_{filename}",
+    )
+
+
+def prune_fast_audio_cache(
+    *,
+    max_bytes: int | None = None,
+    min_age_seconds: float = 300.0,
+    max_deletions: int = 512,
+) -> dict:
+    """Bound the disposable read-ahead cache without touching recent media.
+
+    This function is safe to run while broadcasting: recent cache entries are
+    protected, open files simply fail deletion on Windows, and every failure is
+    counted instead of interrupting playout.
+    """
+
+    root = os.path.abspath(FAST_AUDIO_CACHE_DIR)
+    target_bytes = _fast_cache_max_bytes() if max_bytes is None else max(0, int(max_bytes))
+    protected_since = time.time() - max(0.0, float(min_age_seconds))
+    limit = max(0, int(max_deletions))
+    try:
+        os.makedirs(root, exist_ok=True)
+        entries: list[tuple[float, str, int]] = []
+        total_bytes = 0
+        for name in os.listdir(root):
+            path = os.path.join(root, name)
+            if name.endswith(".part") or not os.path.isfile(path):
+                continue
+            try:
+                stat_result = os.stat(path)
+            except OSError:
+                continue
+            total_bytes += int(stat_result.st_size)
+            entries.append(
+                (float(stat_result.st_mtime), path, int(stat_result.st_size))
+            )
+    except OSError:
+        return {
+            "ok": False,
+            "before_bytes": 0,
+            "after_bytes": 0,
+            "deleted_files": 0,
+            "failed_files": 0,
+        }
+
+    before_bytes = total_bytes
+    deleted_files = 0
+    failed_files = 0
+    for modified_at, path, size in sorted(entries, key=lambda item: (item[0], item[1])):
+        if total_bytes <= target_bytes or deleted_files >= limit:
+            break
+        if modified_at >= protected_since:
+            continue
+        try:
+            try:
+                os.remove(path)
+            except PermissionError:
+                # copy2 can inherit a read-only source attribute on Windows.
+                # Cache files are disposable; source-library attributes are
+                # never changed.
+                os.chmod(path, stat.S_IREAD | stat.S_IWRITE)
+                os.remove(path)
+            total_bytes = max(0, total_bytes - size)
+            deleted_files += 1
+        except OSError:
+            failed_files += 1
+    return {
+        "ok": True,
+        "before_bytes": before_bytes,
+        "after_bytes": total_bytes,
+        "deleted_files": deleted_files,
+        "failed_files": failed_files,
+        "target_bytes": target_bytes,
+    }
+
+
+def request_fast_audio_cache_prune() -> None:
+    """Prune in a daemon so a track handoff never waits on directory cleanup."""
+
+    global _FAST_AUDIO_CACHE_PRUNE_IN_FLIGHT
+    with _FAST_AUDIO_CACHE_PRUNE_LOCK:
+        if _FAST_AUDIO_CACHE_PRUNE_IN_FLIGHT:
+            return
+        _FAST_AUDIO_CACHE_PRUNE_IN_FLIGHT = True
+
+    def _worker() -> None:
+        global _FAST_AUDIO_CACHE_PRUNE_IN_FLIGHT
+        try:
+            # Multiple bounded passes can recover a legacy oversized cache
+            # without monopolizing the audio worker that requested cleanup.
+            for _ in range(64):
+                result = prune_fast_audio_cache(max_deletions=256)
+                if (
+                    not result.get("ok")
+                    or int(result.get("after_bytes", 0)) <= int(result.get("target_bytes", 0))
+                    or int(result.get("deleted_files", 0)) == 0
+                ):
+                    break
+                time.sleep(0.05)
+        finally:
+            with _FAST_AUDIO_CACHE_PRUNE_LOCK:
+                _FAST_AUDIO_CACHE_PRUNE_IN_FLIGHT = False
+
+    threading.Thread(
+        target=_worker,
+        name="radiotedu-fast-audio-cache-prune",
+        daemon=True,
+    ).start()
+
+
+def release_fast_cached_uri(input_uri: str, *, delay_seconds: float = 2.0) -> bool:
+    """Delete one consumed cache entry if it has not been reused meanwhile."""
+
+    if not input_uri or not os.path.isfile(input_uri):
+        return False
+    drive, _ = os.path.splitdrive(input_uri)
+    if drive and drive.upper() == "C:":
+        return False
+    cached_path = _fast_cached_path(input_uri)
+    try:
+        expected = os.stat(cached_path)
+    except OSError:
+        return False
+
+    expected_fingerprint = (int(expected.st_size), int(expected.st_mtime_ns))
+
+    def _worker() -> None:
+        if delay_seconds > 0:
+            time.sleep(float(delay_seconds))
+        try:
+            current = os.stat(cached_path)
+            current_fingerprint = (int(current.st_size), int(current.st_mtime_ns))
+            # A cache hit updates mtime.  Never delete an entry another station
+            # or a future queue item reused after this release was scheduled.
+            if current_fingerprint != expected_fingerprint:
+                return
+            os.remove(cached_path)
+        except OSError:
+            request_fast_audio_cache_prune()
+
+    threading.Thread(
+        target=_worker,
+        name="radiotedu-fast-audio-cache-release",
+        daemon=True,
+    ).start()
+    return True
+
+
 def _resolve_fast_cached_uri(input_uri: str) -> str:
     if not input_uri or not os.path.exists(input_uri):
         return input_uri
@@ -181,42 +417,35 @@ def _resolve_fast_cached_uri(input_uri: str) -> str:
         return input_uri
     try:
         os.makedirs(FAST_AUDIO_CACHE_DIR, exist_ok=True)
-        filename = os.path.basename(input_uri)
-        file_hash = _fast_cache_key(input_uri)
-        cached_name = f"{file_hash}_{filename}"
-        cached_path = os.path.join(FAST_AUDIO_CACHE_DIR, cached_name)
+        cached_path = _fast_cached_path(input_uri)
         if os.path.exists(cached_path) and os.path.getsize(cached_path) == os.path.getsize(input_uri):
             try:
                 os.utime(cached_path, None)
             except OSError:
                 pass
+            request_fast_audio_cache_prune()
             return cached_path
-        total_size = sum(
-            os.path.getsize(os.path.join(FAST_AUDIO_CACHE_DIR, f))
-            for f in os.listdir(FAST_AUDIO_CACHE_DIR)
-            if os.path.isfile(os.path.join(FAST_AUDIO_CACHE_DIR, f))
-            and not f.endswith(".part")
-        )
-        if total_size > _FAST_AUDIO_CACHE_MAX_BYTES:
-            cached_files = sorted(
-                [
-                    os.path.join(FAST_AUDIO_CACHE_DIR, f)
-                    for f in os.listdir(FAST_AUDIO_CACHE_DIR)
-                    if os.path.isfile(os.path.join(FAST_AUDIO_CACHE_DIR, f))
-                    and not f.endswith(".part")
-                ],
-                key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0,
-            )
-            for old_f in cached_files[:20]:
-                try: os.remove(old_f)
-                except: pass
         # Copy to a sidecar and atomically publish it. A background prefetch
         # must never expose a half-written file to the next FFmpeg process.
         partial_path = f"{cached_path}.{os.getpid()}.part"
         shutil.copy2(input_uri, partial_path)
         os.replace(partial_path, cached_path)
+        try:
+            os.chmod(cached_path, stat.S_IREAD | stat.S_IWRITE)
+        except OSError:
+            pass
+        # copy2 preserves the library file's old timestamp.  Cache mtime must
+        # represent access time or LRU cleanup will evict a brand-new copy.
+        os.utime(cached_path, None)
+        request_fast_audio_cache_prune()
         return cached_path
     except Exception:
+        try:
+            if "partial_path" in locals() and os.path.exists(partial_path):
+                os.remove(partial_path)
+        except OSError:
+            pass
+        _log.debug("Fast audio cache fallback for %s", input_uri, exc_info=True)
         return input_uri
 
 
@@ -418,10 +647,10 @@ def _build_ffmpeg_crossfade_base_cmd(
     seconds = _format_seconds(next_cfg.crossfade_seconds)
     filter_graph = (
         f"[0:a]atrim=0:{seconds},asetpts=PTS-STARTPTS,"
-        f"afade=t=out:st=0:d={seconds}[current_xf];"
+        f"afade=t=out:st=0:d={seconds}:curve=qsin[current_xf];"
         f"[1:a]asplit=2[next_head][next_tail];"
         f"[next_head]atrim=0:{seconds},asetpts=PTS-STARTPTS,"
-        f"afade=t=in:st=0:d={seconds}[next_xf];"
+        f"afade=t=in:st=0:d={seconds}:curve=qsin[next_xf];"
         "[current_xf][next_xf]amix=inputs=2:duration=longest:normalize=0[mixed];"
         f"[next_tail]atrim=start={seconds},asetpts=PTS-STARTPTS[tail];"
         "[mixed][tail]concat=n=2:v=0:a=1[outa]"
@@ -471,12 +700,26 @@ def build_ffmpeg_crossfade_cmd(
         catchup_rate=catchup_rate,
     )
     wrote_output = False
+    icecast_map = "[outa]"
+    local_map = "[outa]"
+    if next_cfg.icecast_enabled:
+        filter_index = cmd.index("-filter_complex") + 1
+        filter_chain = ",".join(_icecast_filter_chain(next_cfg)) or "anull"
+        if include_local_pipe:
+            cmd[filter_index] += (
+                ";[outa]asplit=2[icecast_input][local_out];"
+                f"[icecast_input]{filter_chain}[icecast_out]"
+            )
+            local_map = "[local_out]"
+        else:
+            cmd[filter_index] += f";[outa]{filter_chain}[icecast_out]"
+        icecast_map = "[icecast_out]"
     if next_cfg.icecast_enabled:
         cmd.extend(
             [
                 "-map",
-                "[outa]",
-                *_icecast_output_args(next_cfg),
+                icecast_map,
+                *_icecast_output_args(next_cfg, include_audio_filters=False),
             ]
         )
         _append_track_metadata(cmd, next_cfg)
@@ -486,7 +729,7 @@ def build_ffmpeg_crossfade_cmd(
         cmd.extend(
             [
                 "-map",
-                "[outa]",
+                local_map,
                 *_pcm_output_args(),
                 "pipe:1",
             ]

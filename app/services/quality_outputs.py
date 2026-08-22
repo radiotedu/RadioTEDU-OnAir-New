@@ -11,9 +11,9 @@ FLAC_CHANNEL_IDS = frozenset({"classic", "cazz"})
 QUALITY_PROFILES = {
     "low": {
         "label": "Low",
-        "codec": "HE-AAC v1",
-        "stream_codec_profile": "he_aac_96",
-        "stream_bitrate_kbps": 96,
+        "codec": "HE-AAC v2",
+        "stream_codec_profile": "aac_he_v2_64",
+        "stream_bitrate_kbps": 64,
     },
     "flac": {
         "label": "Lossless",
@@ -298,6 +298,7 @@ def public_channel_payload(
                 "label": QUALITY_PROFILES[suffix]["label"],
                 "mount": quality_mount(channel.base_mount, suffix),
                 "codec": QUALITY_PROFILES[suffix]["codec"],
+                "stream_codec_profile": QUALITY_PROFILES[suffix]["stream_codec_profile"],
                 "bitrate_kbps": QUALITY_PROFILES[suffix]["stream_bitrate_kbps"],
                 "enabled": bool(variants[suffix]["enabled"]),
                 "icecast_public": bool(variants[suffix]["icecast_public"]),

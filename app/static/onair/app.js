@@ -5,6 +5,8 @@ const AUTH_KEYS = Object.freeze({
   refresh: 'cleanroom_auth_refresh_token',
   user: 'cleanroom_auth_user',
 });
+let PRODUCT_EDITION = String(document.querySelector('meta[name="onair-edition"]')?.content || 'radiotedu').trim().toLowerCase();
+let IS_RTAI_ONAIR = ['rtai', 'rtai-onair', 'rtai_onair'].includes(PRODUCT_EDITION);
 const IDLE_TIMEOUT_MS = 15 * 60 * 1000;
 const IDLE_WARNING_MS = 60 * 1000;
 const OPERATOR_VIEWS = Object.freeze({
@@ -145,6 +147,58 @@ globalThis.radioTEDUOnAirState = state;
 const $ = (id) => document.getElementById(id);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const asBool = (value) => value === true || ['1', 'true', 'yes', 'on'].includes(String(value || '').toLowerCase());
+
+function hideEditionPanel(id) {
+  const element = $(id);
+  const panel = element?.closest('article') || element;
+  if (panel) panel.hidden = true;
+}
+
+async function loadProductEditionProfile() {
+  try {
+    const response = await rawFetch('/api/product-profile', { cache: 'no-store' }, 8000);
+    if (!response.ok) return;
+    const profile = await response.json();
+    PRODUCT_EDITION = String(profile?.edition || PRODUCT_EDITION).trim().toLowerCase();
+    IS_RTAI_ONAIR = ['rtai', 'rtai-onair', 'rtai_onair'].includes(PRODUCT_EDITION);
+  } catch (_) {
+    // The static meta profile keeps the login usable if the backend is still
+    // starting. The next full reload reads the authoritative local profile.
+  }
+}
+
+function applyProductEdition() {
+  if (!IS_RTAI_ONAIR) return;
+  document.documentElement.dataset.productEdition = 'rtai-onair';
+  document.title = 'rtAI OnAir';
+  const description = document.querySelector('meta[name="description"]');
+  if (description) description.content = 'Deterministic local-first rtAI OnAir broadcast automation';
+
+  document.querySelectorAll('.onair-program-logo, .onair-brand-logo, .founder-lockup, .compact-founder-lockup').forEach((element) => { element.hidden = true; });
+  const loginEyebrow = document.querySelector('#loginForm .eyebrow');
+  const loginTitle = document.querySelector('#loginForm h1');
+  const brandEyebrow = document.querySelector('.brand-block .eyebrow');
+  const brandTitle = document.querySelector('.brand-block h1');
+  if (loginEyebrow) loginEyebrow.textContent = 'LOCAL-FIRST BROADCAST AUTOMATION';
+  if (loginTitle) loginTitle.textContent = 'rtAI OnAir sign in';
+  if (brandEyebrow) brandEyebrow.textContent = 'LOCAL-FIRST AUTOMATION';
+  if (brandTitle) brandTitle.textContent = 'rtAI OnAir';
+  const brandLockup = document.querySelector('.brand-lockup');
+  if (brandLockup) brandLockup.setAttribute('aria-label', 'rtAI OnAir');
+
+  const servicesButton = document.querySelector('[data-operator-nav="services"] small');
+  if (servicesButton) servicesButton.textContent = 'Local AI and readiness';
+  OPERATOR_VIEWS.services.description = 'Control the local AI host and verify offline readiness.';
+
+  [
+    'hlsHomeCard',
+    'campaignForm',
+    'integrationForm',
+    'unifiedMediaState',
+    'qualityOutputsPanel',
+    'hlsSettingsForm',
+  ].forEach(hideEditionPanel);
+}
 
 let desktopPickerSequence = 0;
 let desktopPickerInitialized = false;
@@ -494,7 +548,7 @@ function deterministicRotationKey(settings = state.stationSettings || {}) {
 }
 
 function streamProfileBitrate(profile) {
-  return ({ he_aac_96: 96, he_aac_192: 192, opus_32: 32, opus_64: 64, opus_96: 96, opus_192: 192 })[profile] || 192;
+  return ({ aac_low_192: 192, aac_he_v2_64: 64, he_aac_96: 96, he_aac_192: 192, opus_32: 32, opus_64: 64, opus_96: 96, opus_192: 192 })[profile] || 192;
 }
 
 async function ensureSignedIn() {
@@ -630,7 +684,9 @@ async function loadCoreStatus() {
     api(`/api/settings/station?station_id=${sid}`),
     api(`/api/stations/output?station_id=${sid}`),
     api('/api/library/watcher/status').catch(() => ({ running: false, profiles: [] })),
-    api('/api/library/product-catalog/status').catch(() => ({ running: false, products: [] })),
+    IS_RTAI_ONAIR
+      ? Promise.resolve({ running: false, products: [] })
+      : api('/api/library/product-catalog/status').catch(() => ({ running: false, products: [] })),
   ]);
   state.health = health;
   state.runtime = runtime;
@@ -659,21 +715,29 @@ async function loadOperatorConfiguration() {
   const [setupState, devicePayload, campaign, integrations, radioteduServices, unifiedMedia, watchdog] = await Promise.all([
     api(`/api/setup/state?station_id=${state.stationId}`),
     api('/api/audio/devices').catch(() => ({ devices: [] })),
-    api('/api/campaign').catch(() => ({ configured: false, active: false, stations: [] })),
-    api('/api/integrations/radiotedu').catch(() => ({
-      voting_enabled: false,
-      study_enabled: false,
-    })),
-    state.radioteduServices
-      ? Promise.resolve(state.radioteduServices)
-      : api('/api/integrations/radiotedu/services?refresh_health=false').catch(() => ({
-        services: {},
-        definitions: [],
-        status: [],
+    IS_RTAI_ONAIR
+      ? Promise.resolve({ configured: false, active: false, stations: [] })
+      : api('/api/campaign').catch(() => ({ configured: false, active: false, stations: [] })),
+    IS_RTAI_ONAIR
+      ? Promise.resolve({ voting_enabled: false, study_enabled: false })
+      : api('/api/integrations/radiotedu').catch(() => ({
+        voting_enabled: false,
+        study_enabled: false,
       })),
+    IS_RTAI_ONAIR
+      ? Promise.resolve({ services: {}, definitions: [], status: [] })
+      : state.radioteduServices
+        ? Promise.resolve(state.radioteduServices)
+        : api('/api/integrations/radiotedu/services?refresh_health=false').catch(() => ({
+          services: {},
+          definitions: [],
+          status: [],
+        })),
     // This endpoint summarizes large media views. Load it on explicit
     // configuration refreshes, never from the five-second live status poll.
-    api('/api/library/unified-media/status').catch(() => ({ root: '', views: [], source_map_configured: false, last_error: '' })),
+    IS_RTAI_ONAIR
+      ? Promise.resolve({ root: '', views: [], source_map_configured: false, last_error: '' })
+      : api('/api/library/unified-media/status').catch(() => ({ root: '', views: [], source_map_configured: false, last_error: '' })),
     api('/api/watchdog/status').catch(() => null),
   ]);
   state.setupState = setupState || {};
@@ -1369,7 +1433,7 @@ function renderOutputConfiguration() {
   setCleanValue('currentIcecastMount', output.icecast_mount || `/station${state.stationId || 1}`);
   setCleanValue('currentIcecastUser', output.icecast_user || 'source');
   setCleanValue('currentIcecastPassword', output.icecast_password || '');
-  setCleanValue('currentIcecastProfile', /^(opus|he_aac)_/.test(String(output.stream_codec_profile || '')) ? output.stream_codec_profile : 'he_aac_192');
+  setCleanValue('currentIcecastProfile', /^(opus|he_aac|aac_low|aac_he_v2)_/.test(String(output.stream_codec_profile || '')) ? output.stream_codec_profile : 'aac_low_192');
   setCleanValue('currentSourceProtocol', output.source_protocol || 'icecast');
   setCleanChecked('currentIcecastTlsEnabled', asBool(output.icecast_tls_enabled));
   setCleanChecked('currentLocalEnabled', output.local_output_enabled);
@@ -1951,7 +2015,8 @@ async function refreshAll(silent = false) {
   if (!silent) setConnection('', 'Refreshing');
   try {
     const currentView = String(state.activeView || 'onair');
-    const jobs = [loadCoreStatus(), loadQueue(), loadHlsSettings()];
+    const jobs = [loadCoreStatus(), loadQueue()];
+    if (!IS_RTAI_ONAIR) jobs.push(loadHlsSettings());
     if (currentView === 'media') jobs.push(loadLibrary(1), loadJingles());
     if (['automation', 'stations', 'settings', 'diagnostics', 'services'].includes(currentView)) {
       jobs.push(loadOperatorConfiguration());
@@ -2559,7 +2624,7 @@ async function createStation(event) {
     await loadStations(createdId);
     $('stationForm').reset();
     $('configureIcecast').checked = true;
-    $('icecastHost').value = '127.0.0.1'; $('icecastPort').value = '8000'; $('icecastMount').value = '/new-station'; delete $('icecastMount').dataset.edited; $('icecastUser').value = 'source'; $('icecastProfile').value = 'he_aac_192'; $('icecastProtocol').value = 'icecast';
+    $('icecastHost').value = '127.0.0.1'; $('icecastPort').value = '8000'; $('icecastMount').value = '/new-station'; delete $('icecastMount').dataset.edited; $('icecastUser').value = 'source'; $('icecastProfile').value = 'aac_low_192'; $('icecastProtocol').value = 'icecast';
     toggleIcecastFields();
     setResult('stationResult', `Verified: ${name} was created${configure ? ' with its network output' : ''}.`, 'success');
     logActivity(`Created station ${name}${configure ? ' and verified network output' : ''}`);
@@ -2597,7 +2662,7 @@ function updateSourceProfileCompatibility(protocolId, profileId, tlsId = '') {
     [...profile.options].forEach((option) => {
       option.disabled = protocol === 'shoutcast' && option.value.startsWith('opus_');
     });
-    if (profile.selectedOptions[0]?.disabled) profile.value = 'he_aac_192';
+    if (profile.selectedOptions[0]?.disabled) profile.value = 'aac_low_192';
   }
   const tls = tlsId ? $(tlsId) : null;
   if (tls) {
@@ -5220,12 +5285,12 @@ function renderQualityOutputDiagnostics(payload) {
   const observedHealthy = Number(capacity.observed_healthy_local_mounts || 0);
   const observedEnabled = Number(capacity.observed_enabled_local_mounts || payload?.enabled_local_mount_count || 0);
   const declaredCapacity = Number(capacity.configured_source_slots || 0);
-  const encoder = payload?.opus_encoder || {};
+  const encoder = payload?.fdk_aac_encoder || payload?.he_aac_encoder || {};
   const issues = Array.isArray(payload?.configuration_issues) ? payload.configuration_issues : [];
   const bridge = payload?.external_bridge || {};
   $('qualityOutputsDiagnostics').innerHTML = `<div class="record-row"><div><b>Deterministic mount plan</b><span>${Number(payload?.local_mount_count || 14)} local · ${Number(payload?.system_mount_count || 16)} system · ${Number(payload?.enabled_local_mount_count || 0)} local enabled</span></div><span>${issues.length ? `${issues.length} issue(s)` : 'verified'}</span></div>
     <div class="record-row"><div><b>AI streams</b><span>English and French stay on their existing single mounts</span></div><span>${bridge.ok ? 'legacy-only verified' : escapeHtml(bridge.error_code || 'not ready')}</span></div>
-    <div class="record-row"><div><b>Opus encoder</b><span>FFmpeg libopus at 32 and 192 kbps; FLAC remains lossless for Classical and Cazz</span></div><span>${encoder.available ? 'verified' : escapeHtml(encoder.error_code || 'not ready')}</span></div>
+    <div class="record-row"><div><b>AAC encoder</b><span>FFmpeg libfdk_aac: AAC-LC 192 Normal and HE-AAC v2 64 Low; FLAC remains lossless for Classical and Cazz</span></div><span>${encoder.available ? 'verified' : escapeHtml(encoder.error_code || 'not ready')}</span></div>
     <div class="record-row"><div><b>Music runtime branches</b><span>${runtimeChecked.length} station runtime(s) checked</span></div><span>${unhealthy ? `${unhealthy} not healthy` : (runtimeChecked.length ? 'healthy' : 'not running')}</span></div>
     <div class="record-row"><div><b>Origin source delivery</b><span>${observedHealthy}/${observedEnabled} enabled local mounts delivering · ${declaredCapacity || 'no'} slots declared</span></div><span>${capacity.verified ? 'verified by audio delivery' : escapeHtml(capacity.warning || 'not verified')}</span></div>`;
   const encoderReady = encoder.available || !Number(encoder.required_by_enabled_mounts || 0);
@@ -5266,7 +5331,7 @@ async function applyQualityOutputsNow() {
       body: JSON.stringify({ restart_ai_supervisor: false }),
     });
     if (!payload?.ok) throw new Error('One or more quality output owners could not apply the saved settings');
-    setResult('qualityOutputsResult', 'Saved Opus/FLAC outputs applied without sourcing the external AI streams or copying credentials.', 'success');
+    setResult('qualityOutputsResult', 'Saved AAC/FLAC outputs applied without sourcing the external AI streams or copying credentials.', 'success');
     logActivity('Quality outputs applied and verified.');
     return payload;
   } catch (error) {
@@ -5501,7 +5566,7 @@ async function loadOperatorViewData(view) {
   if (view === 'automation') {
     try { await loadStartupSound(); } catch (error) { setResult('startupSoundResult', errorMessage(error), 'error'); }
   }
-  if (view === 'services' && !state.jukeLibrary) {
+  if (!IS_RTAI_ONAIR && view === 'services' && !state.jukeLibrary) {
     try { await loadJukeLibrary({ busy: false }); } catch (_) { /* result is rendered in the Juke panel */ }
   }
   if (view === 'shows') {
@@ -5513,12 +5578,14 @@ async function loadOperatorViewData(view) {
   if (view === 'ads') {
     try { await loadAdvertising(); } catch (error) { setResult('adItemResult', errorMessage(error), 'error'); }
   }
-  if (view === 'settings') {
+  if (!IS_RTAI_ONAIR && view === 'settings') {
     try { await loadHlsSettings(); } catch (error) { setResult('hlsSettingsResult', errorMessage(error), 'error'); }
   }
   if (view === 'streaming') {
     try { await loadStreamingFeatures(); } catch (error) { setResult('streamingFeaturesResult', errorMessage(error), 'error'); }
-    try { await loadQualityOutputs(); } catch (error) { setResult('qualityOutputsResult', errorMessage(error), 'error'); }
+    if (!IS_RTAI_ONAIR) {
+      try { await loadQualityOutputs(); } catch (error) { setResult('qualityOutputsResult', errorMessage(error), 'error'); }
+    }
     try { await loadStreamingHealth(); } catch (_) { /* rendered in the health panel */ }
   }
 }
@@ -5778,6 +5845,8 @@ function bindEvents() {
 }
 
 async function boot() {
+  await loadProductEditionProfile();
+  applyProductEdition();
   initializeComplianceDefaults();
   initializeAdDefaults();
   initializeOperatorNavigation();

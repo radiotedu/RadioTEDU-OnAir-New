@@ -19,6 +19,7 @@ from app.audio.ffmpeg_pipeline import (
     build_ffmpeg_pcm_producer_cmd,
     build_ffmpeg_local_pcm_cmd,
     build_ffplay_local_cmd,
+    release_fast_cached_uri,
 )
 from app.audio.gst_pipeline import StationPipelineConfig, build_gst_pipeline
 from app.audio.icecast_audio_sink import IcecastAudioSink
@@ -1524,6 +1525,9 @@ class StationRuntime:
         )
 
     def _stop_producers(self) -> None:
+        active_input_uri = str(
+            self._active_cfg.input_uri if self._active_cfg is not None else ""
+        )
         self._next_playout_generation()
         self._stop_live_mix_worker()
         self._stop_icecast_pipe_worker()
@@ -1538,6 +1542,8 @@ class StationRuntime:
         self._clear_transition_window()
         self._router.set_branch_health("icecast", False)
         self._router.set_branch_health("local", False)
+        if active_input_uri:
+            release_fast_cached_uri(active_input_uri)
 
     def _stop_sinks(self) -> None:
         if self._icecast_sink is not None:
@@ -1731,6 +1737,7 @@ class StationRuntime:
     def _start_crossfade(self, cfg: StationPipelineConfig) -> None:
         if self._active_cfg is None or not self.ffmpeg_bin:
             raise RuntimeError("transition backend unavailable")
+        previous_cfg = self._active_cfg
         # Validate both source files before stopping the current producer. A
         # cold H: drive, temporary network disconnect, or a removed queue file
         # must defer the handoff; killing the current process first turns that
@@ -1818,6 +1825,12 @@ class StationRuntime:
                 0.0, float(cfg.crossfade_seconds or 0.0)
             )
             self._last_transition_mode = "crossfade"
+            # The transition producer reads the old track only for the fade
+            # head.  Release it after that reader has safely moved on.
+            release_fast_cached_uri(
+                str(previous_cfg.input_uri or ""),
+                delay_seconds=max(2.0, float(cfg.crossfade_seconds or 0.0) + 2.0),
+            )
         except Exception:
             self._terminate_process(new_process)
             self._terminate_process(new_local_process)

@@ -442,13 +442,13 @@ def test_setup_configure_resolves_invalid_station_to_active_station(client, monk
     assert payload["config"]["stream_codec_profile"] == "opus_192"
 
 
-def test_setup_exposes_only_the_approved_opus_quality_presets():
+def test_setup_exposes_only_the_approved_aac_quality_presets():
     assert [
         (item["id"], item["bitrate_kbps"])
         for item in CODEC_PRESETS
-    ] == [("opus_192", 192)]
-    assert _normalize_stream_profile("opus_128", 128) == ("opus_192", 192)
-    assert _normalize_stream_profile("mp3_128", 128) == ("opus_192", 192)
+    ] == [("aac_low_192", 192), ("aac_he_v2_64", 64)]
+    assert _normalize_stream_profile("opus_128", 128) == ("aac_low_192", 192)
+    assert _normalize_stream_profile("mp3_128", 128) == ("aac_low_192", 192)
 
 
 def test_setup_complete_issues_deployment_certificate(client, monkeypatch):

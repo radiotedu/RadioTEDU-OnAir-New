@@ -3,7 +3,92 @@ from __future__ import annotations
 import os
 import sys
 import asyncio
+import py_compile
+import shutil
 from pathlib import Path
+
+
+_STAGED_UPDATE_ID = "aac-policy-20260823T002626"
+_STAGED_UPDATE_FILES = (
+    "app/audio/gst_pipeline.py",
+    "app/audio/icecast_source_transport.py",
+    "app/audio/icecast_audio_sink.py",
+    "app/services/quality_outputs.py",
+    "app/services/stream_config_service.py",
+    "app/services/codec_migration.py",
+    "app/services/encoder_capabilities.py",
+    "app/engine/runtime_registry.py",
+    "app/api/setup.py",
+    "app/api/stations.py",
+    "app/api/stream_config.py",
+    "app/api/streaming.py",
+    "app/api/legacy.py",
+    "app/services/replication_applier.py",
+    "app/static/js/setup-wizard.js",
+    "app/static/onair/index.html",
+    "app/static/onair/app.js",
+    "app/db.py",
+    "app/repositories/station_output_repo.py",
+)
+
+
+def _service_data_root() -> Path:
+    return (
+        Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData"))
+        / "RadioTEDU"
+        / "OnAir"
+    ).resolve()
+
+
+def apply_pending_staged_update(repository_root: Path, data_root: Path) -> bool:
+    """Apply a validated update once, restoring old source on any copy failure."""
+
+    stage = data_root / "staged" / _STAGED_UPDATE_ID
+    pending = stage / ".apply-on-next-start"
+    if not pending.is_file():
+        return False
+    sources = [(relative, stage / relative) for relative in _STAGED_UPDATE_FILES]
+    for relative, source in sources:
+        if not source.is_file():
+            print(f"Staged update retained: required file is missing ({relative})")
+            return False
+        if source.suffix.lower() == ".py":
+            try:
+                py_compile.compile(str(source), doraise=True)
+            except py_compile.PyCompileError:
+                print(f"Staged update retained: Python validation failed ({relative})")
+                return False
+
+    backup = data_root / "backups" / _STAGED_UPDATE_ID / "preapply-live"
+    copied: list[str] = []
+    try:
+        for relative, _source in sources:
+            current = repository_root / relative
+            if not current.is_file():
+                raise FileNotFoundError(relative)
+            saved = backup / relative
+            saved.parent.mkdir(parents=True, exist_ok=True)
+            if not saved.exists():
+                shutil.copy2(current, saved)
+        for relative, source in sources:
+            target = repository_root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+            copied.append(relative)
+        pending.replace(stage / ".applied")
+        print(f"Applied staged update {_STAGED_UPDATE_ID} ({len(copied)} files)")
+        return True
+    except Exception as exc:
+        for relative in copied:
+            saved = backup / relative
+            target = repository_root / relative
+            if saved.is_file():
+                try:
+                    shutil.copy2(saved, target)
+                except OSError:
+                    pass
+        print(f"Staged update retained after rollback ({type(exc).__name__})")
+        return False
 
 
 def _resolve_tools_root(repository_root: Path) -> Path:
@@ -33,11 +118,7 @@ def _resolve_tools_root(repository_root: Path) -> Path:
 
 def configure_environment(repository_root: Path) -> dict[str, str]:
     repository_root = repository_root.resolve()
-    data_root = (
-        Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData"))
-        / "RadioTEDU"
-        / "OnAir"
-    ).resolve()
+    data_root = _service_data_root()
     user_root = data_root
     database = data_root / "cleanroom.db"
     jwt_secret = user_root / "secrets" / "jwt-signing.key"
@@ -76,6 +157,7 @@ def configure_environment(repository_root: Path) -> dict[str, str]:
 
 def main() -> int:
     repository_root = Path(__file__).resolve().parents[1]
+    apply_pending_staged_update(repository_root, _service_data_root())
     configure_environment(repository_root)
     os.chdir(repository_root)
     if str(repository_root) not in sys.path:

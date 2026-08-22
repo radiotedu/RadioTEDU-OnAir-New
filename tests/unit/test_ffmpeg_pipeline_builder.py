@@ -47,6 +47,22 @@ def test_ffmpeg_command_includes_track_metadata_when_available() -> None:
     assert "196k" in cmd
 
 
+def test_ffmpeg_command_uses_bounded_radio_processing_in_safe_order() -> None:
+    cfg = _cfg()
+    cfg.output_gain_db = 1.5
+    cfg.loudness_target_lufs = -16.0
+    cmd = build_ffmpeg_icecast_cmd(cfg, "ffmpeg.exe")
+
+    filter_chain = cmd[cmd.index("-af") + 1]
+    assert "highpass=f=30" in filter_chain
+    assert "acompressor=" in filter_chain
+    assert "loudnorm=I=-16.0:TP=-1.5:LRA=7" in filter_chain
+    assert "alimiter=limit=0.841395" in filter_chain
+    assert "aresample=48000" in filter_chain
+    assert filter_chain.index("volume=1.50dB") < filter_chain.index("alimiter=")
+    assert filter_chain.index("alimiter=") < filter_chain.index("aresample=48000")
+
+
 def test_ffmpeg_command_omits_empty_track_metadata() -> None:
     cmd = build_ffmpeg_icecast_cmd(_cfg(title="", artist=""), "ffmpeg.exe")
     joined = " ".join(cmd)
@@ -65,6 +81,36 @@ def test_true_aac_plus_profile_requires_fdk_he_aac_encoder() -> None:
     assert "aac_he" in cmd
     assert "96k" in cmd
     assert "-afterburner" in cmd
+
+
+def test_normal_profile_is_libfdk_aac_lc_at_192_kbps() -> None:
+    profile = resolve_stream_profile("aac_low_192", 192)
+    cmd = build_ffmpeg_icecast_sink_cmd(
+        _cfg(stream_codec_profile="aac_low_192"), "ffmpeg.exe"
+    )
+
+    assert profile["profile"] == "aac_low_192"
+    assert profile["bitrate_kbps"] == 192
+    assert profile["ffmpeg_codec"] == "libfdk_aac"
+    assert profile["ffmpeg_profile"] == "aac_low"
+    assert "libfdk_aac" in cmd
+    assert "aac_low" in cmd
+    assert "192k" in cmd
+
+
+def test_low_profile_is_libfdk_he_aac_v2_at_64_kbps() -> None:
+    profile = resolve_stream_profile("aac_he_v2_64", 64)
+    cmd = build_ffmpeg_icecast_sink_cmd(
+        _cfg(stream_codec_profile="aac_he_v2_64"), "ffmpeg.exe"
+    )
+
+    assert profile["profile"] == "aac_he_v2_64"
+    assert profile["bitrate_kbps"] == 64
+    assert profile["ffmpeg_codec"] == "libfdk_aac"
+    assert profile["ffmpeg_profile"] == "aac_he_v2"
+    assert "libfdk_aac" in cmd
+    assert "aac_he_v2" in cmd
+    assert "64k" in cmd
 
 
 def test_ffmpeg_command_omits_track_metadata_when_disabled(monkeypatch) -> None:
@@ -114,9 +160,13 @@ def test_build_ffmpeg_crossfade_cmd_seeks_current_input_and_mixes_immediately() 
     assert "C:/music/current.mp3" in joined
     assert "C:/music/next.mp3" in joined
     assert "afade" in joined
+    assert "curve=qsin" in joined
     assert "amix" in joined
     assert "concat" in joined
     assert "icecast://" in joined
+    assert "[icecast_input]" not in joined
+    assert "[icecast_out]" in joined
+    assert " -af " not in joined
     assert "title=Next Song" in joined
     assert "artist=Next Artist" in joined
 
@@ -152,6 +202,10 @@ def test_build_ffmpeg_crossfade_cmd_uses_separate_codecs_for_icecast_and_local_p
     joined = " ".join(cmd)
     assert "icecast://" in joined
     assert "pipe:1" in joined
+    assert "asplit=2[icecast_input][local_out]" in joined
+    assert "[icecast_input]highpass=f=30" in joined
+    assert "-map [local_out]" in joined
+    assert " -af " not in joined
     assert "-content_type audio/aac" in joined
     assert "-f adts" in joined
     assert "pcm_s16le" in joined

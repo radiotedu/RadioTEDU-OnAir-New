@@ -11,7 +11,7 @@ from app.repositories.settings_repo import SettingsRepository
 from app.repositories.station_output_repo import StationOutputRepository
 
 
-def test_stale_high_quality_profile_self_heals_to_opus_192():
+def test_stale_high_quality_profile_self_heals_to_aac_low_192():
     settings = {
         "station_1_extra_icecast_outputs": json.dumps(
             [
@@ -36,7 +36,7 @@ def test_stale_high_quality_profile_self_heals_to_opus_192():
 
     outputs = runtime_registry_module._extra_icecast_outputs(settings, 1, row)
 
-    assert outputs[0]["stream_codec_profile"] == "opus_192"
+    assert outputs[0]["stream_codec_profile"] == "aac_low_192"
     assert outputs[0]["stream_bitrate_kbps"] == 192
 
 
@@ -66,6 +66,8 @@ def test_lofi_forces_metadata_suppression_on_all_quality_outputs():
     outputs = runtime_registry_module._extra_icecast_outputs(settings, 2, row)
 
     assert outputs[0]["metadata_suppressed"] is True
+    assert outputs[0]["stream_codec_profile"] == "aac_he_v2_64"
+    assert outputs[0]["stream_bitrate_kbps"] == 64
 
 
 def test_ai_runtime_status_uses_persisted_readiness_without_cache_scan(monkeypatch):

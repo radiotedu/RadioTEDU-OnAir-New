@@ -69,3 +69,26 @@ def test_opus_capability_requires_libopus(tmp_path):
     assert result["available"] is True
     assert result["encoder"] == "libopus"
     assert result["profile"] == "Opus"
+
+
+def test_fdk_capability_covers_normal_and_low_aac_profiles(tmp_path):
+    ffmpeg = tmp_path / "ffmpeg.exe"
+    ffmpeg.write_bytes(b"probe")
+    encoder_capabilities._inspect_ffmpeg.cache_clear()
+
+    with (
+        patch.object(encoder_capabilities, "resolve_binary", return_value=str(ffmpeg)),
+        patch.object(
+            encoder_capabilities.subprocess,
+            "run",
+            return_value=SimpleNamespace(
+                returncode=0,
+                stdout=" A....D libfdk_aac Fraunhofer FDK AAC\n",
+            ),
+        ),
+    ):
+        result = encoder_capabilities.inspect_he_aac_encoder()
+
+    assert result["available"] is True
+    assert result["encoder"] == "libfdk_aac"
+    assert result["profile"] == "AAC-LC / HE-AAC v2"

@@ -16,7 +16,11 @@ class StationPipelineConfig:
     output_device_id: str
     output_gain_db: float = 0.0
     loudness_target_lufs: float | None = None
-    stream_codec_profile: str = "he_aac_192"
+    # "balanced" mirrors a conservative professional web-radio chain;
+    # "transparent" keeps wide dynamics for Classical/Jazz; "off" retains
+    # only codec-required filtering and the configured loudness stage.
+    broadcast_processing_profile: str = "balanced"
+    stream_codec_profile: str = "aac_low_192"
     stream_bitrate_kbps: int = 192
     icecast_enabled: bool = True
     stream_title: str = ""
@@ -121,6 +125,44 @@ def resolve_stream_profile(
             "uses_bitrate": True,
         }
 
+    if token.startswith(("aac_he_v2", "he_aac_v2")):
+        bitrate = _profile_bitrate(token, bitrate_kbps, 64, 24, 128)
+        return {
+            "profile": f"aac_he_v2_{bitrate}",
+            "codec": "aac",
+            "bitrate_kbps": bitrate,
+            "ffmpeg_codec": "libfdk_aac",
+            "ffmpeg_profile": "aac_he_v2",
+            "ffmpeg_filter_args": ["-af", "aresample=48000"],
+            "ffmpeg_encoder_args": ["-afterburner", "1"],
+            "content_type": "audio/aac",
+            "format": "adts",
+            "gst_encoder": (
+                f"fdkaacenc bitrate={bitrate * 1000} afterburner=true "
+                "! audio/mpeg,mpegversion=4,stream-format=adts,profile=he-aac-v2"
+            ),
+            "uses_bitrate": True,
+        }
+
+    if token.startswith("aac_low"):
+        bitrate = _profile_bitrate(token, bitrate_kbps, 192, 32, 512)
+        return {
+            "profile": f"aac_low_{bitrate}",
+            "codec": "aac",
+            "bitrate_kbps": bitrate,
+            "ffmpeg_codec": "libfdk_aac",
+            "ffmpeg_profile": "aac_low",
+            "ffmpeg_filter_args": ["-af", "aresample=48000"],
+            "ffmpeg_encoder_args": ["-afterburner", "1"],
+            "content_type": "audio/aac",
+            "format": "adts",
+            "gst_encoder": (
+                f"fdkaacenc bitrate={bitrate * 1000} afterburner=true "
+                "! audio/mpeg,mpegversion=4,stream-format=adts,profile=lc"
+            ),
+            "uses_bitrate": True,
+        }
+
     if token.startswith("he_aac"):
         bitrate = _profile_bitrate(token, bitrate_kbps, 128, 32, 320)
         return {
@@ -156,19 +198,20 @@ def resolve_stream_profile(
             "uses_bitrate": True,
         }
 
-    bitrate = _profile_bitrate(token, bitrate_kbps, 192, 32, 320)
+    bitrate = _profile_bitrate(token, bitrate_kbps, 192, 32, 512)
     return {
-        "profile": "he_aac_192",
+        "profile": f"aac_low_{bitrate}",
         "codec": "aac",
         "bitrate_kbps": bitrate if bitrate > 0 else 192,
         "ffmpeg_codec": "libfdk_aac",
-        "ffmpeg_profile": "aac_he",
+        "ffmpeg_profile": "aac_low",
+        "ffmpeg_filter_args": ["-af", "aresample=48000"],
         "ffmpeg_encoder_args": ["-afterburner", "1"],
         "content_type": "audio/aac",
         "format": "adts",
         "gst_encoder": (
             f"fdkaacenc bitrate={(bitrate if bitrate > 0 else 192) * 1000} afterburner=true "
-            "! audio/mpeg,mpegversion=4,stream-format=adts,profile=he-aac-v1"
+            "! audio/mpeg,mpegversion=4,stream-format=adts,profile=lc"
         ),
         "uses_bitrate": True,
     }

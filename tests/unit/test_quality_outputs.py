@@ -196,10 +196,10 @@ class QualityOutputsTests(unittest.TestCase):
 
     def test_profiles_are_exact_required_targets(self):
         self.assertEqual(set(QUALITY_PROFILES), {"low", "flac"})
-        self.assertEqual(QUALITY_PROFILES["low"]["stream_bitrate_kbps"], 96)
+        self.assertEqual(QUALITY_PROFILES["low"]["stream_bitrate_kbps"], 64)
         self.assertEqual(QUALITY_PROFILES["flac"]["stream_bitrate_kbps"], 0)
-        self.assertEqual(QUALITY_PROFILES["low"]["stream_codec_profile"], "he_aac_96")
-        self.assertEqual(QUALITY_PROFILES["low"]["codec"], "HE-AAC v1")
+        self.assertEqual(QUALITY_PROFILES["low"]["stream_codec_profile"], "aac_he_v2_64")
+        self.assertEqual(QUALITY_PROFILES["low"]["codec"], "HE-AAC v2")
         self.assertEqual(
             QUALITY_PROFILES["flac"]["stream_codec_profile"],
             "ogg_flac_lossless",
@@ -236,7 +236,7 @@ class QualityOutputsTests(unittest.TestCase):
         self.assertNotIn("/lofi", [item.get("icecast_mount") for item in updated])
         qualities = {item["quality"]: item for item in updated[1:]}
         self.assertFalse(qualities["low"]["enabled"])
-        self.assertEqual(qualities["low"]["stream_bitrate_kbps"], 96)
+        self.assertEqual(qualities["low"]["stream_bitrate_kbps"], 64)
         self.assertEqual(len(qualities), 1)
 
     def test_nonapproved_flac_variant_is_rejected(self):

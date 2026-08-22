@@ -23,7 +23,7 @@ class StationOutputUpdate(BaseModel):
     icecast_password: str = ""
     icecast_tls_enabled: bool = False
     output_gain_db: float = 0.0
-    stream_codec_profile: str = "he_aac_192"
+    stream_codec_profile: str = "aac_low_192"
     stream_bitrate_kbps: int = 192
     source_protocol: str = "icecast"
 
@@ -51,6 +51,8 @@ def _normalize_stream_profile(raw_profile: str, raw_bitrate: int) -> tuple[str, 
         "opus_192": ("opus_192", 192),
         "he_aac_96": ("he_aac_96", 96),
         "he_aac_192": ("he_aac_192", 192),
+        "aac_low_192": ("aac_low_192", 192),
+        "aac_he_v2_64": ("aac_he_v2_64", 64),
     }
     if token in aliases:
         return aliases[token]
@@ -60,7 +62,7 @@ def _normalize_stream_profile(raw_profile: str, raw_bitrate: int) -> tuple[str, 
         bitrate = 192
     if token.startswith("opus_"):
         return f"opus_{max(32, min(320, bitrate))}", max(32, min(320, bitrate))
-    return "he_aac_192", 192
+    return "aac_low_192", 192
 
 
 def _row_to_output_payload(station_id: int, row, station_settings: dict | None = None) -> dict:
@@ -82,7 +84,7 @@ def _row_to_output_payload(station_id: int, row, station_settings: dict | None =
                 in {"1", "true", "yes", "on"}
             ),
             "output_gain_db": 0.0,
-            "stream_codec_profile": "he_aac_192",
+            "stream_codec_profile": "aac_low_192",
             "stream_bitrate_kbps": 192,
             "source_protocol": "icecast",
         }
@@ -107,7 +109,7 @@ def _row_to_output_payload(station_id: int, row, station_settings: dict | None =
             in {"1", "true", "yes", "on"}
         ),
         "output_gain_db": float(row["output_gain_db"]),
-        "stream_codec_profile": str(row["stream_codec_profile"] or "he_aac_192"),
+        "stream_codec_profile": str(row["stream_codec_profile"] or "aac_low_192"),
         "stream_bitrate_kbps": int(row["stream_bitrate_kbps"] or 192),
         "source_protocol": str(row["source_protocol"] or "icecast"),
     }

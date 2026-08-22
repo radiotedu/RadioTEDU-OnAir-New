@@ -23,7 +23,7 @@ class StationOutputRepository:
         icecast_user: str,
         icecast_password: str,
         output_gain_db: float = 0.0,
-        stream_codec_profile: str = "he_aac_192",
+        stream_codec_profile: str = "aac_low_192",
         stream_bitrate_kbps: int = 192,
         source_protocol: str = "icecast",
     ) -> None:
@@ -66,7 +66,7 @@ class StationOutputRepository:
                 icecast_user,
                 stored_password,
                 output_gain_db,
-                str(stream_codec_profile or "he_aac_192"),
+                str(stream_codec_profile or "aac_low_192"),
                 int(stream_bitrate_kbps or 192),
                 normalized_protocol,
             ),

@@ -69,6 +69,12 @@ from app.repositories.log_repo import LogRepository
 from app.services.audit_chain import audit_chain
 from app.repositories.settings_repo import SettingsRepository
 from app.repositories.station_repo import StationRepository
+from app.product_edition import (
+    api_path_enabled,
+    get_product_name,
+    is_rtai_onair,
+    public_product_profile,
+)
 from app.ws.broadcaster import broadcaster, connection_manager
 from app.ws.router import router as ws_router
 from app.ws.guest_router import router as guest_ws_router
@@ -355,6 +361,7 @@ def _sanitize_request_id(raw: str) -> str:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    rtai_edition = is_rtai_onair()
     connection_manager.reset()
     live_mic_registry.reset()
     guest_audio_registry.reset()
@@ -370,18 +377,19 @@ async def lifespan(_app: FastAPI):
         name="dependency-bootstrap",
     ).start()
     init_db()
-    try:
-        from app.services.codec_migration import migrate_ogg_outputs_to_he_aac
-
-        migration_conn = get_connection()
+    if not rtai_edition:
         try:
-            migrate_ogg_outputs_to_he_aac(migration_conn, logger=logger)
-        finally:
-            migration_conn.close()
-    except Exception as exc:
-        # A codec migration must never prevent the control plane from starting;
-        # it will retry on the next startup.
-        logger.warning("Ogg-to-HE-AAC migration deferred: %s", exc)
+            from app.services.codec_migration import migrate_ogg_outputs_to_he_aac
+
+            migration_conn = get_connection()
+            try:
+                migrate_ogg_outputs_to_he_aac(migration_conn, logger=logger)
+            finally:
+                migration_conn.close()
+        except Exception as exc:
+            # A codec migration must never prevent the control plane from starting;
+            # it will retry on the next startup.
+            logger.warning("Ogg-to-HE-AAC migration deferred: %s", exc)
     from app.services.music_usage import music_usage_export_scheduler
 
     music_usage_export_scheduler.start()
@@ -395,7 +403,7 @@ async def lifespan(_app: FastAPI):
 
         shutdown_library_watcher = get_managed_library_watcher()
         shutdown_library_watcher.start()
-    if not _env_truthy("CLEANROOM_DISABLE_PRODUCT_CATALOG"):
+    if not rtai_edition and not _env_truthy("CLEANROOM_DISABLE_PRODUCT_CATALOG"):
         from app.services.product_media_catalog import get_product_media_catalog_service
 
         shutdown_product_catalog = get_product_media_catalog_service()
@@ -405,25 +413,26 @@ async def lifespan(_app: FastAPI):
         summary = reconcile_all_startup(conn)
         if any(int(v) > 0 for v in summary.values()):
             logger.info("Startup reconcile applied: %s", summary)
-        try:
-            from app.services.radiotedu_service_control import (
-                SETTINGS_KEY as RADIOTEDU_SERVICE_SETTINGS_KEY,
-                auto_start_enabled,
-                load_settings as load_radiotedu_service_settings,
-            )
-
-            system_settings = SettingsRepository(conn).get_system()
-            service_settings = load_radiotedu_service_settings(
-                system_settings.get(RADIOTEDU_SERVICE_SETTINGS_KEY, "")
-            )
-            started_services = auto_start_enabled(service_settings)
-            if started_services:
-                logger.info(
-                    "RadioTEDU managed services auto-started: %s",
-                    ", ".join(started_services),
+        if not rtai_edition:
+            try:
+                from app.services.radiotedu_service_control import (
+                    SETTINGS_KEY as RADIOTEDU_SERVICE_SETTINGS_KEY,
+                    auto_start_enabled,
+                    load_settings as load_radiotedu_service_settings,
                 )
-        except Exception as exc:
-            logger.warning("RadioTEDU managed service auto-start failed: %s", exc)
+
+                system_settings = SettingsRepository(conn).get_system()
+                service_settings = load_radiotedu_service_settings(
+                    system_settings.get(RADIOTEDU_SERVICE_SETTINGS_KEY, "")
+                )
+                started_services = auto_start_enabled(service_settings)
+                if started_services:
+                    logger.info(
+                        "RadioTEDU managed services auto-started: %s",
+                        ", ".join(started_services),
+                    )
+            except Exception as exc:
+                logger.warning("RadioTEDU managed service auto-start failed: %s", exc)
         from app.api.runtime import runtime_registry, worker_loop_manager
 
         shutdown_runtime_registry = runtime_registry
@@ -524,7 +533,12 @@ async def lifespan(_app: FastAPI):
             pass
 
 
-app = FastAPI(title="RadioTEDU OnAir API", version=PRODUCT_VERSION, lifespan=lifespan)
+app = FastAPI(title=f"{get_product_name()} API", version=PRODUCT_VERSION, lifespan=lifespan)
+
+
+@app.get("/api/product-profile")
+def product_profile():
+    return public_product_profile()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=get_cors_origins(),
@@ -743,6 +757,14 @@ async def auth_rate_limit_middleware(request: Request, call_next):
             if request_id:
                 response.headers["X-Request-ID"] = request_id
             return response
+    return await call_next(request)
+
+
+@app.middleware("http")
+async def product_edition_middleware(request: Request, call_next):
+    path = str(request.url.path or "")
+    if path.startswith("/api/") and not api_path_enabled(path):
+        return JSONResponse(status_code=404, content={"detail": "feature_not_in_edition"})
     return await call_next(request)
 
 

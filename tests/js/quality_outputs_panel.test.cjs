@@ -22,7 +22,7 @@ test('Streaming exposes the approved 14-local plus 2-external mount plan', () =>
 
 test('quality settings save and verify read-back without editable credentials', () => {
   assert.match(html, /inherits protected source credentials/);
-  assert.match(html, /Opus 192 Normal/);
+  assert.match(html, /AAC-LC 192 Normal/);
   assert.match(app, /qualityOutputsMatch\(expected, stored\)/);
   assert.match(app, /protected credentials were not copied/);
   assert.doesNotMatch(html, /data-quality-(?:password|host|user|mount)-input/);
@@ -33,8 +33,8 @@ test('quality variants expose enable and public settings while canonical codec t
   assert.match(app, /data-quality-public/);
   assert.match(app, /variant\.codec/);
   assert.match(app, /variant\.bitrate_kbps/);
-  assert.match(html, /suffix-free station mount is always the 192 kbps Opus normal stream/);
-  assert.match(html, /Opus 32 Low/);
+  assert.match(html, /suffix-free station mount uses AAC-LC at 192 kbps/);
+  assert.match(html, /HE-AAC v2 64 Low/);
   assert.match(html, /only Classical plus Cazz add lossless FLAC/);
 });
 
@@ -42,7 +42,7 @@ test('operators can apply and diagnose quality outputs without Codex or exposed 
   assert.match(app, /\/api\/streaming\/quality-outputs\/apply/);
   assert.match(app, /\/api\/streaming\/quality-outputs\/diagnostics/);
   assert.match(app, /Confirm quality apply/);
-  assert.match(app, /FFmpeg libopus at 32 and 192 kbps/);
+  assert.match(app, /FFmpeg libfdk_aac: AAC-LC 192 Normal and HE-AAC v2 64 Low/);
   assert.match(app, /observed_healthy_local_mounts/);
   assert.match(app, /verified by audio delivery/);
   assert.match(app, /Configuration is valid, but delivery is incomplete/);
