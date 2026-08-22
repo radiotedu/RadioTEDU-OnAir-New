@@ -406,11 +406,12 @@ class StationRuntime:
                     or cfg.stream_codec_profile
                 ),
                 stream_bitrate_kbps=int(bitrate),
-                # Quality outputs intentionally carry no public per-track
-                # title/artist metadata. The internal compliance event is
-                # recorded once by StationWorker from the program timeline.
-                stream_title="",
-                stream_artist="",
+                # Icecast exposes one now-playing string per mount.  Keep all
+                # quality branches aligned with the primary programme so
+                # listeners see the same artist/title/album metadata.
+                stream_title=str(cfg.stream_title),
+                stream_artist=str(cfg.stream_artist),
+                stream_album=str(getattr(cfg, "stream_album", "")),
                 icecast_stream_name=str(
                     value.get("icecast_stream_name")
                     or value.get("name")
@@ -710,6 +711,7 @@ class StationRuntime:
             float(cfg.output_gain_db),
             str(cfg.stream_title),
             str(cfg.stream_artist),
+            str(getattr(cfg, "stream_album", "")),
             _normalize_track_type(cfg.track_type),
             extra_outputs,
         )

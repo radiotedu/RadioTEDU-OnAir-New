@@ -40,10 +40,15 @@ def _append_track_metadata(cmd: list[str], cfg: StationPipelineConfig) -> None:
         return
     stream_title = _normalize_metadata_value(cfg.stream_title)
     stream_artist = _normalize_metadata_value(cfg.stream_artist)
+    stream_album = _normalize_metadata_value(
+        str(getattr(cfg, "stream_album", "") or "")
+    )
     if stream_title:
         cmd.extend(["-metadata", f"title={stream_title}"])
     if stream_artist:
         cmd.extend(["-metadata", f"artist={stream_artist}"])
+    if stream_album:
+        cmd.extend(["-metadata", f"album={stream_album}"])
 
 
 def _pcm_output_args() -> list[str]:

@@ -21,6 +21,10 @@ class StationPipelineConfig:
     icecast_enabled: bool = True
     stream_title: str = ""
     stream_artist: str = ""
+    # Icecast exposes one public now-playing string.  Keep album separate in
+    # the runtime config so it can be composed without changing the program
+    # title/artist fields used by the UI and playout state.
+    stream_album: str = ""
     track_type: str = "music"
     crossfade_seconds: float = 0.0
     station_name: str = ""

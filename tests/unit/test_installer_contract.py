@@ -424,7 +424,7 @@ def test_supervisor_registration_uses_only_radiotedu_artifacts_and_port():
     assert '"CLEANROOM_USER_CONFIG_ROOT=$DataRoot"' in helper
     assert '"CLEANROOM_JWT_SECRET_FILE=$(Join-Path $DataRoot \'secrets\\jwt-signing.key\')"' in helper
     assert '"CLEANROOM_TOOLS_DIR=$(Join-Path $backendRoot \'tools\')"' in helper
-    assert '"CLEANROOM_SKIP_ICECAST_METADATA=1"' in helper
+    assert '"CLEANROOM_SKIP_ICECAST_METADATA=0"' in helper
     assert "-PropertyType MultiString" in helper
     assert "-ProductMode" not in radio_installer
 

@@ -179,14 +179,27 @@ class QualityOutputsTests(unittest.TestCase):
                 self.assertNotIn("icecast_user", output)
                 self.assertNotIn("icecast_host", output)
                 self.assertEqual(output["credential_mode"], "inherit_legacy_output")
-                self.assertTrue(output["metadata_suppressed"])
+                self.assertFalse(output["metadata_suppressed"])
+                expected_name = {
+                    "classic": "RadioTEDU Classic",
+                    "lofi": "RadioTEDU Lo-Fi",
+                    "cazz": "RadioTEDU Jazz",
+                    "energize": "RadioTEDU Energize",
+                    "radio": "RadioTEDU",
+                    "rock": "RadioTEDU Rock",
+                }[channel.channel_id]
+                if output["quality"] == "flac":
+                    expected_name += " FLAC"
+                self.assertEqual(output["icecast_stream_name"], expected_name)
+                self.assertIn(expected_name, output["icecast_description"])
+                self.assertEqual(output["icecast_genre"], channel.label)
 
     def test_profiles_are_exact_required_targets(self):
         self.assertEqual(set(QUALITY_PROFILES), {"low", "flac"})
-        self.assertEqual(QUALITY_PROFILES["low"]["stream_bitrate_kbps"], 32)
+        self.assertEqual(QUALITY_PROFILES["low"]["stream_bitrate_kbps"], 96)
         self.assertEqual(QUALITY_PROFILES["flac"]["stream_bitrate_kbps"], 0)
-        self.assertEqual(QUALITY_PROFILES["low"]["stream_codec_profile"], "opus_32")
-        self.assertEqual(QUALITY_PROFILES["low"]["codec"], "Opus")
+        self.assertEqual(QUALITY_PROFILES["low"]["stream_codec_profile"], "he_aac_96")
+        self.assertEqual(QUALITY_PROFILES["low"]["codec"], "HE-AAC v1")
         self.assertEqual(
             QUALITY_PROFILES["flac"]["stream_codec_profile"],
             "ogg_flac_lossless",
@@ -223,7 +236,7 @@ class QualityOutputsTests(unittest.TestCase):
         self.assertNotIn("/lofi", [item.get("icecast_mount") for item in updated])
         qualities = {item["quality"]: item for item in updated[1:]}
         self.assertFalse(qualities["low"]["enabled"])
-        self.assertEqual(qualities["low"]["stream_bitrate_kbps"], 32)
+        self.assertEqual(qualities["low"]["stream_bitrate_kbps"], 96)
         self.assertEqual(len(qualities), 1)
 
     def test_nonapproved_flac_variant_is_rejected(self):

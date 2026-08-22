@@ -99,8 +99,12 @@ def _station_genre(station_name: str) -> str:
         return "Lo-Fi"
     if "jazz" in token or "cazz" in token:
         return "Jazz"
-    if "energize" in token:
+    if "pop" in token:
         return "Pop"
+    if "rock" in token:
+        return "Rock"
+    if "energize" in token:
+        return "Energetic"
     if "event" in token:
         return "Events"
     return "Radio"
@@ -111,6 +115,7 @@ def _station_stream_feature_settings(
     system_settings: dict,
     station_name: str,
 ) -> dict:
+    genre = _station_genre(station_name)
     website_url = str(
         station_settings.get(
             "icecast_homepage_url",
@@ -118,19 +123,30 @@ def _station_stream_feature_settings(
         )
         or "https://radiotedu.com"
     ).strip()
+    default_stream_name = {
+        "Classical": "RadioTEDU Classic",
+        "Lo-Fi": "RadioTEDU Lo-Fi",
+        "Jazz": "RadioTEDU Jazz",
+        "Pop": "RadioTEDU",
+        "Energetic": "RadioTEDU Energize",
+        "Rock": "RadioTEDU Rock",
+        "Events": "RadioTEDU Events",
+        "Radio": "RadioTEDU",
+    }.get(genre, f"RadioTEDU {genre}")
     return {
         "icecast_stream_name": str(
-            station_settings.get("icecast_stream_name", station_name) or station_name
+            station_settings.get("icecast_stream_name", default_stream_name)
+            or default_stream_name
         ).strip(),
         "icecast_description": str(
             station_settings.get(
                 "icecast_description",
-                f"{station_name} live stream from RadioTEDU",
+                f"{default_stream_name} live stream",
             )
             or ""
         ).strip(),
         "icecast_genre": str(
-            station_settings.get("icecast_genre", _station_genre(station_name)) or ""
+            station_settings.get("icecast_genre", genre) or genre
         ).strip(),
         "icecast_url": website_url,
         "icecast_public": _truthy(station_settings.get("icecast_public", "true"), True),
@@ -223,12 +239,20 @@ def _repair_mojibake_text(value: str) -> str:
     return raw
 
 
-def _compose_now_playing(title: str, artist: str) -> str:
+def _compose_now_playing(title: str, artist: str, album: str = "") -> str:
     clean_title = _repair_mojibake_text(str(title or "").strip())
     clean_artist = _repair_mojibake_text(str(artist or "").strip())
+    clean_album = _repair_mojibake_text(str(album or "").strip())
     if clean_title and clean_artist:
-        return f"{clean_artist} - {clean_title}"
-    return clean_title or clean_artist
+        song = f"{clean_artist} - {clean_title}"
+    else:
+        song = clean_title or clean_artist
+    if clean_album and clean_album.casefold() not in {
+        clean_title.casefold(),
+        clean_artist.casefold(),
+    }:
+        song = f"{song} ({clean_album})" if song else clean_album
+    return song
 
 
 def _metadata_base_url(
@@ -252,7 +276,11 @@ def _send_icecast_metadata(
         return False
     if not bool(cfg.icecast_enabled):
         return False
-    song = _compose_now_playing(cfg.stream_title, cfg.stream_artist)
+    song = _compose_now_playing(
+        cfg.stream_title,
+        cfg.stream_artist,
+        getattr(cfg, "stream_album", ""),
+    )
     if not song:
         return False
 
@@ -528,7 +556,11 @@ class StationRuntimeRegistry:
     ) -> bool:
         """Push now-playing and record it as delivered on success."""
         sid = int(station_id)
-        song = _compose_now_playing(cfg.stream_title, cfg.stream_artist)
+        song = _compose_now_playing(
+            cfg.stream_title,
+            cfg.stream_artist,
+            getattr(cfg, "stream_album", ""),
+        )
         if not song:
             return False
         if generation is not None and not self._metadata_generation_current(
@@ -696,7 +728,9 @@ class StationRuntimeRegistry:
                     if callable(is_running) and not is_running():
                         return
                 song = _compose_now_playing(
-                    cfg.stream_title, cfg.stream_artist
+                    cfg.stream_title,
+                    cfg.stream_artist,
+                    getattr(cfg, "stream_album", ""),
                 )
                 if not song:
                     return
@@ -731,7 +765,11 @@ class StationRuntimeRegistry:
                     is_running = getattr(runtime, "is_running", None)
                     if callable(is_running) and not is_running():
                         continue
-                    song = _compose_now_playing(cfg.stream_title, cfg.stream_artist)
+                    song = _compose_now_playing(
+                        cfg.stream_title,
+                        cfg.stream_artist,
+                        getattr(cfg, "stream_album", ""),
+                    )
                     if not song:
                         continue
                     with self._metadata_sent_lock:
@@ -775,7 +813,11 @@ class StationRuntimeRegistry:
     ) -> None:
         if not bool(cfg.icecast_enabled):
             return
-        if not _compose_now_playing(cfg.stream_title, cfg.stream_artist):
+        if not _compose_now_playing(
+            cfg.stream_title,
+            cfg.stream_artist,
+            getattr(cfg, "stream_album", ""),
+        ):
             return
         self._wake_metadata_worker(station_id)
 
@@ -1111,6 +1153,7 @@ class StationRuntimeRegistry:
         input_uri: str,
         stream_title: str = "",
         stream_artist: str = "",
+        stream_album: str = "",
         track_type: str = "music",
         crossfade_seconds: float | None = None,
         start_offset_seconds: float = 0.0,
@@ -1121,6 +1164,7 @@ class StationRuntimeRegistry:
                 input_uri=input_uri,
                 stream_title=stream_title,
                 stream_artist=stream_artist,
+                stream_album=stream_album,
                 track_type=track_type,
                 crossfade_seconds=crossfade_seconds,
                 start_offset_seconds=start_offset_seconds,
@@ -1132,6 +1176,7 @@ class StationRuntimeRegistry:
         input_uri: str,
         stream_title: str = "",
         stream_artist: str = "",
+        stream_album: str = "",
         track_type: str = "music",
         crossfade_seconds: float | None = None,
         start_offset_seconds: float = 0.0,
@@ -1196,6 +1241,7 @@ class StationRuntimeRegistry:
             icecast_enabled=bool(row["icecast_enabled"]),
             stream_title=str(stream_title or ""),
             stream_artist=str(stream_artist or ""),
+            stream_album=str(stream_album or ""),
             track_type=str(track_type or "music"),
             crossfade_seconds=resolved_crossfade_seconds,
             station_name=station_name,

@@ -26,7 +26,7 @@ def test_durable_launcher_preserves_migrated_state_secrets_tools_and_isolation()
     assert 'Join-Path $dataRoot "cleanroom.db"' in launcher
     assert 'Join-Path $userRoot "secrets\\jwt-signing.key"' in launcher
     assert '$env:CLEANROOM_TOOLS_DIR = $toolsRoot' in launcher
-    assert '$env:CLEANROOM_SKIP_ICECAST_METADATA = "1"' in launcher
+    assert '$env:CLEANROOM_SKIP_ICECAST_METADATA = "0"' in launcher
     assert '$env:RADIOTEDU_PROCESS_ISOLATED_WORKERS = "1"' in launcher
 
 

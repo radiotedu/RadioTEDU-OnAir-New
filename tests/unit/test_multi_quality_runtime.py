@@ -72,6 +72,7 @@ def _cfg(**changes) -> StationPipelineConfig:
         stream_bitrate_kbps=192,
         stream_title="Private track title",
         stream_artist="Private track artist",
+        stream_album="Private album",
         extra_icecast_outputs=(
             {
                 "enabled": True,
@@ -147,8 +148,9 @@ class MultiQualityRuntimeTests(unittest.TestCase):
         self.assertTrue(
             all(item.icecast_password == cfg.icecast_password for item in quality_cfgs)
         )
-        self.assertTrue(all(item.stream_title == "" for item in quality_cfgs))
-        self.assertTrue(all(item.stream_artist == "" for item in quality_cfgs))
+        self.assertTrue(all(item.stream_title == cfg.stream_title for item in quality_cfgs))
+        self.assertTrue(all(item.stream_artist == cfg.stream_artist for item in quality_cfgs))
+        self.assertTrue(all(item.stream_album == cfg.stream_album for item in quality_cfgs))
         self.assertEqual(cfg.stream_title, "Private track title")
         self.assertTrue(self.runtime.branch_health()["icecast:/classic-low"])
         self.assertTrue(self.runtime.branch_health()["icecast:/classic-flac"])

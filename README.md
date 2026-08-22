@@ -34,6 +34,25 @@ The unsuffixed mount is always the normal stream. Low-bandwidth streams use `-lo
 
 This PC owns 14 local music sources: six normal, six low, and two FLAC. The externally operated `/en` and `/fr` AI sources bring the complete RadioTEDU plan to 16 mounts. Retired `-normal`, `-high`, and non-approved FLAC branches are removed during commissioning.
 
+### Icecast metadata naming
+
+The source handshake sends Icecast `Ice-Name`, `Ice-Description`, `Ice-Genre`, `Ice-URL`, and `Ice-Public` for every local mount. Low-quality mounts intentionally reuse the normal station name; the word “Low” is not exposed in the public stream title. FLAC names are explicit:
+
+| Mount(s) | Icecast name | Description | Genre |
+|---|---|---|---|
+| `/radio`, `/radio-low` | `RadioTEDU` | `RadioTEDU live stream` | Pop |
+| `/lofi`, `/lofi-low` | `RadioTEDU Lo-Fi` | `RadioTEDU Lo-Fi live stream` | Lo-Fi |
+| `/classic`, `/classic-low` | `RadioTEDU Classic` | `RadioTEDU Classic live stream` | Classical |
+| `/classic-flac` | `RadioTEDU Classic FLAC` | `RadioTEDU Classic FLAC live stream` | Classical |
+| `/cazz`, `/cazz-low` | `RadioTEDU Jazz` | `RadioTEDU Jazz live stream` | Jazz |
+| `/cazz-flac` | `RadioTEDU Jazz FLAC` | `RadioTEDU Jazz FLAC live stream` | Jazz |
+| `/rock`, `/rock-low` | `RadioTEDU Rock` | `RadioTEDU Rock live stream` | Rock |
+| `/energize`, `/energize-low` | `RadioTEDU Energize` | `RadioTEDU Energize live stream` | Energetic |
+
+During playback the app updates Icecast’s supported single `song` field on each output as `Artist - Title (Album)` (empty fields are omitted). Icecast does not provide separate standard artist and album metadata fields through `/admin/metadata`, so this combined value is the portable representation used by listener clients.
+
+The Windows service runs with `CLEANROOM_SKIP_ICECAST_METADATA=0` so these updates are active. AI startup remains independently disabled with `CLEANROOM_SKIP_STARTUP_AI=1`; enabling metadata does not enable AI, voting, or any auxiliary service.
+
 ### HLS readiness
 
 HLS is implemented in **Settings → HLS** but remains operator-controlled and stored **Off** until the Nginx server is prepared. When started, each normal mount is read from Icecast and published as HE-AAC v1 HLS: Low 96 kbps and High 192 kbps, 48 kHz stereo, six-second segments. HLS start does not stop Icecast. The app never falls back from HE-AAC to Opus.

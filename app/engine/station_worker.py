@@ -126,20 +126,36 @@ class StationWorker:
         except (TypeError, ValueError):
             return 0.0
 
-    def _track_runtime_fields(self, track_id: int) -> tuple[str, str, str, str]:
+    def _start_runtime_station(self, *args, stream_album: str = "", **kwargs):
+        """Start playback while remaining compatible with older test runtimes.
+
+        ``stream_album`` is optional at the runtime boundary so existing
+        lightweight fakes (which predate album metadata) continue to work.
+        Production runtimes receive it whenever a track actually has an album.
+        """
+        if str(stream_album or "").strip():
+            kwargs["stream_album"] = str(stream_album).strip()
+        return self.runtime_registry.start_station(*args, **kwargs)
+
+    def _track_runtime_fields(self, track_id: int) -> tuple[str, str, str, str, str]:
         cur = self.conn.cursor()
         cur.execute(
             "SELECT file_path, COALESCE(title, '') AS title, COALESCE(artist, '') AS artist, "
+            "COALESCE(album, '') AS album, "
             "COALESCE(track_type, 'music') AS track_type "
             "FROM tracks WHERE id=?",
             (track_id,),
         )
         row = cur.fetchone()
         if not row:
-            return "", "", "", "music"
+            return "", "", "", "", "music"
         file_path = resolve_runtime_media_path(str(row["file_path"] or ""))
         title = str(row["title"] or "").strip()
         artist = str(row["artist"] or "").strip()
+        try:
+            album = str(row["album"] or "").strip()
+        except (IndexError, KeyError):
+            album = ""
         track_type = str(row["track_type"] or "music").strip().lower() or "music"
         if not title and not artist:
             title = self._fallback_title_from_uri(file_path)
@@ -147,6 +163,7 @@ class StationWorker:
             file_path,
             title,
             artist,
+            album,
             track_type,
         )
 
@@ -621,7 +638,7 @@ class StationWorker:
     ) -> dict:
         mark_playing(item_id)
         self._set_playout_state(source, item_id, reason=f"{source}_start")
-        track_uri, stream_title, stream_artist, track_type = self._track_runtime_fields(track_id)
+        track_uri, stream_title, stream_artist, stream_album, track_type = self._track_runtime_fields(track_id)
         if not track_uri:
             mark_failed(item_id)
             self._set_playout_state(
@@ -632,9 +649,10 @@ class StationWorker:
         # ── AI Host: Play announcement before track ──
         try:
             if self.runtime_registry:
-                self.runtime_registry.start_station(
+                self._start_runtime_station(
                     self.station_id, track_uri,
                     stream_title=stream_title, stream_artist=stream_artist,
+                    stream_album=stream_album,
                     track_type=track_type,
                     crossfade_seconds=self._default_crossfade_seconds(),
                 )
@@ -660,7 +678,7 @@ class StationWorker:
     def _play_host_track(self, host_item_id: int, track_id: int) -> dict:
         self._finish_playing_queue_item()  # preempt current automation track
         self._set_playout_state("host", host_item_id, reason="host_start")
-        track_uri, stream_title, stream_artist, track_type = self._track_runtime_fields(
+        track_uri, stream_title, stream_artist, stream_album, track_type = self._track_runtime_fields(
             track_id
         )
         if not track_uri:
@@ -668,11 +686,12 @@ class StationWorker:
             self._set_playout_state("none", None, reason="host_track_missing")
             return {"source": "host", "reason": "track_missing"}
         if self.runtime_registry:
-            self.runtime_registry.start_station(
+            self._start_runtime_station(
                 self.station_id,
                 track_uri,
                 stream_title=stream_title,
                 stream_artist=stream_artist,
+                stream_album=stream_album,
                 track_type=track_type,
                 crossfade_seconds=self._default_crossfade_seconds(),
             )
@@ -900,7 +919,7 @@ class StationWorker:
             return True
         item_id = int(self._row_value(playing, "id", 0) or 0)
         track_id = int(self._row_value(playing, "track_id", 0) or 0)
-        track_uri, title, artist, track_type = self._track_runtime_fields(track_id)
+        track_uri, title, artist, album, track_type = self._track_runtime_fields(track_id)
         status = self.runtime_registry.status(self.station_id)
         if track_uri and self._runtime_playback_matches(status, track_uri):
             return False
@@ -924,11 +943,12 @@ class StationWorker:
             )
             return True
         try:
-            self.runtime_registry.start_station(
+            self._start_runtime_station(
                 self.station_id,
                 track_uri,
                 stream_title=title,
                 stream_artist=artist,
+                stream_album=album,
                 track_type=track_type,
                 crossfade_seconds=0.0,
             )
@@ -1080,7 +1100,7 @@ class StationWorker:
             return False
         item_id = int(playing["id"])
         track_id = int(playing["track_id"] or 0)
-        track_uri, title, artist, track_type = self._track_runtime_fields(track_id)
+        track_uri, title, artist, album, track_type = self._track_runtime_fields(track_id)
         if not track_uri:
             self.queue_repo.mark_failed(item_id)
             self._set_playout_state("none", None, reason="manual_track_missing")
@@ -1109,11 +1129,12 @@ class StationWorker:
             )
             return True
         try:
-            self.runtime_registry.start_station(
+            self._start_runtime_station(
                 self.station_id,
                 track_uri,
                 stream_title=title,
                 stream_artist=artist,
+                stream_album=album,
                 track_type=track_type,
                 crossfade_seconds=0.0,
                 start_offset_seconds=max(0.0, float(start_offset_seconds or 0.0)),
@@ -1202,7 +1223,7 @@ class StationWorker:
         # restarted/failed.
         if self.runtime_registry and elapsed < advance_at:
             rt_status = self.runtime_registry.status(self.station_id)
-            track_uri, _title, _artist, _track_type = self._track_runtime_fields(
+            track_uri, _title, _artist, _album, _track_type = self._track_runtime_fields(
                 int(playing["track_id"] or 0)
             )
             if (
@@ -1273,7 +1294,7 @@ class StationWorker:
                     # next item, so the runtime stays alive; if it is playing a
                     # different source the current item has run its course and
                     # must be completed rather than hanging in "playing" forever.
-                    current_track_uri, _, _, _ = self._track_runtime_fields(
+                    current_track_uri, _, _, _, _ = self._track_runtime_fields(
                         int(playing["track_id"] or 0)
                     )
                     if current_track_uri and self._runtime_playback_matches(

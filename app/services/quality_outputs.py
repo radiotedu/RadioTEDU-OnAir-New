@@ -84,9 +84,20 @@ def default_quality_outputs(
     *,
     enabled: bool = False,
 ) -> list[dict]:
+    base_stream_name = {
+        "classic": "RadioTEDU Classic",
+        "lofi": "RadioTEDU Lo-Fi",
+        "cazz": "RadioTEDU Jazz",
+        "energize": "RadioTEDU Energize",
+        "radio": "RadioTEDU",
+        "rock": "RadioTEDU Rock",
+    }.get(channel.channel_id, f"RadioTEDU {channel.label}")
     outputs = []
     for suffix in quality_suffixes_for_channel(channel):
         profile = QUALITY_PROFILES[suffix]
+        stream_name = (
+            f"{base_stream_name} FLAC" if suffix == "flac" else base_stream_name
+        )
         outputs.append(
             {
                 "enabled": bool(enabled),
@@ -95,8 +106,11 @@ def default_quality_outputs(
                 "icecast_mount": quality_mount(channel.base_mount, suffix),
                 "stream_codec_profile": profile["stream_codec_profile"],
                 "stream_bitrate_kbps": profile["stream_bitrate_kbps"],
+                "icecast_stream_name": stream_name,
+                "icecast_description": f"{stream_name} live stream",
+                "icecast_genre": channel.label,
                 "icecast_public": True,
-                "metadata_suppressed": True,
+                "metadata_suppressed": False,
                 # Host, port, source username, and source password deliberately
                 # are not persisted here. The runtime inherits the protected
                 # legacy station output credentials in memory.

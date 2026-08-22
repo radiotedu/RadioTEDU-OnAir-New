@@ -172,7 +172,7 @@ public sealed class ServiceHostTests
         Assert.Contains("CLEANROOM_USER_CONFIG_ROOT=$DataRoot", serviceInstaller, StringComparison.Ordinal);
         Assert.Contains("CLEANROOM_JWT_SECRET_FILE=$(Join-Path $DataRoot 'secrets\\jwt-signing.key')", serviceInstaller, StringComparison.Ordinal);
         Assert.Contains("CLEANROOM_TOOLS_DIR=$(Join-Path $backendRoot 'tools')", serviceInstaller, StringComparison.Ordinal);
-        Assert.Contains("CLEANROOM_SKIP_ICECAST_METADATA=1", serviceInstaller, StringComparison.Ordinal);
+        Assert.Contains("CLEANROOM_SKIP_ICECAST_METADATA=0", serviceInstaller, StringComparison.Ordinal);
         Assert.Contains("-PropertyType MultiString", serviceInstaller, StringComparison.Ordinal);
 
         Assert.Contains("Source: \"HardenServiceHostAcl.ps1\"", installer, StringComparison.Ordinal);
