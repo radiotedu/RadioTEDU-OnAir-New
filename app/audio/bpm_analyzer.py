@@ -15,6 +15,12 @@ MIN_BPM = 45.0
 MAX_BPM = 210.0
 
 
+def _analysis_creation_flags() -> int:
+    # Decoder work is maintenance. Live playout and encoder FFmpeg processes
+    # run Above Normal and must always win CPU scheduling on Windows.
+    return 0x00004000 if sys.platform == "win32" else 0
+
+
 def _decode_mono_pcm(file_path: str, max_seconds: int = 90) -> array.array:
     ffmpeg = resolve_binary("ffmpeg.exe") or resolve_binary("ffmpeg")
     if not ffmpeg:
@@ -43,6 +49,7 @@ def _decode_mono_pcm(file_path: str, max_seconds: int = 90) -> array.array:
         capture_output=True,
         timeout=max(45, int(max_seconds) + 30),
         check=False,
+        creationflags=_analysis_creation_flags(),
     )
     if result.returncode != 0 or len(result.stdout) < SAMPLE_RATE * 5:
         detail = result.stderr.decode("utf-8", errors="replace").strip()

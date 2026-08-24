@@ -371,6 +371,7 @@ async def lifespan(_app: FastAPI):
     shutdown_library_watcher = None
     shutdown_product_catalog = None
     shutdown_music_usage_export = None
+    shutdown_bpm_maintenance = None
     threading.Thread(
         target=_run_dependency_bootstrap_background,
         daemon=True,
@@ -410,6 +411,11 @@ async def lifespan(_app: FastAPI):
         shutdown_product_catalog.start()
     conn = get_connection()
     try:
+        from app.services.dayparting import ensure_default_dayparts_persisted
+
+        daypart_summary = ensure_default_dayparts_persisted(conn)
+        if int(daypart_summary.get("inserted_rules", 0)) > 0:
+            logger.info("Default weekly dayparts persisted: %s", daypart_summary)
         summary = reconcile_all_startup(conn)
         if any(int(v) > 0 for v in summary.values()):
             logger.info("Startup reconcile applied: %s", summary)
@@ -484,6 +490,11 @@ async def lifespan(_app: FastAPI):
                 daemon=True,
                 name="station-worker-autostart",
             ).start()
+        if not _env_truthy("CLEANROOM_DISABLE_BPM_MAINTENANCE"):
+            from app.services.bpm_maintenance import bpm_maintenance_service
+
+            bpm_maintenance_service.start()
+            shutdown_bpm_maintenance = bpm_maintenance_service
     finally:
         try:
             conn.close()
@@ -509,6 +520,8 @@ async def lifespan(_app: FastAPI):
             shutdown_product_catalog.stop()
         if shutdown_music_usage_export is not None:
             shutdown_music_usage_export.stop()
+        if shutdown_bpm_maintenance is not None:
+            shutdown_bpm_maintenance.stop()
         try:
             worker_stop = (
                 shutdown_worker_loop_manager.stop_all()

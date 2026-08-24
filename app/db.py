@@ -11,7 +11,7 @@ from pathlib import Path
 from app.config import get_data_root, get_db_path
 from app.auth.permissions import GLOBAL_PERMISSION_KEYS, SHOW_PERMISSION_KEYS
 
-_SCHEMA_VERSION = 22
+_SCHEMA_VERSION = 23
 _INIT_LOCK = threading.Lock()
 _HEALTH_LOCK = threading.Lock()
 _HEALTH_CACHE: dict[str, object] = {"checked_at": 0.0, "path": "", "value": {}}
@@ -1383,6 +1383,21 @@ def _bootstrap_schema(cur) -> None:
         ")"
     )
     _migrate_tracks(cur)
+    cur.execute(
+        "CREATE TABLE IF NOT EXISTS bpm_analysis_state ("
+        "track_id INTEGER PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE, "
+        "file_mtime_ns INTEGER NOT NULL DEFAULT -1, "
+        "status TEXT NOT NULL DEFAULT 'pending', "
+        "confidence REAL NOT NULL DEFAULT 0, "
+        "attempts INTEGER NOT NULL DEFAULT 0, "
+        "last_error TEXT NOT NULL DEFAULT '', "
+        "updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"
+        ")"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_bpm_analysis_state_status_updated "
+        "ON bpm_analysis_state(status, updated_at)"
+    )
     # Rights and repertoire metadata is kept separately so importing or
     # normalising a media file never destroys the operator's licensing record.
     cur.execute(

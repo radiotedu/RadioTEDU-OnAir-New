@@ -194,6 +194,71 @@ def default_rules_for_station(station_name: str) -> list[DaypartRule]:
     ]
 
 
+def ensure_default_dayparts_persisted(conn) -> dict[str, int]:
+    """Persist missing RadioTEDU clocks without overwriting operator edits.
+
+    Runtime defaults keep legacy databases on air, but storing the rules makes
+    the weekly clock explicit, inspectable, and durable across deployments.
+    Existing rules and explicit enable/disable choices always win.
+    """
+
+    inserted_rules = 0
+    initialized_stations = 0
+    station_rows = conn.execute("SELECT id, name FROM stations ORDER BY id").fetchall()
+    for station in station_rows:
+        station_id = int(station["id"])
+        defaults = default_rules_for_station(str(station["name"] or ""))
+        if not defaults:
+            continue
+        existing = {
+            (int(row["day_of_week"]), int(row["position"]))
+            for row in conn.execute(
+                "SELECT day_of_week, position FROM daypart_rules WHERE station_id=?",
+                (station_id,),
+            ).fetchall()
+        }
+        station_inserted = 0
+        for rule in defaults:
+            key = (int(rule.day_of_week), int(rule.position))
+            if key in existing:
+                continue
+            conn.execute(
+                "INSERT INTO daypart_rules "
+                "(station_id, day_of_week, position, name, start_minute, end_minute, "
+                "min_bpm, max_bpm, enabled) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)",
+                (
+                    station_id,
+                    int(rule.day_of_week),
+                    int(rule.position),
+                    str(rule.name),
+                    int(rule.start_minute),
+                    int(rule.end_minute),
+                    float(rule.min_bpm),
+                    float(rule.max_bpm),
+                ),
+            )
+            existing.add(key)
+            station_inserted += 1
+        conn.execute(
+            "INSERT INTO station_settings(station_id, key, value, updated_at) "
+            "VALUES (?, ?, 'true', CURRENT_TIMESTAMP) ON CONFLICT(station_id, key) DO NOTHING",
+            (station_id, DAYPART_SETTING_KEY),
+        )
+        conn.execute(
+            "INSERT INTO station_settings(station_id, key, value, updated_at) "
+            "VALUES (?, ?, ?, CURRENT_TIMESTAMP) ON CONFLICT(station_id, key) DO NOTHING",
+            (station_id, DAYPART_TIMEZONE_KEY, DEFAULT_TIMEZONE),
+        )
+        if station_inserted:
+            initialized_stations += 1
+            inserted_rules += station_inserted
+    conn.commit()
+    return {
+        "initialized_stations": initialized_stations,
+        "inserted_rules": inserted_rules,
+    }
+
+
 def _truthy(value: object, default: bool = False) -> bool:
     token = str(value if value is not None else "").strip().lower()
     if token in {"1", "true", "yes", "on"}:

@@ -12,8 +12,11 @@ from app.services.dayparting import (
     DaypartRule,
     active_daypart,
     default_rules_for_station,
+    ensure_default_dayparts_persisted,
     station_profile,
 )
+from app.services import bpm_maintenance as bpm_maintenance_module
+from app.services.bpm_maintenance import BpmMaintenanceService
 
 
 def _add_station(conn, name: str) -> int:
@@ -86,6 +89,71 @@ def test_daily_schema_migration_preserves_existing_rules_as_monday():
     row = conn.execute("SELECT day_of_week, name FROM daypart_rules WHERE id=1").fetchone()
     assert row == (0, "Operator Monday")
     conn.close()
+
+
+def test_default_week_is_persisted_without_overwriting_operator_rules():
+    init_db()
+    conn = get_connection()
+    station_id = _add_station(conn, "RadioTEDU Classic")
+    summary = ensure_default_dayparts_persisted(conn)
+    assert summary == {"initialized_stations": 1, "inserted_rules": 49}
+    assert conn.execute(
+        "SELECT COUNT(*) FROM daypart_rules WHERE station_id=?", (station_id,)
+    ).fetchone()[0] == 49
+    settings = dict(
+        conn.execute(
+            "SELECT key, value FROM station_settings WHERE station_id=?",
+            (station_id,),
+        ).fetchall()
+    )
+    assert settings["dayparting_enabled"] == "true"
+    conn.execute(
+        "UPDATE daypart_rules SET name='Operator Prime' "
+        "WHERE station_id=? AND day_of_week=0 AND position=4",
+        (station_id,),
+    )
+    conn.commit()
+    assert ensure_default_dayparts_persisted(conn)["inserted_rules"] == 0
+    assert conn.execute(
+        "SELECT name FROM daypart_rules "
+        "WHERE station_id=? AND day_of_week=0 AND position=4",
+        (station_id,),
+    ).fetchone()[0] == "Operator Prime"
+    conn.close()
+
+
+def test_bpm_maintenance_persists_analysis_and_skips_completed_track(monkeypatch):
+    init_db()
+    conn = get_connection()
+    station_id = _add_station(conn, "RadioTEDU Jazz")
+    cursor = conn.execute(
+        "INSERT INTO tracks (station_id, title, file_path, track_type, bpm) "
+        "VALUES (?, 'Tempo Test', 'C:/music/tempo.mp3', 'music', 0)",
+        (station_id,),
+    )
+    track_id = int(cursor.lastrowid)
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(
+        bpm_maintenance_module,
+        "analyze_bpm",
+        lambda _path, max_seconds=60: (132.4, 0.91),
+    )
+    service = BpmMaintenanceService(startup_delay_seconds=0, interval_seconds=1)
+    result = service.run_once()
+    assert result["status"] == "ok"
+    assert result["track_id"] == track_id
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT t.bpm, b.status, b.confidence FROM tracks t "
+        "JOIN bpm_analysis_state b ON b.track_id=t.id WHERE t.id=?",
+        (track_id,),
+    ).fetchone()
+    assert row["bpm"] == 132.4
+    assert row["status"] == "ok"
+    assert row["confidence"] == 0.91
+    conn.close()
+    assert service.run_once() == {"status": "idle", "reason": "complete"}
 
 
 def test_worker_prefers_current_bpm_band_then_unknown_fallback(monkeypatch):
