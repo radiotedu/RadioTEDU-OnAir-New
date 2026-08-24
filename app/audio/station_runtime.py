@@ -33,6 +33,7 @@ from app.runtime_paths import resolve_binary
 _log = logging.getLogger("cleanroom.runtime")
 _LIVE_MIX_CHUNK_BYTES = 4096
 _LIVE_MIX_RETURN_GRACE_SECONDS = 0.75
+_CROSSFADE_PREWARM_SECONDS = 0.08
 _PCM_BYTES_PER_SECOND = 48000 * 2 * 2
 _SILENCE_FLOOR_CHUNK_BYTES = 4096
 # Windows pipe reads commonly arrive as 1 KiB fragments even though 4 KiB was
@@ -1773,12 +1774,14 @@ class StationRuntime:
         current_local_process = self._local_process
         new_process = None
         new_local_process = None
+        handoff_started = False
         try:
-            self._terminate_process(current_local_process)
-            self._local_process = None
-            self._terminate_process(current_process)
-            self._process = None
             if icecast_enabled or extra_enabled:
+                # Start and briefly validate the two-input decoder while the
+                # current producer is still feeding the reserve. Previously we
+                # killed the live decoder first, so a slow/corrupt next file or
+                # an FFmpeg startup error produced an audible hard cut before
+                # the fallback path could recover.
                 new_process = self._spawn_crossfade_pcm_producer(
                     self._active_cfg,
                     cfg,
@@ -1786,7 +1789,22 @@ class StationRuntime:
                     subprocess.PIPE,
                     buffered=False,
                 )
-            elif local_enabled:
+                deadline = time.monotonic() + _CROSSFADE_PREWARM_SECONDS
+                while time.monotonic() < deadline:
+                    if new_process.poll() is not None:
+                        raise RuntimeError("crossfade decoder failed during prewarm")
+                    time.sleep(0.01)
+                if new_process.poll() is not None:
+                    raise RuntimeError("crossfade decoder failed during prewarm")
+
+            handoff_started = True
+            self._terminate_process(current_local_process)
+            self._local_process = None
+            self._terminate_process(current_process)
+            self._process = None
+            if not (icecast_enabled or extra_enabled):
+                if not local_enabled:
+                    raise RuntimeError("no transition output target available")
                 sink_stdin = self._local_sink.stdin if self._local_sink else None
                 new_process = self._spawn_crossfade_pcm_producer(
                     self._active_cfg,
@@ -1795,8 +1813,6 @@ class StationRuntime:
                     sink_stdin,
                     buffered=True,
                 )
-            else:
-                raise RuntimeError("no transition output target available")
             if (icecast_enabled or extra_enabled) and local_enabled:
                 sink_stdin = self._local_sink.stdin if self._local_sink else None
                 new_local_process = self._spawn_crossfade_pcm_producer(
@@ -1834,6 +1850,12 @@ class StationRuntime:
         except Exception:
             self._terminate_process(new_process)
             self._terminate_process(new_local_process)
+            if not handoff_started:
+                # Keep ownership of the still-running current producer so the
+                # caller's restart fallback can retire it cleanly.
+                self._process = current_process
+                self._local_process = current_local_process
+                raise
             self._process = None
             self._local_process = None
             self._backend = "none"

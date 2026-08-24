@@ -27,15 +27,16 @@ class StationProfile:
     genre: str
     music_folder: Path
     jingle_folder: Path
+    processing_profile: str
 
 
 PROFILES = (
-    StationProfile(1, "Classical", "Classical", LIBRARY_ROOT / "Classical", JINGLE_ROOT / "Classical"),
-    StationProfile(2, "Lo-Fi", "Lo-Fi", LIBRARY_ROOT / "lofi", JINGLE_ROOT / "Lofi"),
-    StationProfile(4, "Pop / Radio", "Pop", LIBRARY_ROOT / "Pop", JINGLE_ROOT / "Pop"),
-    StationProfile(5, "Jazz", "Jazz", LIBRARY_ROOT / "Jazz", JINGLE_ROOT / "Jazz"),
-    StationProfile(8, "Rock", "Rock", LIBRARY_ROOT / "Rock", JINGLE_ROOT / "Rock"),
-    StationProfile(9, "Energize", "Electronic", LIBRARY_ROOT / "Energize", JINGLE_ROOT / "Energize"),
+    StationProfile(1, "Classical", "Classical", LIBRARY_ROOT / "Classical", JINGLE_ROOT / "Classical", "classical"),
+    StationProfile(2, "Lo-Fi", "Lo-Fi", LIBRARY_ROOT / "lofi", JINGLE_ROOT / "Lofi", "lofi"),
+    StationProfile(4, "Pop / Radio", "Pop", LIBRARY_ROOT / "Pop", JINGLE_ROOT / "Pop", "pop"),
+    StationProfile(5, "Jazz", "Jazz", LIBRARY_ROOT / "Jazz", JINGLE_ROOT / "Jazz", "jazz"),
+    StationProfile(8, "Rock", "Rock", LIBRARY_ROOT / "Rock", JINGLE_ROOT / "Rock", "rock"),
+    StationProfile(9, "Energize", "Electronic", LIBRARY_ROOT / "Energize", JINGLE_ROOT / "Energize", "energize"),
 )
 
 
@@ -97,6 +98,7 @@ def _set_profile_settings(conn, profile: StationProfile) -> None:
         "sweeper_interval": "3",
         "sweeper_interval_unit": "tracks",
         "sweeper_mode": "ordered",
+        "broadcast_processing_profile": profile.processing_profile,
         # These six local music stations are deliberately non-AI. Keeping the
         # values explicit prevents an old UI profile from re-enabling intro
         # generation and consuming CPU needed by the source encoders.

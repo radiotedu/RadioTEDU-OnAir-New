@@ -1487,13 +1487,17 @@ class StationWorker:
     def _count_music_since_last_jingle(self) -> int:
         """Count how many music tracks have been played since the last jingle."""
         cur = self.conn.cursor()
-        # Get recent done+playing items, newest first
+        # Playback chronology, not enqueue chronology, is authoritative. A
+        # just-in-time jingle receives a high queue id and is then followed by
+        # older prefilled rows; ordering by id therefore froze the counter at
+        # zero and stretched a three-song cadence to a whole refill batch.
         cur.execute(
             "SELECT q.id, COALESCE(t.track_type, 'music') AS track_type "
             "FROM queue_items q "
             "LEFT JOIN tracks t ON t.id = q.track_id "
             "WHERE q.station_id=? AND q.status IN ('done', 'playing') "
-            "ORDER BY q.id DESC LIMIT 50",
+            "ORDER BY COALESCE(q.started_at, q.finished_at, q.enqueued_at) DESC, "
+            "q.id DESC LIMIT 50",
             (self.station_id,),
         )
         count = 0
@@ -1518,7 +1522,8 @@ class StationWorker:
             "FROM queue_items q "
             "LEFT JOIN tracks t ON t.id = q.track_id "
             "WHERE q.station_id=? AND q.status IN ('done', 'playing') AND q.id>? "
-            "ORDER BY q.id DESC LIMIT 500",
+            "ORDER BY COALESCE(q.started_at, q.finished_at, q.enqueued_at) DESC, "
+            "q.id DESC LIMIT 500",
             (self.station_id, max(0, int(baseline_queue_id))),
         )
         seconds = 0.0
@@ -2056,7 +2061,8 @@ class StationWorker:
             "LEFT JOIN tracks t ON t.id = q.track_id "
             "WHERE q.station_id=? AND q.status='done' "
             "AND LOWER(COALESCE(t.track_type, 'music'))='music' "
-            "ORDER BY q.id DESC LIMIT 1",
+            "ORDER BY COALESCE(q.finished_at, q.started_at, q.enqueued_at) DESC, "
+            "q.id DESC LIMIT 1",
             (self.station_id,),
         )
         row = cur.fetchone()

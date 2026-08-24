@@ -16,8 +16,8 @@ class StationPipelineConfig:
     output_device_id: str
     output_gain_db: float = 0.0
     loudness_target_lufs: float | None = None
-    # "balanced" mirrors a conservative professional web-radio chain;
-    # "transparent" keeps wide dynamics for Classical/Jazz; "off" retains
+    # Genre names select conservative dynamics profiles; "balanced" is the
+    # general fallback, "transparent" keeps wide dynamics, and "off" retains
     # only codec-required filtering and the configured loudness stage.
     broadcast_processing_profile: str = "balanced"
     stream_codec_profile: str = "aac_low_192"

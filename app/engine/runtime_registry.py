@@ -45,6 +45,18 @@ _DEFAULT_LIVE_STATUS = {
     "buffer_bytes": 0,
 }
 _TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
+_BROADCAST_PROCESSING_PROFILES = {
+    "balanced",
+    "classical",
+    "dense",
+    "energize",
+    "jazz",
+    "lofi",
+    "off",
+    "pop",
+    "rock",
+    "transparent",
+}
 
 
 def _env_truthy(name: str) -> bool:
@@ -57,6 +69,25 @@ def _icecast_metadata_disabled() -> bool:
 
 def _local_playback_disabled() -> bool:
     return _env_truthy("CLEANROOM_DISABLE_LOCAL_PLAYBACK")
+
+
+def _default_processing_profile_for_station(station_name: str) -> str:
+    """Choose a conservative dynamics profile from the station identity."""
+
+    name = str(station_name or "").strip().lower().replace("-", "")
+    for marker, profile in (
+        ("classical", "classical"),
+        ("lofi", "lofi"),
+        ("jazz", "jazz"),
+        ("pop", "pop"),
+        ("rock", "rock"),
+        ("energize", "energize"),
+        ("energetic", "energize"),
+        ("electronic", "energize"),
+    ):
+        if marker in name:
+            return profile
+    return "balanced"
 
 
 def _normalize_program_music_mode(raw) -> str:
@@ -1223,14 +1254,22 @@ class StationRuntimeRegistry:
             loudness_target_lufs = float(station_settings.get("loudness_target_lufs", -16.0))
         except (TypeError, ValueError):
             loudness_target_lufs = -16.0
+        system_processing_profile = str(
+            settings.get("broadcast_processing_profile", "") or ""
+        ).strip().lower()
+        default_processing_profile = (
+            system_processing_profile
+            if system_processing_profile in _BROADCAST_PROCESSING_PROFILES
+            else _default_processing_profile_for_station(station_name)
+        )
         processing_profile = str(
             station_settings.get(
                 "broadcast_processing_profile",
-                settings.get("broadcast_processing_profile", "balanced"),
+                default_processing_profile,
             )
-            or "balanced"
+            or default_processing_profile
         ).strip().lower()
-        if processing_profile not in {"balanced", "transparent", "dense", "off"}:
+        if processing_profile not in _BROADCAST_PROCESSING_PROFILES:
             processing_profile = "balanced"
         stream_features = _station_stream_feature_settings(
             station_settings,

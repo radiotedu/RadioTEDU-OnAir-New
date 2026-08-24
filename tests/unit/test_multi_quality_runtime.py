@@ -372,6 +372,39 @@ class MultiQualityRuntimeTests(unittest.TestCase):
         start_pipe.assert_called_once()
         self.assertEqual(self.runtime._backend, "ffmpeg-transition")
 
+    def test_crossfade_decoder_is_prepared_before_current_producer_is_retired(self):
+        cfg = _cfg()
+        self.runtime._active_cfg = cfg
+        self.runtime._active_started_monotonic = 1.0
+        current = MagicMock()
+        current.poll.return_value = None
+        prepared = MagicMock()
+        prepared.poll.return_value = None
+        self.runtime._process = current
+        events = []
+
+        def spawn(*_args, **_kwargs):
+            events.append("spawn-next")
+            return prepared
+
+        def terminate(proc):
+            if proc is current:
+                events.append("retire-current")
+
+        with (
+            patch.object(self.runtime, "_ensure_icecast_sink", return_value=True),
+            patch.object(self.runtime, "_ensure_extra_icecast_sinks", return_value={}),
+            patch.object(self.runtime, "_ensure_local_sink", return_value=False),
+            patch.object(self.runtime, "_spawn_crossfade_pcm_producer", side_effect=spawn),
+            patch.object(self.runtime, "_terminate_process", side_effect=terminate),
+            patch.object(self.runtime, "_start_icecast_pipe_worker"),
+            patch.object(self.runtime, "_start_silence_floor_worker"),
+        ):
+            self.runtime._start_crossfade(cfg)
+
+        self.assertLess(events.index("spawn-next"), events.index("retire-current"))
+        self.assertIs(self.runtime._process, prepared)
+
     def test_steady_playout_starts_quality_outputs_when_primary_is_unavailable(self):
         cfg = _cfg()
         producer = MagicMock()

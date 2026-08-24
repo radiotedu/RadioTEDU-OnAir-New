@@ -3,7 +3,11 @@ from datetime import datetime, timedelta, timezone
 from fastapi.testclient import TestClient
 
 from app.db import get_connection, init_db
-from app.engine.broadcast_queue_autofill import ensure_broadcast_queue_filled
+from app.engine.broadcast_queue_autofill import (
+    _count_music_since_last_jingle as count_autofill_music_since_jingle,
+    ensure_broadcast_queue_filled,
+)
+from app.engine.station_worker import StationWorker
 from app.main import app
 from app.repositories.queue_repo import QueueRepository
 from app.repositories.settings_repo import SettingsRepository
@@ -43,7 +47,6 @@ class _FakeRuntimeRegistry:
         sid = int(station_id)
         self.running[sid] = False
         return self.status(sid)
-
     def status(self, station_id: int):
         sid = int(station_id)
         running = bool(self.running.get(sid, False))
@@ -59,6 +62,53 @@ class _FakeRuntimeRegistry:
             "branch_health": branch_health,
             "required_outputs": required_outputs,
         }
+
+
+def test_sweeper_cadence_uses_playback_time_when_jingle_was_inserted_late(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("CLEANROOM_DB_PATH", str(tmp_path / "cleanroom.db"))
+    init_db()
+    conn = get_connection()
+    track_ids = {}
+    for title, track_type in (
+        ("Song 1", "music"),
+        ("Song 2", "music"),
+        ("Song 3", "music"),
+        ("Late inserted ID", "jingle"),
+    ):
+        cursor = conn.execute(
+            "INSERT INTO tracks "
+            "(station_id, title, track_type, file_path, is_active) "
+            "VALUES (1, ?, ?, ?, 1)",
+            (title, track_type, str(tmp_path / f"{title}.flac")),
+        )
+        track_ids[title] = int(cursor.lastrowid)
+
+    # The three prefilled songs receive lower queue ids. The station ID is
+    # inserted later (higher id) but plays first, which is the production shape
+    # that exposed the enqueue-order bug.
+    for position, title, started in (
+        (1, "Song 1", "2026-08-24 01:01:00"),
+        (2, "Song 2", "2026-08-24 01:02:00"),
+        (3, "Song 3", "2026-08-24 01:03:00"),
+        (4, "Late inserted ID", "2026-08-24 01:00:00"),
+    ):
+        conn.execute(
+            "INSERT INTO queue_items "
+            "(station_id, track_id, position, status, started_at, finished_at) "
+            "VALUES (1, ?, ?, 'done', ?, ?)",
+            (track_ids[title], position, started, started),
+        )
+    conn.commit()
+
+    worker = StationWorker(1)
+    try:
+        assert worker._count_music_since_last_jingle() == 3
+        assert count_autofill_music_since_jingle(conn, 1) == 3
+    finally:
+        worker.conn.close()
+        conn.close()
 
 
 def _stub_worker_loop_start(monkeypatch):

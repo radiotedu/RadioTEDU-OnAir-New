@@ -75,45 +75,122 @@ def _pcm_output_args() -> list[str]:
 
 
 def _broadcast_processing_filters(cfg: StationPipelineConfig) -> list[str]:
-    """Return a conservative, fail-safe web-radio processing chain.
+    """Return a conservative genre-aware web-radio processing chain.
 
-    The compressor is intentionally gentle.  Loudness normalization and the
-    true-peak limiter remain the final level controls, while the explicit
-    resampler prevents ``loudnorm``'s internal 192 kHz analysis rate from
-    leaking into an encoder.  Classical/Jazz can select ``transparent`` to
-    keep their wider dynamics without losing rumble and peak protection.
+    The named profiles deliberately change dynamics, not the artistic EQ of
+    already-mastered music. Every enabled profile removes sub-audible rumble,
+    applies at most gentle programme compression, normalises loudness, and
+    keeps a true-peak safety limiter last. Classical and Jazz retain much
+    wider loudness range than Pop/Energize.
     """
 
     profile = str(
         getattr(cfg, "broadcast_processing_profile", "balanced") or "balanced"
     ).strip().lower()
-    if profile not in {"balanced", "transparent", "dense", "off"}:
+    profile_settings = {
+        "classical": {
+            "highpass_hz": 20,
+            "compressor": None,
+            "lra": 15,
+            "limiter_release_ms": 80,
+        },
+        "jazz": {
+            "highpass_hz": 25,
+            "compressor": (
+                "acompressor=threshold=0.251:ratio=1.25:attack=40:release=350:"
+                "knee=2.828:makeup=1"
+            ),
+            "lra": 12,
+            "limiter_release_ms": 80,
+        },
+        "lofi": {
+            "highpass_hz": 25,
+            "compressor": (
+                "acompressor=threshold=0.178:ratio=1.5:attack=35:release=400:"
+                "knee=2.828:makeup=1"
+            ),
+            "lra": 10,
+            "limiter_release_ms": 80,
+        },
+        "pop": {
+            "highpass_hz": 30,
+            "compressor": (
+                "acompressor=threshold=0.158:ratio=2.2:attack=15:release=220:"
+                "knee=2.828:makeup=1"
+            ),
+            "lra": 8,
+            "limiter_release_ms": 50,
+        },
+        "rock": {
+            "highpass_hz": 30,
+            "compressor": (
+                "acompressor=threshold=0.178:ratio=1.8:attack=25:release=300:"
+                "knee=2.828:makeup=1"
+            ),
+            "lra": 9,
+            "limiter_release_ms": 60,
+        },
+        "energize": {
+            "highpass_hz": 35,
+            "compressor": (
+                "acompressor=threshold=0.141:ratio=2.6:attack=10:release=180:"
+                "knee=2.828:makeup=1"
+            ),
+            "lra": 7,
+            "limiter_release_ms": 45,
+        },
+        "balanced": {
+            "highpass_hz": 30,
+            "compressor": (
+                "acompressor=threshold=0.125:ratio=2:attack=20:release=250:"
+                "knee=2.828:makeup=1"
+            ),
+            "lra": 7,
+            "limiter_release_ms": 50,
+        },
+        "transparent": {
+            "highpass_hz": 20,
+            "compressor": None,
+            "lra": 15,
+            "limiter_release_ms": 80,
+        },
+        "dense": {
+            "highpass_hz": 35,
+            "compressor": (
+                "acompressor=threshold=0.100:ratio=3:attack=20:release=250:"
+                "knee=2.828:makeup=1"
+            ),
+            "lra": 7,
+            "limiter_release_ms": 45,
+        },
+    }
+    if profile not in {*profile_settings, "off"}:
         profile = "balanced"
 
     filters: list[str] = []
     if profile != "off":
-        filters.append("highpass=f=30")
-        if profile == "dense":
-            filters.append(
-                "acompressor=threshold=0.100:ratio=3:attack=20:release=250:"
-                "knee=2.828:makeup=1"
-            )
-        elif profile == "balanced":
-            filters.append(
-                "acompressor=threshold=0.125:ratio=2:attack=20:release=250:"
-                "knee=2.828:makeup=1"
-            )
+        selected = profile_settings[profile]
+        filters.append(f"highpass=f={int(selected['highpass_hz'])}")
+        compressor = selected.get("compressor")
+        if compressor:
+            filters.append(str(compressor))
+    else:
+        selected = {"lra": 7, "limiter_release_ms": 50}
 
     loudness_target = getattr(cfg, "loudness_target_lufs", None)
     if loudness_target is not None:
         target = max(-24.0, min(-9.0, float(loudness_target)))
-        filters.append(f"loudnorm=I={target:.1f}:TP=-1.5:LRA=7")
+        filters.append(
+            f"loudnorm=I={target:.1f}:TP=-1.5:LRA={int(selected['lra'])}"
+        )
 
     if profile != "off":
         # -1.5 dBTP in linear amplitude.  Disabling auto-level prevents the
         # limiter from undoing the headroom it is meant to guarantee.
         filters.append(
-            "alimiter=limit=0.841395:attack=5:release=50:level=false:latency=true"
+            "alimiter=limit=0.841395:attack=5:"
+            f"release={int(selected['limiter_release_ms'])}:"
+            "level=false:latency=true"
         )
     return filters
 

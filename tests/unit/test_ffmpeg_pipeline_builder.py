@@ -63,6 +63,35 @@ def test_ffmpeg_command_uses_bounded_radio_processing_in_safe_order() -> None:
     assert filter_chain.index("alimiter=") < filter_chain.index("aresample=48000")
 
 
+def test_genre_profiles_preserve_codec_bitrate_and_shape_dynamics_conservatively() -> None:
+    cases = {
+        "classical": ("highpass=f=20", "LRA=15", None),
+        "jazz": ("highpass=f=25", "LRA=12", "ratio=1.25"),
+        "lofi": ("highpass=f=25", "LRA=10", "ratio=1.5"),
+        "pop": ("highpass=f=30", "LRA=8", "ratio=2.2"),
+        "rock": ("highpass=f=30", "LRA=9", "ratio=1.8"),
+        "energize": ("highpass=f=35", "LRA=7", "ratio=2.6"),
+    }
+
+    baseline = build_ffmpeg_icecast_cmd(_cfg(), "ffmpeg.exe")
+    baseline_codec = baseline[baseline.index("-c:a") + 1]
+
+    for profile, (highpass, lra, compressor_marker) in cases.items():
+        cfg = _cfg()
+        cfg.broadcast_processing_profile = profile
+        cfg.loudness_target_lufs = -16.0
+        cmd = build_ffmpeg_icecast_cmd(cfg, "ffmpeg.exe")
+        filter_chain = cmd[cmd.index("-af") + 1]
+
+        assert highpass in filter_chain
+        assert lra in filter_chain
+        assert ("acompressor=" in filter_chain) is bool(compressor_marker)
+        if compressor_marker:
+            assert compressor_marker in filter_chain
+        assert cmd[cmd.index("-b:a") + 1] == "196k"
+        assert cmd[cmd.index("-c:a") + 1] == baseline_codec
+
+
 def test_ffmpeg_command_omits_empty_track_metadata() -> None:
     cmd = build_ffmpeg_icecast_cmd(_cfg(title="", artist=""), "ffmpeg.exe")
     joined = " ".join(cmd)

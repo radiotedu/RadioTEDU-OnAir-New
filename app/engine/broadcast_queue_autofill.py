@@ -108,13 +108,15 @@ def _pick_ad(
 def _count_music_since_last_jingle(conn, station_id: int) -> int:
     """Count how many consecutive music tracks have played since the last jingle."""
     cur = conn.cursor()
-    # Use immutable queue ids for playback recency; positions may be reindexed later.
+    # Use playback timestamps for recency. Just-in-time jingles can have ids
+    # newer than the prefilled songs that play after them.
     cur.execute(
         "SELECT q.id, LOWER(COALESCE(t.track_type, 'music')) AS track_type "
         "FROM queue_items q "
         "LEFT JOIN tracks t ON t.id = q.track_id "
         "WHERE q.station_id=? AND q.status IN ('done', 'playing') "
-        "ORDER BY q.id DESC LIMIT 50",
+        "ORDER BY COALESCE(q.started_at, q.finished_at, q.enqueued_at) DESC, "
+        "q.id DESC LIMIT 50",
         (int(station_id),),
     )
     count = 0
@@ -134,7 +136,8 @@ def _recent_jingle_track_ids(conn, station_id: int, limit: int = 1) -> list[int]
         "LEFT JOIN tracks t ON t.id = q.track_id "
         "WHERE q.station_id=? AND q.status IN ('done', 'playing') "
         "AND LOWER(COALESCE(t.track_type, 'music'))='jingle' "
-        "ORDER BY q.id DESC LIMIT ?",
+        "ORDER BY COALESCE(q.started_at, q.finished_at, q.enqueued_at) DESC, "
+        "q.id DESC LIMIT ?",
         (int(station_id), max(1, int(limit))),
     )
     return [int(row["track_id"]) for row in cur.fetchall() if int(row["track_id"] or 0) > 0]
@@ -147,7 +150,8 @@ def _recent_ad_track_ids(conn, station_id: int, limit: int = 1) -> list[int]:
         "LEFT JOIN tracks t ON t.id=q.track_id "
         "WHERE q.station_id=? AND q.status IN ('done', 'playing') "
         "AND LOWER(COALESCE(t.track_type, 'music'))='ad' "
-        "ORDER BY q.id DESC LIMIT ?",
+        "ORDER BY COALESCE(q.started_at, q.finished_at, q.enqueued_at) DESC, "
+        "q.id DESC LIMIT ?",
         (int(station_id), max(1, int(limit))),
     )
     return [int(row["track_id"]) for row in cur.fetchall() if int(row["track_id"] or 0) > 0]

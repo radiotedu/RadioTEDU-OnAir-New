@@ -11,6 +11,21 @@ from app.repositories.settings_repo import SettingsRepository
 from app.repositories.station_output_repo import StationOutputRepository
 
 
+def test_station_names_select_expected_genre_processing_profiles():
+    expected = {
+        "RadioTEDU Classical": "classical",
+        "RadioTEDU Lo-Fi": "lofi",
+        "RadioTEDU Pop": "pop",
+        "RadioTEDU Jazz": "jazz",
+        "RadioTEDU Rock": "rock",
+        "RadioTEDU Energize": "energize",
+    }
+    assert {
+        name: runtime_registry_module._default_processing_profile_for_station(name)
+        for name in expected
+    } == expected
+
+
 def test_stale_high_quality_profile_self_heals_to_aac_low_192():
     settings = {
         "station_1_extra_icecast_outputs": json.dumps(
