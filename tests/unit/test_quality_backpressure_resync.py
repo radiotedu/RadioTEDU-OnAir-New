@@ -132,6 +132,8 @@ class QualityBackpressureResyncTests(unittest.TestCase):
             icecast_port=8000,
             icecast_mount="/lofi",
             icecast_password="",
+            stream_codec_profile="",
+            stream_bitrate_kbps=0,
         )
 
         sink._start_connector_worker(cfg)

@@ -9,6 +9,9 @@ from typing import Callable
 from app.audio.gst_pipeline import StationPipelineConfig, resolve_stream_profile
 
 
+DEFAULT_SOURCE_WRITE_TIMEOUT_SECONDS = 5.0
+
+
 class IcecastSourceProtocolError(RuntimeError):
     """A credential-safe source connection failure."""
 
@@ -28,7 +31,7 @@ class IcecastSourceTransport:
         socket_factory: Callable[..., socket.socket] = socket.create_connection,
         connect_timeout_sec: float = 5.0,
         handshake_timeout_sec: float = 10.0,
-        write_timeout_sec: float | None = None,
+        write_timeout_sec: float | None = DEFAULT_SOURCE_WRITE_TIMEOUT_SECONDS,
     ) -> None:
         host = _header(cfg.icecast_host, 255)
         port = int(cfg.icecast_port or 0)

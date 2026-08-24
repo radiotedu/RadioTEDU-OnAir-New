@@ -395,6 +395,44 @@ def test_registry_start_creates_default_output_settings_when_missing(tmp_path, m
     assert int(row["icecast_enabled"]) == 0
 
 
+def test_service_policy_disables_local_playback_without_disabling_icecast(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("CLEANROOM_DB_PATH", str(tmp_path / "cleanroom.db"))
+    monkeypatch.setenv("CLEANROOM_DISABLE_LOCAL_PLAYBACK", "1")
+    monkeypatch.setenv("CLEANROOM_DISABLE_ICECAST_METADATA", "1")
+    init_db()
+    conn = get_connection()
+    StationOutputRepository(conn).upsert(
+        station_id=1,
+        local_output_enabled=True,
+        output_device_id="default",
+        icecast_enabled=True,
+        icecast_host="127.0.0.1",
+        icecast_port=11154,
+        icecast_mount="/station1",
+        icecast_user="source",
+        icecast_password="test-password",
+    )
+    conn.close()
+
+    fake = _FakeRuntime()
+    reg = StationRuntimeRegistry(runtime_factory=lambda: fake)
+    reg.start_station(1, input_uri="C:/music/default.mp3")
+
+    assert fake.last_cfg.icecast_enabled is True
+    assert fake.last_cfg.local_output_enabled is False
+
+
+def test_now_playing_hides_standalone_recording_placeholder():
+    assert runtime_registry_module._compose_now_playing(
+        "Song", "Artist", "[standalone recordings]"
+    ) == "Artist - Song"
+    assert runtime_registry_module._compose_now_playing(
+        "Song", "Artist", "Real Album"
+    ) == "Artist - Song (Real Album)"
+
+
 def test_registry_hot_refreshes_quality_outputs_without_restarting_primary(
     tmp_path, monkeypatch
 ):

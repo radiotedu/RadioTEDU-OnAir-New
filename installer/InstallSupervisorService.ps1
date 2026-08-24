@@ -87,6 +87,7 @@ if ($Action -eq "Prepare") {
         "CLEANROOM_TOOLS_DIR=$(Join-Path $backendRoot 'tools')",
         "CLEANROOM_OPEN_PANEL=0",
         "CLEANROOM_SKIP_STARTUP_AI=1",
+        "CLEANROOM_DISABLE_LOCAL_PLAYBACK=1",
         "CLEANROOM_SKIP_ICECAST_METADATA=0"
     )
     New-ItemProperty -LiteralPath $serviceRegistryPath -Name "Environment" `

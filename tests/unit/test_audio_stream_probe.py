@@ -18,10 +18,17 @@ class _Response:
 
 
 def test_probe_requires_audio_content_and_a_real_payload_byte(monkeypatch):
-    monkeypatch.setattr(probe, "urlopen", lambda *_args, **_kwargs: _Response())
+    captured = {}
+
+    def _open(request, **_kwargs):
+        captured["user_agent"] = request.get_header("User-agent")
+        return _Response()
+
+    monkeypatch.setattr(probe, "urlopen", _open)
     result = probe.probe_audio_url("https://stream.example.test/lofi")
     assert result.ok is True
     assert result.sample_bytes == 1
+    assert captured["user_agent"] == "RadioTEDU OnAir/1.0"
 
     monkeypatch.setattr(
         probe,

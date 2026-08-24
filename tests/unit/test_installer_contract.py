@@ -81,6 +81,10 @@ def test_audio_watchdog_installer_is_independent_and_fail_closed():
     assert '"-re", "-stats_period", "8"' in watchdog
     assert "$mediaSeconds -ge 7.5" in watchdog
     assert 'Url = "$listenerRoot/rock"' in watchdog
+    assert "MaxConcurrentAudioProbes = 4" in watchdog
+    assert "Invoke-PublicAudioProbeBatches" in watchdog
+    assert "TransportFreshnessSeconds = 5.0" in watchdog
+    assert "pending_items -le 0" not in watchdog
 
 
 def test_one_shot_installer_preserves_watchdog_boot_recovery():

@@ -897,6 +897,7 @@ class PlayoutHardeningTests(unittest.TestCase):
             "test://song",
             "Song",
             "Artist",
+            "",
             "music",
         )
 
@@ -925,6 +926,7 @@ class PlayoutHardeningTests(unittest.TestCase):
             "test://song",
             "Song",
             "Artist",
+            "",
             "music",
         )
 
@@ -958,6 +960,7 @@ class PlayoutHardeningTests(unittest.TestCase):
             "test://radiotedu-jingle",
             "RadioTEDU Sweeper",
             "",
+            "",
             "jingle",
         )
         worker._complete_queue_item = lambda item: worker.queue_repo.mark_done(item["id"])
@@ -990,6 +993,7 @@ class PlayoutHardeningTests(unittest.TestCase):
             "test://radiotedu-jingle",
             "RadioTEDU Sweeper",
             "",
+            "",
             "jingle",
         )
         worker._complete_queue_item = lambda item: worker.queue_repo.mark_done(item["id"])
@@ -1021,6 +1025,7 @@ class PlayoutHardeningTests(unittest.TestCase):
             "test://radiotedu-jingle",
             "RadioTEDU Sweeper",
             "",
+            "",
             "jingle",
         )
 
@@ -1050,6 +1055,7 @@ class PlayoutHardeningTests(unittest.TestCase):
         worker._track_runtime_fields = lambda _track_id: (
             "test://radiotedu-jingle",
             "RadioTEDU Sweeper",
+            "",
             "",
             "jingle",
         )
@@ -1515,6 +1521,7 @@ class PlayoutHardeningTests(unittest.TestCase):
         worker._track_runtime_fields = lambda _track_id: (
             "test://ad",
             "Ad",
+            "",
             "",
             "ad",
         )

@@ -69,7 +69,7 @@ def _bootstrap_database() -> dict[str, str]:
         settings_repo.upsert_station(
             1,
             {
-                "ai_host_enabled": "true",
+                "ai_host_enabled": "false",
                 "ai_llm_model": DEFAULT_LLM_MODEL,
                 "ai_omnivoice_model": DEFAULT_OMNIVOICE_MODEL,
                 "ai_tts_provider": "omnivoice",

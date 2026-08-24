@@ -63,6 +63,7 @@ from app.repositories.track_repo import TrackRepository
 from app.repositories.user_repo import UserRepository
 from app.runtime_paths import resolve_binary
 from app.services.music_usage import MusicUsageService
+from app.services.track_naming import clean_album_metadata
 
 router = APIRouter()
 
@@ -529,7 +530,7 @@ def _get_audio_metadata(
             or artist
         )
         artist = _clean_artist_metadata(artist)
-        album = tags.get("album") or album
+        album = clean_album_metadata(tags.get("album") or album)
         genre = tags.get("genre") or genre
         language = tags.get("language") or tags.get("contentlanguage") or language
         musicbrainz_recordingid = (
@@ -550,7 +551,7 @@ def _get_audio_metadata(
     return {
         "title": title,
         "artist": artist,
-        "album": album,
+        "album": clean_album_metadata(album),
         "genre": genre,
         "language": language,
         "musicbrainz_recordingid": musicbrainz_recordingid,

@@ -9,6 +9,7 @@ from urllib.parse import quote
 
 from app.audio.gst_pipeline import StationPipelineConfig, resolve_stream_profile
 from app.audio.virtual_sources import is_silence_input_uri
+from app.services.track_naming import clean_album_metadata
 
 LOCAL_PCM_FORMAT = "s16le"
 LOCAL_PCM_CODEC = "pcm_s16le"
@@ -50,7 +51,7 @@ def _append_track_metadata(cmd: list[str], cfg: StationPipelineConfig) -> None:
     stream_title = _normalize_metadata_value(cfg.stream_title)
     stream_artist = _normalize_metadata_value(cfg.stream_artist)
     stream_album = _normalize_metadata_value(
-        str(getattr(cfg, "stream_album", "") or "")
+        clean_album_metadata(getattr(cfg, "stream_album", ""))
     )
     if stream_title:
         cmd.extend(["-metadata", f"title={stream_title}"])

@@ -87,7 +87,7 @@ def probe_audio_url(url: str, *, timeout: float = 1.5) -> AudioStreamProbeResult
         headers={
             "Icy-MetaData": "0",
             "Range": "bytes=0-0",
-            "User-Agent": "RadioTEDU-OnAir-listener-verifier/1",
+            "User-Agent": "RadioTEDU OnAir/1.0",
             "Accept": "audio/*, application/ogg;q=0.9",
             "Connection": "close",
         },

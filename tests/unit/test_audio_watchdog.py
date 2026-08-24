@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from app.services.audio_watchdog import AudioWatchdogService
+from app.services.audio_watchdog import AudioWatchdogService, _same_windows_path
+
+
+def test_windows_path_comparison_normalizes_duplicate_separators():
+    assert _same_windows_path(
+        r"H:\\RadioTEDU Songs\\Rock", r"H:\RadioTEDU Songs\Rock"
+    )
 
 
 def test_repair_restarts_only_selected_station(monkeypatch):

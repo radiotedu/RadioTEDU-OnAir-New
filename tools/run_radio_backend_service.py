@@ -146,6 +146,7 @@ def configure_environment(repository_root: Path) -> dict[str, str]:
         "CLEANROOM_CREDENTIAL_DPAPI_SCOPE": "machine",
         "CLEANROOM_OPEN_PANEL": "0",
         "CLEANROOM_SKIP_STARTUP_AI": "1",
+        "CLEANROOM_DISABLE_LOCAL_PLAYBACK": "1",
         # Icecast source metadata is part of the public stream contract.
         # AI remains disabled independently via CLEANROOM_SKIP_STARTUP_AI.
         "CLEANROOM_SKIP_ICECAST_METADATA": "0",

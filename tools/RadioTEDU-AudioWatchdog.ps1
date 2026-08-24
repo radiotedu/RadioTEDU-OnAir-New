@@ -7,7 +7,9 @@ param(
     [string]$ListenerBase = "http://stream.radiotedu.com:11154",
     [string]$BackendLauncher = "",
     [string]$SupervisorServiceName = "RadioTEDU.OnAir.Supervisor",
-    [string]$AIStreamsServiceName = "RadioTEDU.AIStreams"
+    [string]$AIStreamsServiceName = "RadioTEDU.AIStreams",
+    [ValidateRange(1, 14)][int]$MaxConcurrentAudioProbes = 4,
+    [ValidateRange(2.0, 30.0)][double]$TransportFreshnessSeconds = 5.0
 )
 
 Set-StrictMode -Version Latest
@@ -206,8 +208,7 @@ function Test-ManagedProfilesHealthy([object]$Snapshot) {
             -not [bool]$profile.replace_mode -or
             [int]$profile.rescan_interval_seconds -ne 600 -or
             -not [bool]$profile.recursive -or
-            [int]$profile.active_tracks -le 0 -or
-            [int]$profile.pending_items -le 0
+            [int]$profile.active_tracks -le 0
         ) {
             return $false
         }
@@ -282,6 +283,26 @@ function Test-PublicAudio([pscustomobject]$Mount) {
     return Complete-PublicAudioProbe (Start-PublicAudioProbe $Mount) ((Get-Date).AddSeconds(25))
 }
 
+function Invoke-PublicAudioProbeBatches([object[]]$Selected) {
+    $items = @($Selected)
+    $itemCount = @($items).Count
+    $rows = @()
+    for ($offset = 0; $offset -lt $itemCount; $offset += $MaxConcurrentAudioProbes) {
+        $last = [math]::Min(
+            $itemCount - 1,
+            $offset + $MaxConcurrentAudioProbes - 1
+        )
+        $batchSize = ($last - $offset) + 1
+        $batch = @($items | Select-Object -Skip $offset -First $batchSize)
+        $probes = @($batch | ForEach-Object { Start-PublicAudioProbe $_ })
+        $deadline = (Get-Date).AddSeconds(25)
+        $rows += @(
+            $probes | ForEach-Object { Complete-PublicAudioProbe $_ $deadline }
+        )
+    }
+    return @($rows)
+}
+
 function Test-SelectedStreams([int[]]$StationIds) {
     $selected = if ($StationIds.Count -gt 0) {
         @($mounts | Where-Object { $StationIds -contains [int]$_.StationId })
@@ -289,10 +310,7 @@ function Test-SelectedStreams([int[]]$StationIds) {
     else {
         @($mounts)
     }
-    $probes = @($selected | ForEach-Object { Start-PublicAudioProbe $_ })
-    $deadline = (Get-Date).AddSeconds(25)
-    $rows = @($probes | ForEach-Object { Complete-PublicAudioProbe $_ $deadline })
-    return @($rows)
+    return @(Invoke-PublicAudioProbeBatches $selected)
 }
 
 function Test-SelectedAuxiliaryStreams([int[]]$StationIds) {
@@ -302,9 +320,7 @@ function Test-SelectedAuxiliaryStreams([int[]]$StationIds) {
     else {
         @($auxiliaryMounts)
     }
-    $probes = @($selected | ForEach-Object { Start-PublicAudioProbe $_ })
-    $deadline = (Get-Date).AddSeconds(25)
-    return @($probes | ForEach-Object { Complete-PublicAudioProbe $_ $deadline })
+    return @(Invoke-PublicAudioProbeBatches $selected)
 }
 
 function Test-AIRepairCooldown {
@@ -399,13 +415,13 @@ function Get-LocalTransportState([int]$StationId) {
             [bool](Get-OptionalProperty $runtime "running" $false) -and
             [bool](Get-OptionalProperty $runtime "program_running" $false) -and
             -not [bool](Get-OptionalProperty $runtime "program_pcm_stalled" $false) -and
-            $pcmAge -le 2.0 -and
+            $pcmAge -le $TransportFreshnessSeconds -and
             [bool](Get-OptionalProperty $runtime "icecast_sink_running" $false) -and
             [bool](Get-OptionalProperty $mount "process_running" $false) -and
             [bool](Get-OptionalProperty $mount "writer_running" $false) -and
             -not [bool](Get-OptionalProperty $mount "writer_failed" $false) -and
             -not [bool](Get-OptionalProperty $mount "writer_backpressured" $false) -and
-            $lastWriteAge -le 2.0
+            $lastWriteAge -le $TransportFreshnessSeconds
         return [pscustomobject]@{
             station_id = $StationId
             healthy = $healthy
@@ -585,12 +601,18 @@ try {
     exit 0
 }
 catch {
+    $watchdogError = $_
     try {
         if ($script:WatchdogToken) {
-            Send-Report "error" $_.Exception.Message @() $false
+            Send-Report "error" $watchdogError.Exception.Message @() $false
         }
     }
     catch {}
-    Write-WatchdogLog ("WATCHDOG_ERROR: " + $_.Exception.Message)
+    $errorLine = [int]$watchdogError.InvocationInfo.ScriptLineNumber
+    $errorTrace = [string]$watchdogError.ScriptStackTrace
+    Write-WatchdogLog (
+        "WATCHDOG_ERROR line={0}: {1}; stack={2}" -f
+        $errorLine, $watchdogError.Exception.Message, $errorTrace
+    )
     exit 23
 }

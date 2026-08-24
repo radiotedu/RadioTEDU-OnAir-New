@@ -24,6 +24,7 @@ from app.repositories.show_session_repo import ShowSessionRepository
 from app.repositories.track_repo import TrackRepository
 from app.services.music_usage import MusicUsageService
 from app.services.dayparting import active_daypart
+from app.services.track_naming import clean_album_metadata
 
 _log = logging.getLogger("cleanroom.worker")
 
@@ -161,7 +162,7 @@ class StationWorker:
         title = str(row["title"] or "").strip()
         artist = str(row["artist"] or "").strip()
         try:
-            album = str(row["album"] or "").strip()
+            album = clean_album_metadata(row["album"])
         except (IndexError, KeyError):
             album = ""
         track_type = str(row["track_type"] or "music").strip().lower() or "music"

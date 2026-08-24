@@ -63,7 +63,7 @@ def test_source_authentication_stays_in_socket_header_not_process_command():
         _config(), socket_factory=lambda *_args, **_kwargs: source_socket
     )
     try:
-        assert source_socket.timeout is None
+        assert source_socket.timeout == 5.0
         handshake = source_socket.sent[0]
         expected = base64.b64encode(
             b"source:private-source-secret"

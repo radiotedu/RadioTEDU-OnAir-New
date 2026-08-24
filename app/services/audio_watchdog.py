@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import ntpath
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,7 +36,10 @@ def _truthy(raw: Any, default: bool = False) -> bool:
 
 def _same_windows_path(left: str, right: str) -> bool:
     def normalize(value: str) -> str:
-        return str(value or "").strip().replace("/", "\\").rstrip("\\").casefold()
+        raw = str(value or "").strip().replace("/", "\\")
+        if not raw:
+            return ""
+        return ntpath.normcase(ntpath.normpath(raw))
 
     return bool(normalize(left)) and normalize(left) == normalize(right)
 
@@ -133,7 +137,6 @@ class AudioWatchdogService:
                     and interval_ok
                     and recursive_ok
                     and active_tracks > 0
-                    and pending_items > 0
                 )
                 profiles.append(
                     {

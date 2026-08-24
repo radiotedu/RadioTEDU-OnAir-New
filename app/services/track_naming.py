@@ -22,6 +22,10 @@ _SEO_TAIL = re.compile(
     re.IGNORECASE,
 )
 _SPACE = re.compile(r"\s+")
+_ALBUM_PLACEHOLDERS = {
+    "standalone recording",
+    "standalone recordings",
+}
 
 
 @dataclass(frozen=True)
@@ -50,6 +54,16 @@ def _text(value: object) -> str:
     text = text.replace("⧸", "/").replace("｜", "|")
     text = _without_symbols(text)
     return _SPACE.sub(" ", text).strip(" \t\r\n-|/")
+
+
+def clean_album_metadata(value: object) -> str:
+    """Hide catalog placeholders that are not real listener-facing albums."""
+
+    album = unicodedata.normalize("NFKC", str(value or ""))
+    album = _SPACE.sub(" ", album).strip()
+    key = album.strip("[](){} ").replace("_", " ").casefold()
+    key = _SPACE.sub(" ", key)
+    return "" if key in _ALBUM_PLACEHOLDERS else album
 
 
 def _remove_rights_language(value: str) -> str:

@@ -14,6 +14,7 @@ from app.db import get_connection, init_db
 from app.media_paths import resolve_runtime_media_path
 from app.repositories.settings_repo import SettingsRepository
 from app.repositories.station_output_repo import StationOutputRepository
+from app.services.track_naming import clean_album_metadata
 
 _log = logging.getLogger("cleanroom.runtime_registry")
 # Fire the first metadata push immediately, then retry quickly so correct
@@ -52,6 +53,10 @@ def _env_truthy(name: str) -> bool:
 
 def _icecast_metadata_disabled() -> bool:
     return _env_truthy("CLEANROOM_SKIP_ICECAST_METADATA")
+
+
+def _local_playback_disabled() -> bool:
+    return _env_truthy("CLEANROOM_DISABLE_LOCAL_PLAYBACK")
 
 
 def _normalize_program_music_mode(raw) -> str:
@@ -242,7 +247,7 @@ def _repair_mojibake_text(value: str) -> str:
 def _compose_now_playing(title: str, artist: str, album: str = "") -> str:
     clean_title = _repair_mojibake_text(str(title or "").strip())
     clean_artist = _repair_mojibake_text(str(artist or "").strip())
-    clean_album = _repair_mojibake_text(str(album or "").strip())
+    clean_album = _repair_mojibake_text(clean_album_metadata(album))
     if clean_title and clean_artist:
         song = f"{clean_artist} - {clean_title}"
     else:
@@ -1240,7 +1245,9 @@ class StationRuntimeRegistry:
             icecast_mount=str(row["icecast_mount"]),
             icecast_user=str(row["icecast_user"]),
             icecast_password=str(row["icecast_password"]),
-            local_output_enabled=bool(row["local_output_enabled"]),
+            local_output_enabled=(
+                bool(row["local_output_enabled"]) and not _local_playback_disabled()
+            ),
             output_device_id=str(row["output_device_id"]),
             output_gain_db=float(row["output_gain_db"]),
             loudness_target_lufs=max(-24.0, min(-9.0, loudness_target_lufs)),
