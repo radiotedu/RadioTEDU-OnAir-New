@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from app.services.audio_watchdog import AudioWatchdogService, _same_windows_path
+
+
+WATCHDOG_SCRIPT = (
+    Path(__file__).resolve().parents[2] / "tools" / "RadioTEDU-AudioWatchdog.ps1"
+)
 
 
 def test_windows_path_comparison_normalizes_duplicate_separators():
@@ -89,3 +96,21 @@ def test_watchdog_report_accepts_only_watchdog_token(client, monkeypatch):
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+def test_public_only_failure_forces_source_reregistration():
+    script = WATCHDOG_SCRIPT.read_text(encoding="utf-8")
+
+    assert "$repairableFailed = @($secondFailed)" in script
+    assert "forcing source re-registration" in script
+    assert "healthy local sources were not restarted" not in script
+
+
+def test_repair_cooldown_is_saved_only_after_final_verification():
+    script = WATCHDOG_SCRIPT.read_text(encoding="utf-8")
+
+    save_position = script.rindex("Save-RepairState")
+    final_failure_position = script.index(
+        'Send-Report "failed" "Repair completed but final verification still failed."'
+    )
+    assert save_position > final_failure_position

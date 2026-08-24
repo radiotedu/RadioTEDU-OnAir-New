@@ -509,8 +509,8 @@ try {
     $firstFailed = @($firstAudio | Where-Object { -not ($_.decoded -and $_.audible) } | ForEach-Object { [int]$_.station_id } | Sort-Object -Unique)
     $firstAuxiliaryFailed = @($firstAuxiliaryAudio | Where-Object { -not ($_.decoded -and $_.audible) } | ForEach-Object { [int]$_.station_id })
     if ($firstFailed.Count -eq 0 -and $firstAuxiliaryFailed.Count -eq 0 -and $firstProfilesHealthy) {
-        Send-Report "ok" "All 14 local music streams decoded as audible and managed profiles were healthy." @() $true
-        Write-WatchdogLog "OK: 14 local music streams audible; managed profiles healthy."
+        Send-Report "ok" "All 14 public music mounts decoded as audible and managed profiles were healthy." @() $true
+        Write-WatchdogLog "OK: 14 public music mounts audible; managed profiles healthy."
         exit 0
     }
 
@@ -547,24 +547,28 @@ try {
         Write-WatchdogLog $message
         exit 0
     }
-    $repairableFailed = @(Get-RepairableStationIds $secondFailed)
-    $upstreamOnlyFailed = @(
-        $secondFailed | Where-Object { $repairableFailed -notcontains [int]$_ }
+    # A source can keep accepting local PCM while its public mount has vanished
+    # or stopped serving listeners.  After two failed public probes and a
+    # responsive origin, re-register every affected station even when the local
+    # transport heartbeat still looks healthy.  The repair cooldown below
+    # prevents source-owner churn; a global origin outage was already excluded
+    # by Test-OriginResponsive.
+    $locallyUnhealthyFailed = @(Get-RepairableStationIds $secondFailed)
+    $publicOnlyFailed = @(
+        $secondFailed | Where-Object { $locallyUnhealthyFailed -notcontains [int]$_ }
     )
-    if ($repairableFailed.Count -eq 0 -and -not $profileRepair) {
-        Send-Report "upstream_degraded" (
-            "Public audio failed, but local programme PCM and source writers remained healthy; restart suppressed."
-        ) $upstreamOnlyFailed $true
-        Write-WatchdogLog (
-            "Upstream-only failure stations={0}; healthy local sources were not restarted." -f
-            ($upstreamOnlyFailed -join ",")
-        )
-        exit 20
-    }
+    $repairableFailed = @($secondFailed)
     if (Test-RepairCooldown) {
-        Send-Report "cooldown" "Confirmed local transport failure, but the 15-minute repair cooldown prevented a loop." $repairableFailed (-not $profileRepair)
-        Write-WatchdogLog "Confirmed local transport failure suppressed by 15-minute repair cooldown."
+        Send-Report "cooldown" "Confirmed public audio failure, but the 15-minute successful-repair cooldown prevented a loop." $repairableFailed (-not $profileRepair)
+        Write-WatchdogLog "Confirmed public audio failure suppressed by 15-minute successful-repair cooldown."
         exit 21
+    }
+
+    if ($publicOnlyFailed.Count -gt 0) {
+        Write-WatchdogLog (
+            "Confirmed public-only failure stations={0}; forcing source re-registration." -f
+            ($publicOnlyFailed -join ",")
+        )
     }
 
     $repair = Invoke-WatchdogApi -Method POST -Path "/api/watchdog/repair" -Body @{
@@ -574,7 +578,6 @@ try {
     if (-not [bool]$repair.ok) {
         throw "Repair API returned an incomplete result."
     }
-    Save-RepairState ("audio={0};profiles={1}" -f ($repairableFailed -join ","), $profileRepair)
     Start-Sleep -Seconds 15
     $finalSnapshot = Invoke-WatchdogApi -Method GET -Path "/api/watchdog/status"
     $finalProfilesHealthy = Test-ManagedProfilesHealthy $finalSnapshot
@@ -588,14 +591,9 @@ try {
         )
         exit 22
     }
-    if ($upstreamOnlyFailed.Count -gt 0) {
-        Send-Report "upstream_degraded" "Local transport repairs passed; separate upstream-only failures remain and were not restarted." $upstreamOnlyFailed $true
-        Write-WatchdogLog (
-            "Local repair passed; upstream-only failures remain stations=" +
-            ($upstreamOnlyFailed -join ",")
-        )
-        exit 20
-    }
+    # Only successful repairs enter cooldown.  A failed final verification must
+    # remain eligible for another attempt on the next scheduled run.
+    Save-RepairState ("audio={0};profiles={1}" -f ($repairableFailed -join ","), $profileRepair)
     Send-Report "repaired" "Confirmed failures were repaired and final verification passed." @() $true
     Write-WatchdogLog "Repair and final verification passed."
     exit 0
