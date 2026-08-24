@@ -70,6 +70,7 @@ def test_source_authentication_stays_in_socket_header_not_process_command():
         )
         assert handshake.startswith(b"PUT /lofi HTTP/1.1\r\n")
         assert b"Authorization: Basic " + expected in handshake
+        assert b"Connection: keep-alive\r\n" in handshake
         assert b"\r\nInjected:" not in handshake
         transport.send(b"encoded-audio")
         assert source_socket.sent[-1] == b"encoded-audio"

@@ -22,7 +22,7 @@ from app.audio.ffmpeg_pipeline import (
     release_fast_cached_uri,
 )
 from app.audio.gst_pipeline import StationPipelineConfig, build_gst_pipeline
-from app.audio.icecast_audio_sink import IcecastAudioSink
+from app.audio.icecast_audio_sink import IcecastAudioSink, probe_icecast_mount
 from app.audio.shoutcast_audio_sink import ShoutcastAudioSink
 from app.audio.live_audio_mixer import LiveAudioMixer
 from app.audio.local_audio_sink import LocalAudioSink
@@ -33,14 +33,17 @@ from app.runtime_paths import resolve_binary
 _log = logging.getLogger("cleanroom.runtime")
 _LIVE_MIX_CHUNK_BYTES = 4096
 _LIVE_MIX_RETURN_GRACE_SECONDS = 0.75
-_CROSSFADE_PREWARM_SECONDS = 0.08
+_CROSSFADE_PREWARM_SECONDS = 0.5
 _PCM_BYTES_PER_SECOND = 48000 * 2 * 2
 _SILENCE_FLOOR_CHUNK_BYTES = 4096
-# Windows pipe reads commonly arrive as 1 KiB fragments even though 4 KiB was
-# requested.  Sixty-four queue items therefore seed roughly 0.34-1.36 seconds
-# of programme reserve: enough to absorb coarse scheduler quanta without
-# recreating the many-second latency that previously grew without bound.
-_ICECAST_PIPE_STARTUP_RESERVE_CHUNKS = 64
+# Keep a measured six-second programme reserve in front of the encoder clock.
+# Windows pipe reads vary between 1 KiB and 4 KiB, so a byte target is the only
+# stable audio-time measurement. A gentle clock servo prevents both underruns
+# and the destructive full-queue resynchronisations caused by clock drift.
+_ICECAST_PIPE_TARGET_RESERVE_BYTES = 6 * _PCM_BYTES_PER_SECOND
+_ICECAST_PIPE_LOW_WATER_BYTES = 5 * _PCM_BYTES_PER_SECOND
+_ICECAST_PIPE_HIGH_WATER_BYTES = 8 * _PCM_BYTES_PER_SECOND
+_ICECAST_PIPE_SERVO_MAX_CORRECTION = 0.04
 _SILENCE_FLOOR_INTERVAL_SECONDS = (
     _SILENCE_FLOOR_CHUNK_BYTES / _PCM_BYTES_PER_SECOND
 )
@@ -629,12 +632,16 @@ class StationRuntime:
             stdout=subprocess.DEVNULL if stdout is None else stdout,
             stderr=subprocess.DEVNULL if stderr is None else stderr,
         )
-        # On Windows, set SDL_VIDEODRIVER=dummy for ffplay and use CREATE_NEW_PROCESS_GROUP
+        # Audio processes must retain Above Normal priority after service or PC
+        # restarts; this is a creation policy, not a one-time Task Manager edit.
         if sys.platform == "win32":
             env = os.environ.copy()
             env["SDL_VIDEODRIVER"] = "dummy"
             kwargs["env"] = env
-            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            kwargs["creationflags"] = (
+                subprocess.CREATE_NEW_PROCESS_GROUP
+                | getattr(subprocess, "ABOVE_NORMAL_PRIORITY_CLASS", 0)
+            )
         proc = subprocess.Popen(cmd, **kwargs)
         # Assign to job object so ffplay dies when Python exits
         _assign_to_job(proc)
@@ -909,6 +916,10 @@ class StationRuntime:
                 self._icecast_sink = IcecastAudioSink(
                     self.ffmpeg_bin,
                     self._spawn_process,
+                    mount_probe=probe_icecast_mount,
+                    probe_interval_sec=5.0,
+                    probe_failure_threshold=3,
+                    reconnect_failure_threshold=3,
                     initial_connect_spread_sec=30.0,
                     drop_on_backpressure=True,
                 )
@@ -1250,20 +1261,19 @@ class StationRuntime:
             self._router.set_branch_health("icecast", False)
             return
         pacing_sink = sink or initial_targets[0][1]
-        queued_chunks = 0
         health_snapshot = getattr(pacing_sink, "health_snapshot", None)
-        if callable(health_snapshot):
+
+        def observed_queue_bytes() -> int | None:
+            if not callable(health_snapshot):
+                return None
             try:
-                queued_chunks = max(
-                    0,
-                    int(health_snapshot().get("queued_pcm_chunks") or 0),
-                )
+                observed = health_snapshot().get("queued_pcm_bytes")
+                return None if observed is None else max(0, int(observed))
             except Exception:
-                queued_chunks = 0
-        startup_reserve_remaining = max(
-            0,
-            _ICECAST_PIPE_STARTUP_RESERVE_CHUNKS - queued_chunks,
-        )
+                return None
+
+        queued_bytes = observed_queue_bytes() or 0
+        startup_buffered_bytes = queued_bytes
         pcm_clock_started = False
         next_delivery = time.monotonic()
         bytes_written = 0
@@ -1273,21 +1283,43 @@ class StationRuntime:
                 not self._icecast_pipe_stop.is_set()
                 and self._generation_is_current(generation)
             ):
+                # If an encoder/source reconnects, stop filling this bounded
+                # queue before it can reach the destructive full condition.
+                # FFmpeg remains blocked on its pipe and catches up after the
+                # sink has consumed the preserved programme reserve.
+                reserve_bytes = observed_queue_bytes()
+                while (
+                    pcm_clock_started
+                    and reserve_bytes is not None
+                    and reserve_bytes > _ICECAST_PIPE_HIGH_WATER_BYTES
+                ):
+                    if self._icecast_pipe_stop.wait(0.05):
+                        return
+                    if not self._generation_is_current(generation):
+                        return
+                    reserve_bytes = observed_queue_bytes()
                 chunk = stdout.read(_LIVE_MIX_CHUNK_BYTES)
                 if not chunk:
                     if producer.poll() is not None:
                         break
                     time.sleep(0.01)
                     continue
-                # FFmpeg's -readrate clock is intentionally approximate and
-                # can run about 1-2% fast on Windows.  Without a second exact
-                # byte clock, every healthy sink queue eventually filled and
-                # resynchronized by deleting programme audio.  Seed a small
-                # reserve, then phase-lock delivery to the PCM sample clock.
+                # FFmpeg's -readrate clock is intentionally approximate. Seed
+                # six seconds, then phase-lock delivery to the PCM clock with
+                # a bounded queue-depth servo. The sink remains the final clock.
                 if pcm_clock_started:
                     now = time.monotonic()
-                    if now < next_delivery and self._icecast_pipe_stop.wait(
+                    reserve_bytes = observed_queue_bytes()
+                    refill_immediately = bool(
+                        reserve_bytes is not None
+                        and reserve_bytes < _ICECAST_PIPE_LOW_WATER_BYTES
+                    )
+                    if (
+                        not refill_immediately
+                        and now < next_delivery
+                        and self._icecast_pipe_stop.wait(
                         next_delivery - now
+                        )
                     ):
                         break
                     if not self._generation_is_current(generation):
@@ -1306,22 +1338,34 @@ class StationRuntime:
                 bytes_written += len(chunk)
                 delivered_at = time.monotonic()
                 frame_seconds = len(chunk) / _PCM_BYTES_PER_SECOND
-                if startup_reserve_remaining > 0:
-                    startup_reserve_remaining -= 1
-                    if startup_reserve_remaining == 0:
-                        pcm_clock_started = True
-                        next_delivery = delivered_at + frame_seconds
-                elif not pcm_clock_started:
+                startup_buffered_bytes += len(chunk)
+                if startup_buffered_bytes < _ICECAST_PIPE_TARGET_RESERVE_BYTES:
+                    continue
+                if not pcm_clock_started:
                     pcm_clock_started = True
                     next_delivery = delivered_at + frame_seconds
-                else:
-                    # Preserve the long-term PCM phase after ordinary scheduler
-                    # jitter, but permit only one frame of catch-up after a
-                    # genuinely late Windows scheduling quantum.
-                    next_delivery = max(
-                        next_delivery + frame_seconds,
-                        delivered_at,
+                    continue
+
+                queue_correction = 0.0
+                queued_bytes = observed_queue_bytes()
+                if queued_bytes is not None:
+                    reserve_error = (
+                        _ICECAST_PIPE_TARGET_RESERVE_BYTES - queued_bytes
+                    ) / _ICECAST_PIPE_TARGET_RESERVE_BYTES
+                    queue_correction = max(
+                        -_ICECAST_PIPE_SERVO_MAX_CORRECTION,
+                        min(
+                            _ICECAST_PIPE_SERVO_MAX_CORRECTION,
+                            reserve_error * _ICECAST_PIPE_SERVO_MAX_CORRECTION,
+                        ),
                     )
+                corrected_frame_seconds = frame_seconds * (1.0 - queue_correction)
+                # Preserve long-term phase after scheduler jitter, permitting
+                # only one frame of catch-up after a late Windows quantum.
+                next_delivery = max(
+                    next_delivery + corrected_frame_seconds,
+                    delivered_at,
+                )
                 now = delivered_at
                 if now - last_log >= 5.0:
                     _log.debug(

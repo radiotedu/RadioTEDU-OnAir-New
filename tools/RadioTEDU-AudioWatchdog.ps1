@@ -547,17 +547,23 @@ try {
         Write-WatchdogLog $message
         exit 0
     }
-    # A source can keep accepting local PCM while its public mount has vanished
-    # or stopped serving listeners.  After two failed public probes and a
-    # responsive origin, re-register every affected station even when the local
-    # transport heartbeat still looks healthy.  The repair cooldown below
-    # prevents source-owner churn; a global origin outage was already excluded
-    # by Test-OriginResponsive.
+    # Public volume probes are valuable evidence, but their FFmpeg decoder can
+    # time out transiently on a busy origin. The station sink now probes mount
+    # presence and re-registers its own source. Restart a whole worker only when
+    # that local transport evidence also reports unhealthy.
     $locallyUnhealthyFailed = @(Get-RepairableStationIds $secondFailed)
     $publicOnlyFailed = @(
         $secondFailed | Where-Object { $locallyUnhealthyFailed -notcontains [int]$_ }
     )
-    $repairableFailed = @($secondFailed)
+    $repairableFailed = @($locallyUnhealthyFailed)
+    if ($repairableFailed.Count -eq 0 -and -not $profileRepair) {
+        Send-Report "transient" "Public audibility probe disagreed with healthy source transport; worker restart suppressed." $publicOnlyFailed $true
+        Write-WatchdogLog (
+            "Public-only probe disagreement stations={0}; healthy workers were preserved." -f
+            ($publicOnlyFailed -join ",")
+        )
+        exit 0
+    }
     if (Test-RepairCooldown) {
         Send-Report "cooldown" "Confirmed public audio failure, but the 15-minute successful-repair cooldown prevented a loop." $repairableFailed (-not $profileRepair)
         Write-WatchdogLog "Confirmed public audio failure suppressed by 15-minute successful-repair cooldown."
@@ -566,7 +572,7 @@ try {
 
     if ($publicOnlyFailed.Count -gt 0) {
         Write-WatchdogLog (
-            "Confirmed public-only failure stations={0}; forcing source re-registration." -f
+            "Public-only probe disagreement stations={0}; healthy workers were preserved." -f
             ($publicOnlyFailed -join ",")
         )
     }
@@ -577,6 +583,13 @@ try {
     }
     if (-not [bool]$repair.ok) {
         throw "Repair API returned an incomplete result."
+    }
+    $restartedCount = @($repair.restarted).Count
+    $deferredCount = @($repair.deferred).Count
+    if ($restartedCount -eq 0 -and $deferredCount -gt 0 -and -not $profileRepair) {
+        Send-Report "transient" "Healthy source transport recovered while public verification was running; worker restart suppressed." $publicOnlyFailed $true
+        Write-WatchdogLog "Healthy source transport recovered before repair; worker restart suppressed."
+        exit 0
     }
     Start-Sleep -Seconds 15
     $finalSnapshot = Invoke-WatchdogApi -Method GET -Path "/api/watchdog/status"

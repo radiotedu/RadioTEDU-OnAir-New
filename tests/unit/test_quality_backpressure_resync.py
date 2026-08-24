@@ -90,7 +90,7 @@ class QualityBackpressureResyncTests(unittest.TestCase):
         old_chunks = 0
         while True:
             try:
-                sink._pcm_queue.put_nowait(f"stale-{old_chunks}".encode())
+                sink._pcm_queue.put_nowait(b"s" * 4096)
                 old_chunks += 1
             except queue.Full:
                 break
@@ -104,14 +104,18 @@ class QualityBackpressureResyncTests(unittest.TestCase):
         retained = []
         while not sink._pcm_queue.empty():
             retained.append(sink._pcm_queue.get_nowait())
-        self.assertEqual(len(retained), 96)
+        self.assertLessEqual(sum(map(len, retained)), 3 * 48000 * 2 * 2 + 4096)
+        self.assertGreaterEqual(
+            sum(map(len, retained)),
+            3 * 48000 * 2 * 2 - 4096,
+        )
         self.assertEqual(retained[-1], b"latest-program-clock")
         self.assertNotEqual(retained[0], b"stale-0")
         snapshot = sink.health_snapshot()
         self.assertTrue(snapshot["writer_backpressured"])
         self.assertIsNotNone(snapshot["writer_backpressure_age_seconds"])
         self.assertEqual(snapshot["pcm_queue_capacity_chunks"], old_chunks)
-        self.assertEqual(snapshot["dropped_pcm_chunks"], old_chunks - 95)
+        self.assertEqual(snapshot["dropped_pcm_chunks"], old_chunks - len(retained) + 1)
 
     def test_source_retries_do_not_exhaust_after_backoff_sequence(self):
         attempts = []

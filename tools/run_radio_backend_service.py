@@ -5,6 +5,7 @@ import sys
 import asyncio
 import py_compile
 import shutil
+import ctypes
 from pathlib import Path
 
 
@@ -30,6 +31,23 @@ _STAGED_UPDATE_FILES = (
     "app/db.py",
     "app/repositories/station_output_repo.py",
 )
+
+
+def set_above_normal_priority() -> bool:
+    """Persist the broadcast supervisor's CPU priority for every service start."""
+
+    if sys.platform != "win32":
+        return False
+    above_normal_priority_class = 0x00008000
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+        kernel32.SetPriorityClass.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        kernel32.SetPriorityClass.restype = ctypes.c_bool
+        handle = kernel32.GetCurrentProcess()
+        return bool(kernel32.SetPriorityClass(handle, above_normal_priority_class))
+    except (AttributeError, OSError):
+        return False
 
 
 def _service_data_root() -> Path:
@@ -157,6 +175,7 @@ def configure_environment(repository_root: Path) -> dict[str, str]:
 
 
 def main() -> int:
+    set_above_normal_priority()
     repository_root = Path(__file__).resolve().parents[1]
     apply_pending_staged_update(repository_root, _service_data_root())
     configure_environment(repository_root)

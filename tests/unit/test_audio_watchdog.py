@@ -33,12 +33,47 @@ def test_repair_restarts_only_selected_station(monkeypatch):
     monkeypatch.setattr("app.api.runtime.operator_start_runtime_loop", _start)
     service = AudioWatchdogService()
     monkeypatch.setattr(service, "snapshot", lambda: {"managed_profiles_ok": True})
+    monkeypatch.setattr(service, "_runtime_snapshot", lambda _station_id: {"running": False})
 
     result = service.repair(station_ids=[8, 8], repair_managed_profiles=False)
 
     assert result["ok"] is True
     assert calls == [("stop", 8), ("start", 8)]
     assert [item["station_id"] for item in result["restarted"]] == [8]
+
+
+def test_repair_preserves_worker_when_public_probe_disagrees_with_healthy_source(
+    monkeypatch,
+):
+    calls = []
+    monkeypatch.setattr(
+        "app.api.runtime.operator_stop_runtime",
+        lambda station_id: calls.append(("stop", station_id)),
+    )
+    service = AudioWatchdogService()
+    monkeypatch.setattr(service, "snapshot", lambda: {"managed_profiles_ok": True})
+    monkeypatch.setattr(
+        service,
+        "_runtime_snapshot",
+        lambda _station_id: {
+            "running": True,
+            "worker_running": True,
+            "program_running": True,
+            "output_running": True,
+            "mount_healthy": True,
+        },
+    )
+
+    result = service.repair(station_ids=[8], repair_managed_profiles=False)
+
+    assert calls == []
+    assert result["restarted"] == []
+    assert result["deferred"] == [
+        {
+            "station_id": 8,
+            "reason": "public_probe_disagreed_with_healthy_source",
+        }
+    ]
 
 
 def test_repair_rejects_unknown_station_id():
@@ -98,12 +133,14 @@ def test_watchdog_report_accepts_only_watchdog_token(client, monkeypatch):
     assert response.json() == {"status": "ok"}
 
 
-def test_public_only_failure_forces_source_reregistration():
+def test_public_only_failure_preserves_healthy_source_worker():
     script = WATCHDOG_SCRIPT.read_text(encoding="utf-8")
 
-    assert "$repairableFailed = @($secondFailed)" in script
-    assert "forcing source re-registration" in script
-    assert "healthy local sources were not restarted" not in script
+    assert "$repairableFailed = @($locallyUnhealthyFailed)" in script
+    assert "healthy workers were preserved" in script
+    assert "$deferredCount -gt 0" in script
+    assert "recovered before repair; worker restart suppressed" in script
+    assert "forcing source re-registration" not in script
 
 
 def test_repair_cooldown_is_saved_only_after_final_verification():

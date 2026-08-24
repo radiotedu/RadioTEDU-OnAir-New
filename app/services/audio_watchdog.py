@@ -230,6 +230,7 @@ class AudioWatchdogService:
                 )
 
         restarted = []
+        deferred = []
         errors = []
         if selected:
             from app.api.runtime import (
@@ -239,6 +240,21 @@ class AudioWatchdogService:
             )
 
             for station_id in selected:
+                runtime = self._runtime_snapshot(station_id)
+                if (
+                    runtime.get("running")
+                    and runtime.get("worker_running")
+                    and runtime.get("program_running")
+                    and runtime.get("output_running")
+                    and runtime.get("mount_healthy") is True
+                ):
+                    deferred.append(
+                        {
+                            "station_id": station_id,
+                            "reason": "public_probe_disagreed_with_healthy_source",
+                        }
+                    )
+                    continue
                 try:
                     operator_stop_runtime(station_id)
                     status = operator_start_runtime_loop(station_id, RuntimeLoopStartPayload())
@@ -255,6 +271,7 @@ class AudioWatchdogService:
         return {
             "ok": not errors,
             "restarted": restarted,
+            "deferred": deferred,
             "managed_profile_repairs": profile_results,
             "errors": errors,
             "snapshot": self.snapshot(),

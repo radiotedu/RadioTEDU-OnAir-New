@@ -200,7 +200,7 @@ class MultiQualityRuntimeTests(unittest.TestCase):
     def test_pcm_pipe_phase_locks_after_small_startup_reserve(self):
         class ChunkedStdout:
             def __init__(self):
-                self.remaining = 68
+                self.remaining = 286
 
             def read(self, _size):
                 if self.remaining <= 0:
@@ -264,7 +264,7 @@ class MultiQualityRuntimeTests(unittest.TestCase):
             places=6,
         )
         self.assertTrue(
-            all(len(sink.chunks) == 68 for sink in _FakeSink.instances)
+            all(len(sink.chunks) == 286 for sink in _FakeSink.instances)
         )
 
     def test_runtime_silence_floor_skips_self_clocked_icecast_queues(self):

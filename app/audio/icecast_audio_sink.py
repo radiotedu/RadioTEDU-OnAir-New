@@ -37,6 +37,7 @@ _PCM_PROGRAMME_START_MAX_WAIT_SECONDS = 0.25
 # sibling mounts to underrun.
 _PCM_LIVE_RESYNC_CHUNKS = 96
 _PCM_BYTES_PER_SECOND = 48_000 * 2 * 2
+_PCM_LIVE_RESYNC_BYTES = 3 * _PCM_BYTES_PER_SECOND
 _PCM_CONTINUITY_CHUNK_BYTES = 4 * 1024
 _PCM_CONTINUITY_INTERVAL_SECONDS = (
     _PCM_CONTINUITY_CHUNK_BYTES / _PCM_BYTES_PER_SECOND
@@ -151,7 +152,10 @@ def probe_icecast_mount(cfg: StationPipelineConfig, timeout: float = 2.0) -> boo
             or content_type in {"application/ogg", "video/ogg"}
         ):
             return False
-        return bool(response.read(1))
+        # Header completion is the authoritative mount-presence signal. AAC
+        # streaming responses are intentionally endless and small encoders may
+        # not yield a body byte inside this short control-plane timeout.
+        return True
     except (OSError, http.client.HTTPException, ssl.SSLError):
         return False
     finally:
@@ -193,9 +197,10 @@ class IcecastAudioSink:
         self._probe_interval_sec = max(0.05, float(probe_interval_sec))
         self._probe_warmup_sec = max(0.0, float(probe_warmup_sec))
         self._probe_failure_threshold = max(1, int(probe_failure_threshold))
-        # Kept as a compatibility argument for callers/tests. Listener probes
-        # are evidence only and never trigger a source teardown.
-        del reconnect_failure_threshold
+        self._reconnect_failure_threshold = max(
+            self._probe_failure_threshold,
+            int(reconnect_failure_threshold),
+        )
         self._source_factory = source_factory
         self._initial_connect_spread_sec = max(
             0.0, float(initial_connect_spread_sec)
@@ -321,14 +326,18 @@ class IcecastAudioSink:
                     # The caller will retry on the next PCM frame after the
                     # encoder writer makes room.
                     return False
-            # This mount is already more than ten seconds behind.  Resync only
-            # this failed branch to the newest programme window.  Waiting here
-            # would stall every sibling mount because station fan-out is
-            # intentionally serialized to preserve PCM ordering.
+            # This mount is already far behind. Resync only this failed branch
+            # to a byte-measured three-second live window; chunk counts vary by
+            # 4x on Windows and previously caused unpredictable song cuts.
             dropped = 0
-            while self._pcm_queue.qsize() >= _PCM_LIVE_RESYNC_CHUNKS:
+            queued_bytes = self._queued_pcm_bytes()
+            while (
+                queued_bytes > _PCM_LIVE_RESYNC_BYTES
+                or self._pcm_queue.full()
+            ):
                 try:
-                    self._pcm_queue.get_nowait()
+                    stale = self._pcm_queue.get_nowait()
+                    queued_bytes -= len(stale)
                     dropped += 1
                 except queue.Empty:
                     break
@@ -345,6 +354,7 @@ class IcecastAudioSink:
         return True
 
     def health_snapshot(self) -> dict:
+        queued_pcm_bytes = self._queued_pcm_bytes()
         with self._probe_lock, self._writer_lock, self._stderr_lock:
             process_running = bool(
                 self._process and self._process.poll() is None
@@ -394,6 +404,11 @@ class IcecastAudioSink:
                     else round(backpressure_age, 3)
                 ),
                 "queued_pcm_chunks": int(self._pcm_queue.qsize()),
+                "queued_pcm_bytes": int(queued_pcm_bytes),
+                "queued_pcm_seconds": round(
+                    queued_pcm_bytes / _PCM_BYTES_PER_SECOND,
+                    3,
+                ),
                 "pcm_queue_capacity_chunks": int(self._pcm_queue_capacity_chunks),
                 "dropped_pcm_chunks": int(self._writer_dropped_chunks),
                 "continuity_silence_chunks": int(self._writer_silence_chunks),
@@ -480,6 +495,25 @@ class IcecastAudioSink:
         while self._pcm_queue.qsize() > keep:
             try:
                 self._pcm_queue.get_nowait()
+                dropped += 1
+            except queue.Empty:
+                break
+        if dropped:
+            with self._writer_lock:
+                self._writer_dropped_chunks += dropped
+                self._writer_backpressured = True
+                if self._writer_backpressure_started_monotonic is None:
+                    self._writer_backpressure_started_monotonic = time.monotonic()
+        return dropped
+
+    def _trim_pcm_queue_to_latest_bytes(self, maximum_bytes: int) -> int:
+        maximum = max(_PCM_CONTINUITY_CHUNK_BYTES, int(maximum_bytes))
+        dropped = 0
+        queued_bytes = self._queued_pcm_bytes()
+        while queued_bytes > maximum:
+            try:
+                stale = self._pcm_queue.get_nowait()
+                queued_bytes -= len(stale)
                 dropped += 1
             except queue.Empty:
                 break
@@ -707,7 +741,7 @@ class IcecastAudioSink:
                     # A reconnect creates a fresh public stream clock. Keep
                     # only the newest live reserve so the mount returns near
                     # the current programme instead of staying far behind.
-                    self._trim_pcm_queue_to_latest(_PCM_LIVE_RESYNC_CHUNKS)
+                    self._trim_pcm_queue_to_latest_bytes(_PCM_LIVE_RESYNC_BYTES)
                     command = build_ffmpeg_encoded_sink_cmd(
                         effective_cfg, self.ffmpeg_bin
                     )
@@ -766,10 +800,15 @@ class IcecastAudioSink:
                         delay_index = 0
                     self._close_encoder_connection()
                 base_delay = delays[min(delay_index, len(delays) - 1)]
-                retry_delay = base_delay + _mount_spread_seconds(
-                    cfg,
-                    _retry_spread_window_seconds(base_delay),
-                )
+                if delivered_this_connection:
+                    # A previously healthy single mount needs prompt recovery,
+                    # not the broad cold-start spread used for an origin outage.
+                    retry_delay = 0.5 + _mount_spread_seconds(cfg, 1.0)
+                else:
+                    retry_delay = base_delay + _mount_spread_seconds(
+                        cfg,
+                        _retry_spread_window_seconds(base_delay),
+                    )
                 if self._writer_stop.wait(retry_delay):
                     return
                 delay_index += 1
@@ -807,6 +846,7 @@ class IcecastAudioSink:
                     healthy = bool(self._mount_probe(cfg))
                 except Exception:
                     healthy = False
+                request_reconnect = False
                 with self._probe_lock:
                     if healthy:
                         self._probe_failures = 0
@@ -815,6 +855,24 @@ class IcecastAudioSink:
                         self._probe_failures += 1
                         if self._probe_failures >= self._probe_failure_threshold:
                             self._mount_healthy = False
+                        request_reconnect = (
+                            self._probe_failures
+                            >= self._reconnect_failure_threshold
+                            and self._probe_failures
+                            % self._reconnect_failure_threshold
+                            == 0
+                        )
+                if request_reconnect:
+                    # A listener mount can disappear while the source socket
+                    # still accepts buffered writes. Terminating only the local
+                    # encoder unblocks the connector and re-registers the mount;
+                    # transient probe noise below this threshold remains passive.
+                    proc = self._process
+                    if proc is not None and proc.poll() is None:
+                        try:
+                            proc.terminate()
+                        except Exception:
+                            pass
                 if self._probe_stop.wait(self._probe_interval_sec):
                     return
 

@@ -339,7 +339,10 @@ class ProcessIsolatedStationWorkerManager:
         environment["RADIOTEDU_PROCESS_ISOLATED_WORKERS"] = "0"
         environment["CLEANROOM_OPEN_PANEL"] = "0"
         creation_flags = (
-            int(getattr(subprocess, "CREATE_NO_WINDOW", 0)) if os.name == "nt" else 0
+            int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            | int(getattr(subprocess, "ABOVE_NORMAL_PRIORITY_CLASS", 0))
+            if os.name == "nt"
+            else 0
         )
         process = subprocess.Popen(
             self._child_command(),

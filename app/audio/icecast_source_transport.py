@@ -102,7 +102,10 @@ class IcecastSourceTransport:
                 f"Ice-URL: {_header(getattr(cfg, 'icecast_url', ''))}\r\n"
                 f"Ice-Public: {1 if bool(getattr(cfg, 'icecast_public', True)) else 0}\r\n"
                 f"{bitrate_headers}"
-                "Connection: close\r\n\r\n"
+                # A source PUT is the long-lived stream itself. Advertising
+                # close lets small Icecast-compatible origins retire a mount
+                # while the client still has buffered socket writes.
+                "Connection: keep-alive\r\n\r\n"
             ).encode("utf-8")
             source_socket.sendall(request)
             response = bytearray()
