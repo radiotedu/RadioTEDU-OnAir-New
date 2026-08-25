@@ -187,6 +187,18 @@ For reverse-proxy deployment, place the app behind HTTPS and let the browser rea
 
 See [Quality-output architecture](docs/QUALITY_OUTPUTS_ARCHITECTURE.md), [16-mount operations](docs/16_MOUNT_STREAM_OPERATIONS.md), and [Deterministic operator guide](docs/DETERMINISTIC_OPERATOR_GUIDE.md).
 
+## Portable recovery and macOS
+
+The private recovery workflow can package a consistent database snapshot and
+encrypted portable credentials without committing either to Git. On macOS,
+credentials are re-protected with a per-user key held by Keychain, media paths
+can be translated from the Windows `H:\` root to a selected `/Volumes/...`
+mount, and a LaunchAgent provides login startup and crash restart. AAC streams
+still require a local, non-distributed FFmpeg build exposing `libfdk_aac`.
+
+See [Portable recovery architecture](docs/PORTABLE_RECOVERY.md). Generated
+recovery archives and extracted private directories must never be published.
+
 ## Security and publication boundary
 
 The repository contains source and reviewable configuration only. `.env` files, SQLite databases, JWT material, credential stores, certificates, keys, logs, media libraries, build output, and machine-local service data are excluded. Live secrets remain in the Windows-protected RadioTEDU data root.

@@ -67,6 +67,7 @@ desktop/**/TestResults/
 *.spec
 data/
 media/
+RadioTEDU Situation Room/
 test-results/
 last_build_path.txt
 .test-full-unit.exit

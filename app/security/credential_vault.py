@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import base64
 import ctypes
+import getpass
 import json
 import os
+import secrets
+import subprocess
+import sys
 import threading
 from pathlib import Path
 from typing import Callable
@@ -15,6 +19,9 @@ _CRYPTPROTECT_UI_FORBIDDEN = 0x01
 _CRYPTPROTECT_LOCAL_MACHINE = 0x04
 _DPAPI_SCOPE_ENV = "CLEANROOM_CREDENTIAL_DPAPI_SCOPE"
 _COMPAT_DPAPI_SCOPE_ENV = ""
+_MACOS_KEYCHAIN_SERVICE = "com.radiotedu.onair.credential-vault"
+_MACOS_BLOB_PREFIX = b"RTMAC1"
+_MACOS_AAD = b"RadioTEDU-OnAir-credential-vault-v1"
 
 
 class CredentialVaultError(RuntimeError):
@@ -90,13 +97,104 @@ def _windows_unprotect(data: bytes) -> bytes:
         kernel32.LocalFree(output_blob.pbData)
 
 
-def _default_protect(data: bytes) -> bytes:
-    if os.name != "nt":
-        raise CredentialVaultError(
-            "OS credential protection is unavailable on this platform; "
-            "configure a supported credential provider"
+def _macos_keychain_account() -> str:
+    configured = os.getenv("CLEANROOM_MACOS_KEYCHAIN_ACCOUNT", "").strip()
+    return configured or getpass.getuser() or "radiotedu-onair"
+
+
+def _macos_security(arguments: list[str]) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            ["/usr/bin/security", *arguments],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
         )
-    return _windows_protect(data)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise CredentialVaultError("macOS Keychain could not be accessed") from exc
+
+
+def _macos_master_key() -> bytes:
+    """Load or create the per-user AES key protected by macOS Keychain."""
+
+    account = _macos_keychain_account()
+    lookup = _macos_security(
+        [
+            "find-generic-password",
+            "-a",
+            account,
+            "-s",
+            _MACOS_KEYCHAIN_SERVICE,
+            "-w",
+        ]
+    )
+    encoded = lookup.stdout.strip() if lookup.returncode == 0 else ""
+    if not encoded:
+        encoded = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode("ascii")
+        stored = _macos_security(
+            [
+                "add-generic-password",
+                "-U",
+                "-a",
+                account,
+                "-s",
+                _MACOS_KEYCHAIN_SERVICE,
+                "-w",
+                encoded,
+            ]
+        )
+        if stored.returncode != 0:
+            raise CredentialVaultError("macOS Keychain rejected the credential key")
+    try:
+        key = base64.urlsafe_b64decode(encoded.encode("ascii"))
+    except (ValueError, UnicodeError) as exc:
+        raise CredentialVaultError("macOS Keychain credential key is invalid") from exc
+    if len(key) != 32:
+        raise CredentialVaultError("macOS Keychain credential key has an invalid size")
+    return key
+
+
+def _macos_protect(data: bytes) -> bytes:
+    try:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    except ImportError as exc:
+        raise CredentialVaultError(
+            "The cryptography package is required for macOS credential protection"
+        ) from exc
+    nonce = secrets.token_bytes(12)
+    encrypted = AESGCM(_macos_master_key()).encrypt(nonce, data, _MACOS_AAD)
+    return _MACOS_BLOB_PREFIX + nonce + encrypted
+
+
+def _macos_unprotect(data: bytes) -> bytes:
+    if not data.startswith(_MACOS_BLOB_PREFIX) or len(data) < len(_MACOS_BLOB_PREFIX) + 29:
+        raise CredentialVaultError("macOS credential payload is invalid")
+    try:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        from cryptography.exceptions import InvalidTag
+    except ImportError as exc:
+        raise CredentialVaultError(
+            "The cryptography package is required for macOS credential protection"
+        ) from exc
+    offset = len(_MACOS_BLOB_PREFIX)
+    nonce = data[offset : offset + 12]
+    encrypted = data[offset + 12 :]
+    try:
+        return AESGCM(_macos_master_key()).decrypt(nonce, encrypted, _MACOS_AAD)
+    except InvalidTag as exc:
+        raise CredentialVaultError("macOS credential payload could not be decrypted") from exc
+
+
+def _default_protect(data: bytes) -> bytes:
+    if os.name == "nt":
+        return _windows_protect(data)
+    if sys.platform == "darwin":
+        return _macos_protect(data)
+    raise CredentialVaultError(
+        "OS credential protection is unavailable on this platform; "
+        "configure a supported credential provider"
+    )
 
 
 def _machine_protect(data: bytes) -> bytes:
@@ -109,12 +207,14 @@ def _machine_protect(data: bytes) -> bytes:
 
 
 def _default_unprotect(data: bytes) -> bytes:
-    if os.name != "nt":
-        raise CredentialVaultError(
-            "OS credential protection is unavailable on this platform; "
-            "configure a supported credential provider"
-        )
-    return _windows_unprotect(data)
+    if os.name == "nt":
+        return _windows_unprotect(data)
+    if sys.platform == "darwin":
+        return _macos_unprotect(data)
+    raise CredentialVaultError(
+        "OS credential protection is unavailable on this platform; "
+        "configure a supported credential provider"
+    )
 
 
 def credential_protection_scope(path: str | Path) -> str:

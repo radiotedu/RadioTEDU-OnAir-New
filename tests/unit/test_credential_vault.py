@@ -9,6 +9,8 @@ from app.security.credential_vault import (
     CredentialVaultError,
     credential_protection_scope,
     credential_reference,
+    _macos_protect,
+    _macos_unprotect,
 )
 
 
@@ -232,3 +234,30 @@ def test_recovery_import_protection_failure_leaves_vault_unchanged(tmp_path):
 
     assert path.read_bytes() == before
     assert original.get_secret(existing) == "preserved"
+
+
+def test_macos_keychain_backed_payload_round_trip(monkeypatch):
+    monkeypatch.setattr(
+        "app.security.credential_vault._macos_master_key",
+        lambda: bytes(range(32)),
+    )
+
+    protected = _macos_protect(b"portable-stream-password")
+
+    assert b"portable-stream-password" not in protected
+    assert _macos_unprotect(protected) == b"portable-stream-password"
+
+
+def test_macos_payload_rejects_wrong_key(monkeypatch):
+    monkeypatch.setattr(
+        "app.security.credential_vault._macos_master_key",
+        lambda: bytes(range(32)),
+    )
+    protected = _macos_protect(b"portable-stream-password")
+    monkeypatch.setattr(
+        "app.security.credential_vault._macos_master_key",
+        lambda: bytes(reversed(range(32))),
+    )
+
+    with pytest.raises(CredentialVaultError, match="could not be decrypted"):
+        _macos_unprotect(protected)
