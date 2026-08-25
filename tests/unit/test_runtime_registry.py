@@ -11,14 +11,17 @@ from app.repositories.settings_repo import SettingsRepository
 from app.repositories.station_output_repo import StationOutputRepository
 
 
-def test_station_names_select_expected_genre_processing_profiles():
+def test_station_names_select_one_programme_neutral_processing_profile():
     expected = {
-        "RadioTEDU Classical": "classical",
-        "RadioTEDU Lo-Fi": "lofi",
-        "RadioTEDU Pop": "pop",
-        "RadioTEDU Jazz": "jazz",
-        "RadioTEDU Rock": "rock",
-        "RadioTEDU Energize": "energize",
+        name: "itu_bs1770"
+        for name in (
+            "RadioTEDU Classical",
+            "RadioTEDU Lo-Fi",
+            "RadioTEDU Pop",
+            "RadioTEDU Jazz",
+            "RadioTEDU Rock",
+            "RadioTEDU Energize",
+        )
     }
     assert {
         name: runtime_registry_module._default_processing_profile_for_station(name)

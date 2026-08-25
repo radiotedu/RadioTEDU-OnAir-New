@@ -47,47 +47,38 @@ def test_ffmpeg_command_includes_track_metadata_when_available() -> None:
     assert "196k" in cmd
 
 
-def test_ffmpeg_command_uses_bounded_radio_processing_in_safe_order() -> None:
+def test_ffmpeg_command_uses_itu_ebu_processing_in_safe_order() -> None:
     cfg = _cfg()
     cfg.output_gain_db = 1.5
-    cfg.loudness_target_lufs = -16.0
     cmd = build_ffmpeg_icecast_cmd(cfg, "ffmpeg.exe")
 
     filter_chain = cmd[cmd.index("-af") + 1]
-    assert "highpass=f=30" in filter_chain
-    assert "acompressor=" in filter_chain
-    assert "loudnorm=I=-16.0:TP=-1.5:LRA=7" in filter_chain
-    assert "alimiter=limit=0.841395" in filter_chain
+    assert "highpass=" not in filter_chain
+    assert "acompressor=" not in filter_chain
+    assert "loudnorm=I=-23.0:TP=-1.0:LRA=50" in filter_chain
+    assert "alimiter=limit=0.891251" in filter_chain
     assert "aresample=48000" in filter_chain
     assert filter_chain.index("volume=1.50dB") < filter_chain.index("alimiter=")
     assert filter_chain.index("alimiter=") < filter_chain.index("aresample=48000")
 
 
-def test_genre_profiles_preserve_codec_bitrate_and_shape_dynamics_conservatively() -> None:
-    cases = {
-        "classical": ("highpass=f=20", "LRA=15", None),
-        "jazz": ("highpass=f=25", "LRA=12", "ratio=1.25"),
-        "lofi": ("highpass=f=25", "LRA=10", "ratio=1.5"),
-        "pop": ("highpass=f=30", "LRA=8", "ratio=2.2"),
-        "rock": ("highpass=f=30", "LRA=9", "ratio=1.8"),
-        "energize": ("highpass=f=35", "LRA=7", "ratio=2.6"),
-    }
+def test_legacy_genre_names_resolve_to_one_programme_neutral_standard() -> None:
+    profiles = ("classical", "jazz", "lofi", "pop", "rock", "energize")
 
     baseline = build_ffmpeg_icecast_cmd(_cfg(), "ffmpeg.exe")
     baseline_codec = baseline[baseline.index("-c:a") + 1]
+    baseline_filter_chain = baseline[baseline.index("-af") + 1]
 
-    for profile, (highpass, lra, compressor_marker) in cases.items():
+    for profile in profiles:
         cfg = _cfg()
         cfg.broadcast_processing_profile = profile
-        cfg.loudness_target_lufs = -16.0
         cmd = build_ffmpeg_icecast_cmd(cfg, "ffmpeg.exe")
         filter_chain = cmd[cmd.index("-af") + 1]
 
-        assert highpass in filter_chain
-        assert lra in filter_chain
-        assert ("acompressor=" in filter_chain) is bool(compressor_marker)
-        if compressor_marker:
-            assert compressor_marker in filter_chain
+        assert filter_chain == baseline_filter_chain
+        assert "loudnorm=I=-23.0:TP=-1.0:LRA=50" in filter_chain
+        assert "highpass=" not in filter_chain
+        assert "acompressor=" not in filter_chain
         assert cmd[cmd.index("-b:a") + 1] == "196k"
         assert cmd[cmd.index("-c:a") + 1] == baseline_codec
 
@@ -232,7 +223,7 @@ def test_build_ffmpeg_crossfade_cmd_uses_separate_codecs_for_icecast_and_local_p
     assert "icecast://" in joined
     assert "pipe:1" in joined
     assert "asplit=2[icecast_input][local_out]" in joined
-    assert "[icecast_input]highpass=f=30" in joined
+    assert "[icecast_input]loudnorm=I=-23.0:TP=-1.0:LRA=50" in joined
     assert "-map [local_out]" in joined
     assert " -af " not in joined
     assert "-content_type audio/aac" in joined

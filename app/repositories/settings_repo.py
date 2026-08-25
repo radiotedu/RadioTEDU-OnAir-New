@@ -1,6 +1,8 @@
 DEFAULT_SYSTEM_SETTINGS = {
     "ui_language": "en-US",
     "default_crossfade_seconds": "3.0",
+    "broadcast_processing_profile": "itu_bs1770",
+    "loudness_target_lufs": "-23.0",
     "operation_logs_enabled": "true",
     "auto_scan_on_startup": "false",
     "display_brand_name": "RadioTEDU OnAir",

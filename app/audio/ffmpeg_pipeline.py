@@ -17,6 +17,14 @@ LOCAL_PCM_SAMPLE_RATE = 48000
 LOCAL_PCM_CHANNELS = 2
 LOCAL_MONITOR_INITIAL_BURST_SECONDS = 10.0
 LOCAL_MONITOR_CATCHUP_RATE = 2.0
+# ITU-R BS.1770 defines the loudness/true-peak measurement algorithm.  EBU
+# R128 supplies the operational broadcast target used with it.
+ITU_PROGRAM_LOUDNESS_LUFS = -23.0
+ITU_TRUE_PEAK_DBTP = -1.0
+# BS.1770/R128 does not mandate an LRA target.  FFmpeg's loudnorm filter
+# requires one, so use its maximum to avoid imposing unrequested compression.
+ITU_LOUDNESS_RANGE_LU = 50
+ITU_TRUE_PEAK_LINEAR = 0.891251
 _TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 _log = logging.getLogger(__name__)
 
@@ -75,124 +83,31 @@ def _pcm_output_args() -> list[str]:
 
 
 def _broadcast_processing_filters(cfg: StationPipelineConfig) -> list[str]:
-    """Return a conservative genre-aware web-radio processing chain.
+    """Return one standards-based processing chain for every station.
 
-    The named profiles deliberately change dynamics, not the artistic EQ of
-    already-mastered music. Every enabled profile removes sub-audible rumble,
-    applies at most gentle programme compression, normalises loudness, and
-    keeps a true-peak safety limiter last. Classical and Jazz retain much
-    wider loudness range than Pop/Energize.
+    ITU-R BS.1770 is programme-neutral: it specifies K-weighted, gated
+    loudness and true-peak measurement, not genre EQ or compressor ratios.
+    EBU R128 adds the -23 LUFS operational target and -1 dBTP ceiling.  Keep
+    crossfades and codecs elsewhere in the pipeline; they are outside the
+    standard and must not alter measurement policy.
     """
 
-    profile = str(
-        getattr(cfg, "broadcast_processing_profile", "balanced") or "balanced"
-    ).strip().lower()
-    profile_settings = {
-        "classical": {
-            "highpass_hz": 20,
-            "compressor": None,
-            "lra": 15,
-            "limiter_release_ms": 80,
-        },
-        "jazz": {
-            "highpass_hz": 25,
-            "compressor": (
-                "acompressor=threshold=0.251:ratio=1.25:attack=40:release=350:"
-                "knee=2.828:makeup=1"
-            ),
-            "lra": 12,
-            "limiter_release_ms": 80,
-        },
-        "lofi": {
-            "highpass_hz": 25,
-            "compressor": (
-                "acompressor=threshold=0.178:ratio=1.5:attack=35:release=400:"
-                "knee=2.828:makeup=1"
-            ),
-            "lra": 10,
-            "limiter_release_ms": 80,
-        },
-        "pop": {
-            "highpass_hz": 30,
-            "compressor": (
-                "acompressor=threshold=0.158:ratio=2.2:attack=15:release=220:"
-                "knee=2.828:makeup=1"
-            ),
-            "lra": 8,
-            "limiter_release_ms": 50,
-        },
-        "rock": {
-            "highpass_hz": 30,
-            "compressor": (
-                "acompressor=threshold=0.178:ratio=1.8:attack=25:release=300:"
-                "knee=2.828:makeup=1"
-            ),
-            "lra": 9,
-            "limiter_release_ms": 60,
-        },
-        "energize": {
-            "highpass_hz": 35,
-            "compressor": (
-                "acompressor=threshold=0.141:ratio=2.6:attack=10:release=180:"
-                "knee=2.828:makeup=1"
-            ),
-            "lra": 7,
-            "limiter_release_ms": 45,
-        },
-        "balanced": {
-            "highpass_hz": 30,
-            "compressor": (
-                "acompressor=threshold=0.125:ratio=2:attack=20:release=250:"
-                "knee=2.828:makeup=1"
-            ),
-            "lra": 7,
-            "limiter_release_ms": 50,
-        },
-        "transparent": {
-            "highpass_hz": 20,
-            "compressor": None,
-            "lra": 15,
-            "limiter_release_ms": 80,
-        },
-        "dense": {
-            "highpass_hz": 35,
-            "compressor": (
-                "acompressor=threshold=0.100:ratio=3:attack=20:release=250:"
-                "knee=2.828:makeup=1"
-            ),
-            "lra": 7,
-            "limiter_release_ms": 45,
-        },
-    }
-    if profile not in {*profile_settings, "off"}:
-        profile = "balanced"
-
-    filters: list[str] = []
-    if profile != "off":
-        selected = profile_settings[profile]
-        filters.append(f"highpass=f={int(selected['highpass_hz'])}")
-        compressor = selected.get("compressor")
-        if compressor:
-            filters.append(str(compressor))
-    else:
-        selected = {"lra": 7, "limiter_release_ms": 50}
-
     loudness_target = getattr(cfg, "loudness_target_lufs", None)
-    if loudness_target is not None:
-        target = max(-24.0, min(-9.0, float(loudness_target)))
-        filters.append(
-            f"loudnorm=I={target:.1f}:TP=-1.5:LRA={int(selected['lra'])}"
-        )
-
-    if profile != "off":
-        # -1.5 dBTP in linear amplitude.  Disabling auto-level prevents the
-        # limiter from undoing the headroom it is meant to guarantee.
-        filters.append(
-            "alimiter=limit=0.841395:attack=5:"
-            f"release={int(selected['limiter_release_ms'])}:"
+    target = (
+        ITU_PROGRAM_LOUDNESS_LUFS
+        if loudness_target is None
+        else max(-24.0, min(-9.0, float(loudness_target)))
+    )
+    return [
+        (
+            f"loudnorm=I={target:.1f}:TP={ITU_TRUE_PEAK_DBTP:.1f}:"
+            f"LRA={ITU_LOUDNESS_RANGE_LU}"
+        ),
+        (
+            f"alimiter=limit={ITU_TRUE_PEAK_LINEAR:.6f}:attack=5:release=80:"
             "level=false:latency=true"
-        )
-    return filters
+        ),
+    ]
 
 
 def _icecast_filter_chain(cfg: StationPipelineConfig) -> list[str]:

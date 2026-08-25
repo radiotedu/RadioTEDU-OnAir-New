@@ -46,6 +46,9 @@ _DEFAULT_LIVE_STATUS = {
 }
 _TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 _BROADCAST_PROCESSING_PROFILES = {
+    "itu_bs1770",
+    # Legacy values remain readable so restored databases continue to start;
+    # the FFmpeg pipeline now maps every value to the same standards chain.
     "balanced",
     "classical",
     "dense",
@@ -72,22 +75,10 @@ def _local_playback_disabled() -> bool:
 
 
 def _default_processing_profile_for_station(station_name: str) -> str:
-    """Choose a conservative dynamics profile from the station identity."""
+    """Use one programme-neutral ITU/EBU profile for every station."""
 
-    name = str(station_name or "").strip().lower().replace("-", "")
-    for marker, profile in (
-        ("classical", "classical"),
-        ("lofi", "lofi"),
-        ("jazz", "jazz"),
-        ("pop", "pop"),
-        ("rock", "rock"),
-        ("energize", "energize"),
-        ("energetic", "energize"),
-        ("electronic", "energize"),
-    ):
-        if marker in name:
-            return profile
-    return "balanced"
+    del station_name
+    return "itu_bs1770"
 
 
 def _normalize_program_music_mode(raw) -> str:
@@ -1251,9 +1242,14 @@ class StationRuntimeRegistry:
         except (TypeError, ValueError):
             resolved_crossfade_seconds = 0.0
         try:
-            loudness_target_lufs = float(station_settings.get("loudness_target_lufs", -16.0))
+            loudness_target_lufs = float(
+                station_settings.get(
+                    "loudness_target_lufs",
+                    settings.get("loudness_target_lufs", -23.0),
+                )
+            )
         except (TypeError, ValueError):
-            loudness_target_lufs = -16.0
+            loudness_target_lufs = -23.0
         system_processing_profile = str(
             settings.get("broadcast_processing_profile", "") or ""
         ).strip().lower()
@@ -1270,7 +1266,7 @@ class StationRuntimeRegistry:
             or default_processing_profile
         ).strip().lower()
         if processing_profile not in _BROADCAST_PROCESSING_PROFILES:
-            processing_profile = "balanced"
+            processing_profile = "itu_bs1770"
         stream_features = _station_stream_feature_settings(
             station_settings,
             settings,
