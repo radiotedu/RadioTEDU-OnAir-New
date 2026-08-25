@@ -1306,6 +1306,9 @@ class StationRuntimeRegistry:
                 int(station_id) == 2
                 or str(row["icecast_mount"] or "").strip().lower().startswith("/lofi")
                 or "lo-fi" in station_name.lower()
+                or _truthy(
+                    station_settings.get("metadata_suppressed", "false"), False
+                )
             ),
             **stream_features,
         )

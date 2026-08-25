@@ -389,6 +389,15 @@ class IcecastAudioSink:
                     mount_healthy = last_network_write_age <= 10.0
                 else:
                     mount_healthy = None
+            # Writer/network stalls must dominate a successful HTTP probe. A
+            # half-open Icecast source can still return 200 while the writer
+            # has been dead for minutes (last_write_age ~10k).
+            # Without this, watchdog defers repair for hours.
+            if mount_healthy is not None:
+                if self._writer_failed or self._network_failed:
+                    mount_healthy = False
+                elif last_write_age is not None and last_write_age > 10.0:
+                    mount_healthy = False
             return {
                 "process_running": process_running,
                 "mount_healthy": mount_healthy,

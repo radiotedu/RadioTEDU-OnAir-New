@@ -439,6 +439,49 @@ def test_service_policy_disables_local_playback_without_disabling_icecast(
     assert fake.last_cfg.local_output_enabled is False
 
 
+def test_station_setting_suppresses_primary_stream_metadata(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLEANROOM_DB_PATH", str(tmp_path / "cleanroom.db"))
+    init_db()
+    conn = get_connection()
+    conn.execute("INSERT INTO stations (id, name) VALUES (10, 'RadioTEDU Situation Room')")
+    StationOutputRepository(conn).upsert(
+        station_id=10,
+        local_output_enabled=False,
+        output_device_id="",
+        icecast_enabled=True,
+        icecast_host="127.0.0.1",
+        icecast_port=11154,
+        icecast_mount="/situation",
+        icecast_user="source",
+        icecast_password="test-password",
+        stream_codec_profile="aac_low_192",
+        stream_bitrate_kbps=192,
+    )
+    SettingsRepository(conn).upsert_station(10, {"metadata_suppressed": "true"})
+    conn.close()
+
+    fake = _FakeRuntime()
+    captured = {"called": False}
+
+    def _capture(_cfg, **_kwargs):
+        captured["called"] = True
+        return True
+
+    monkeypatch.setattr(runtime_registry_module, "_send_icecast_metadata", _capture)
+    reg = StationRuntimeRegistry(runtime_factory=lambda: fake)
+    reg.start_station(
+        10,
+        input_uri="C:/music/situation.mp3",
+        stream_title="Private title",
+        stream_artist="Private artist",
+    )
+
+    assert fake.last_cfg.metadata_suppressed is True
+    # The registry still schedules its metadata worker, but the real sender and
+    # FFmpeg command builder both honor this flag and emit nothing publicly.
+    assert captured["called"] is True
+
+
 def test_now_playing_hides_standalone_recording_placeholder():
     assert runtime_registry_module._compose_now_playing(
         "Song", "Artist", "[standalone recordings]"

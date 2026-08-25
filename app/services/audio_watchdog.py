@@ -21,6 +21,7 @@ WATCHDOG_STATIONS = {
     9: ("energize", "http://stream.radiotedu.com:11154/energize"),
     4: ("pop", "http://stream.radiotedu.com:11154/radio"),
     8: ("rock", "http://stream.radiotedu.com:11154/rock"),
+    10: ("situation", "http://stream.radiotedu.com:11154/situation"),
 }
 CAMPAIGN_STATION_IDS = (1, 4, 8, 9)
 
@@ -78,6 +79,11 @@ class AudioWatchdogService:
                 "output_running": bool(payload.get("icecast_sink_running")),
                 "mount_healthy": mount.get("mount_healthy"),
                 "encoder_error_count": int(mount.get("encoder_error_count") or 0),
+                "writer_failed": bool(mount.get("writer_failed")),
+                "network_failed": bool(mount.get("network_failed")),
+                "writer_backpressured": bool(mount.get("writer_backpressured")),
+                "last_write_age": mount.get("last_write_age_seconds"),
+                "writer_backpressure_age": mount.get("writer_backpressure_age_seconds"),
             }
         except Exception as exc:
             _log.warning("Watchdog runtime snapshot failed station=%s: %s", station_id, exc)
@@ -241,12 +247,21 @@ class AudioWatchdogService:
 
             for station_id in selected:
                 runtime = self._runtime_snapshot(station_id)
+                # Writer/network stalls must not be deferred as "healthy source"
+                # even if the HTTP probe still sees a buffered Icecast mount.
+                last_write_age = runtime.get("last_write_age")
+                writer_healthy = (
+                    not runtime.get("writer_failed")
+                    and not runtime.get("network_failed")
+                    and (last_write_age is None or float(last_write_age) <= 10.0)
+                )
                 if (
                     runtime.get("running")
                     and runtime.get("worker_running")
                     and runtime.get("program_running")
                     and runtime.get("output_running")
                     and runtime.get("mount_healthy") is True
+                    and writer_healthy
                 ):
                     deferred.append(
                         {

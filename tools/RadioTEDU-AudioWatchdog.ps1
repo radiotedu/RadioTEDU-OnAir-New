@@ -35,10 +35,11 @@ $mounts = @(
     [pscustomobject]@{ StationId = 4; Genre = "pop"; Url = "$listenerRoot/radio" },
     [pscustomobject]@{ StationId = 4; Genre = "pop-low"; Url = "$listenerRoot/radio-low" },
     [pscustomobject]@{ StationId = 8; Genre = "rock"; Url = "$listenerRoot/rock" },
-    [pscustomobject]@{ StationId = 8; Genre = "rock-low"; Url = "$listenerRoot/rock-low" }
+    [pscustomobject]@{ StationId = 8; Genre = "rock-low"; Url = "$listenerRoot/rock-low" },
+    [pscustomobject]@{ StationId = 10; Genre = "situation"; Url = "$listenerRoot/situation" }
 )
 # English/French AI radio is hosted by the separate Services computer.  This
-# streaming PC intentionally owns and monitors only the 14 music mounts.
+# streaming PC intentionally owns and monitors the 15 configured public mounts.
 $auxiliaryMounts = @()
 
 if (-not (Test-Path -LiteralPath $FFmpegPath -PathType Leaf)) {
@@ -509,8 +510,8 @@ try {
     $firstFailed = @($firstAudio | Where-Object { -not ($_.decoded -and $_.audible) } | ForEach-Object { [int]$_.station_id } | Sort-Object -Unique)
     $firstAuxiliaryFailed = @($firstAuxiliaryAudio | Where-Object { -not ($_.decoded -and $_.audible) } | ForEach-Object { [int]$_.station_id })
     if ($firstFailed.Count -eq 0 -and $firstAuxiliaryFailed.Count -eq 0 -and $firstProfilesHealthy) {
-        Send-Report "ok" "All 14 public music mounts decoded as audible and managed profiles were healthy." @() $true
-        Write-WatchdogLog "OK: 14 public music mounts audible; managed profiles healthy."
+        Send-Report "ok" "All public mounts decoded as audible and managed profiles were healthy." @() $true
+        Write-WatchdogLog "OK: public mounts audible; managed profiles healthy."
         exit 0
     }
 
