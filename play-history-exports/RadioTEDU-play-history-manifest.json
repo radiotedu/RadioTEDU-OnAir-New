@@ -1,0 +1,251 @@
+{
+  "daily": [
+    {
+      "date": "2026-08-29",
+      "events": {
+        "checksum": "9118c3bd62215f73df046a15ec0779f2ff4f0e0dd4775a694194def45320e326",
+        "path": "C:\\Users\\tedu\\Desktop\\RadioTEDU Play History\\daily\\2026-08-29-all-radios.csv",
+        "record_count": 2500
+      },
+      "mesam_station_forms": [
+        {
+          "checksum": "ba47084508ab168df4701f2033c8a658982262a21c1bf79698870f9fa00f0c18",
+          "path": "C:\\Users\\tedu\\Desktop\\RadioTEDU Play History\\licensor\\MESAM\\2026-08-29-station-1-radio-form.csv",
+          "record_count": 322,
+          "station_id": 1,
+          "station_name": "RadioTEDU Classical"
+        },
+        {
+          "checksum": "8470c18883a1f89dcc4bc0d4ed2a0c669f0e52b2d033367452636a683229a6ad",
+          "path": "C:\\Users\\tedu\\Desktop\\RadioTEDU Play History\\licensor\\MESAM\\2026-08-29-station-2-radio-form.csv",
+          "record_count": 362,
+          "station_id": 2,
+          "station_name": "RadioTEDU Lo-Fi"
+        },
+        {
+          "checksum": "db0db85163ba97112aa8b644eb48eecc8d3c2ff736fe2aebfd5d608ed06086f4",
+          "path": "C:\\Users\\tedu\\Desktop\\RadioTEDU Play History\\licensor\\MESAM\\2026-08-29-station-4-radio-form.csv",
+          "record_count": 313,
+          "station_id": 4,
+          "station_name": "RadioTEDU Pop"
+        },
+        {
+          "checksum": "f7d61fedd12b15a7adc7dabc11b8711217a0cba9373529c8293bfed797cd54e8",
+          "path": "C:\\Users\\tedu\\Desktop\\RadioTEDU Play History\\licensor\\MESAM\\2026-08-29-station-5-radio-form.csv",
+          "record_count": 223,
+          "station_id": 5,
+          "station_name": "RadioTEDU Jazz"
+        },
+        {
+          "checksum": "f0435f5243351e15499169de4cd5b91535c18c85d99d32d032bfe90df286771a",
+          "path": "C:\\Users\\tedu\\Desktop\\RadioTEDU Play History\\licensor\\MESAM\\2026-08-29-station-8-radio-form.csv",
+          "record_count": 259,
+          "station_id": 8,
+          "station_name": "RadioTEDU Rock"
+        },
+        {
+          "checksum": "191c2386f2ba5951d3feb58edbaf3c33c9e3be04eebe01ed4b9a0bf23f0b2bd8",
+          "path": "C:\\Users\\tedu\\Desktop\\RadioTEDU Play History\\licensor\\MESAM\\2026-08-29-station-9-radio-form.csv",
+          "record_count": 84,
+          "station_id": 9,
+          "station_name": "RadioTEDU Energize"
+        },
+        {
+          "checksum": "8a70f32cf081aa835c8a9b02a35db77d5dd49997807884dc57024377298bee72",
+          "path": "C:\\Users\\tedu\\Desktop\\RadioTEDU Play History\\licensor\\MESAM\\2026-08-29-station-10-radio-form.csv",
+          "record_count": 238,
+          "station_id": 10,
+          "station_name": "RadioTEDU Situation Room"
+        }
+      ],
+      "play_counts": {
+        "checksum": "b3112f2a3eecc38894b84c2720e5c623d9c90dddca6afc6a509a43c5bf1a703e",
+        "path": "C:\\Users\\tedu\\Desktop\\RadioTEDU Play History\\daily\\2026-08-29-play-counts.csv",
+        "record_count": 1828
+      },
+      "rights_report": {
+        "checksum": "e6eb677047385970565e8b0f2d7b8bff2686141c236df85c5d667ef184c1f134",
+        "path": "C:\\Users\\tedu\\Desktop\\RadioTEDU Play History\\licensor\\2026-08-29-all-radios-rights-report.csv",
+        "record_count": 1801
+      }
+    },
+    {
+      "date": "2026-08-28",
+      "events": {
+        "checksum": "00d9a01088409d6c77b053da059ca9b5a425e0e0a7261ba2d03dc5b63d687471",
+        "path": "C:\\Users\\tedu\\Desktop\\RadioTEDU Play History\\daily\\2026-08-28-all-radios.csv",
+        "record_count": 3155
+      },
+      "mesam_station_forms": [
+        {
+          "checksum": "f51381b5447fdda7c9f9798722c386a24a229f0d21a137d26defe969a269c44b",
+          "path": "C:\\Users\\tedu\\Desktop\\RadioTEDU Play History\\licensor\\MESAM\\2026-08-28-station-1-radio-form.csv",
+          "record_count": 353,
+          "station_id": 1,
+          "station_name": "RadioTEDU Classical"
+        },
+        {
+          "checksum": "19994710a12ab15d6fbe93ff42556cd7afbe0f5064d58e80da51f9002c0b79df",
+          "path": "C:\\Users\\tedu\\Desktop\\RadioTEDU Play History\\licensor\\MESAM\\2026-08-28-station-2-radio-form.csv",
+          "record_count": 468,
+          "station_id": 2,
+          "station_name": "RadioTEDU Lo-Fi"
+        },
+        {
+          "checksum": "5e61d70e06a888a97ec1a6f1b29ea04b753cbb54456f2ce59d3ddffd9995c6fa",
+          "path": "C:\\Users\\tedu\\Desktop\\RadioTEDU Play History\\licensor\\MESAM\\2026-08-28-station-4-radio-form.csv",
+          "record_count": 349,
+          "station_id": 4,
+          "station_name": "RadioTEDU Pop"
+        },
+        {
+          "checksum": "2c0ebfeaeec959fed5fde473d5b0391e2dbd65c17805679a6cb7461754c10b25",
+          "path": "C:\\Users\\tedu\\Desktop\\RadioTEDU Play History\\licensor\\MESAM\\2026-08-28-station-5-radio-form.csv",
+          "record_count": 283,
+          "station_id": 5,
+          "station_name": "RadioTEDU Jazz"
+        },
+        {
+          "checksum": "a1a589c5315d61b1c21c8356b9cf5ab417ab306a6ce3311fddfbfa58d87d5147",
+          "path": "C:\\Users\\tedu\\Desktop\\RadioTEDU Play History\\licensor\\MESAM\\2026-08-28-station-8-radio-form.csv",
+          "record_count": 295,
+          "station_id": 8,
+          "station_name": "RadioTEDU Rock"
+        },
+        {
+          "checksum": "57d53e8f7147f5a7bc6a6a5d35a4f8e0b50878c686170592b22ad074f4ed947a",
+          "path": "C:\\Users\\tedu\\Desktop\\RadioTEDU Play History\\licensor\\MESAM\\2026-08-28-station-9-radio-form.csv",
+          "record_count": 84,
+          "station_id": 9,
+          "station_name": "RadioTEDU Energize"
+        },
+        {
+          "checksum": "0f67ed1e1ac73f453cdbcd57acab483089da3b49f4298c00dd94f1993fb411aa",
+          "path": "C:\\Users\\tedu\\Desktop\\RadioTEDU Play History\\licensor\\MESAM\\2026-08-28-station-10-radio-form.csv",
+          "record_count": 238,
+          "station_id": 10,
+          "station_name": "RadioTEDU Situation Room"
+        }
+      ],
+      "play_counts": {
+        "checksum": "f1bd343e2404316f0eee1fe7bbf1490bd82f9b6cc14f08a750c56b7fbd0421da",
+        "path": "C:\\Users\\tedu\\Desktop\\RadioTEDU Play History\\daily\\2026-08-28-play-counts.csv",
+        "record_count": 2097
+      },
+      "rights_report": {
+        "checksum": "b00bc0745b94fe42f30ca25b1b2800f9bb744d747ace79f881e195287bf91f1b",
+        "path": "C:\\Users\\tedu\\Desktop\\RadioTEDU Play History\\licensor\\2026-08-28-all-radios-rights-report.csv",
+        "record_count": 2070
+      }
+    }
+  ],
+  "daily_alias": {
+    "checksum": "9118c3bd62215f73df046a15ec0779f2ff4f0e0dd4775a694194def45320e326",
+    "path": "C:\\Users\\tedu\\Desktop\\RadioTEDU Play History\\RadioTEDU-play-history-daily.csv",
+    "record_count": 2500
+  },
+  "daily_count_alias": {
+    "checksum": "b3112f2a3eecc38894b84c2720e5c623d9c90dddca6afc6a509a43c5bf1a703e",
+    "path": "C:\\Users\\tedu\\Desktop\\RadioTEDU Play History\\RadioTEDU-play-counts-daily.csv",
+    "record_count": 1828
+  },
+  "daily_rights_alias": {
+    "checksum": "e6eb677047385970565e8b0f2d7b8bff2686141c236df85c5d667ef184c1f134",
+    "path": "C:\\Users\\tedu\\Desktop\\RadioTEDU Play History\\licensor\\RadioTEDU-rights-report-daily.csv",
+    "record_count": 1801
+  },
+  "generated_at_utc": "2026-08-29T18:43:18.672824Z",
+  "integrity": {
+    "hash_versions": {
+      "v1_without_delivered_variants": 3994,
+      "v2": 43682
+    },
+    "record_count": 47676,
+    "station_final_hashes": {
+      "1": "ebae7d26e47e2824bec79a521210cec92f9839288669b0f09bc23ff43ee88941",
+      "10": "a7665ed29a0ced94ebf11ae924c60b4d699913c6317f1e7bf626ed20c3156e33",
+      "2": "b7113e01e4ce3c6fe5ee0c18f743b526325354b03ff95dbaeda6568f096c454b",
+      "4": "0451e8efa4e81b869bd25acf5e857c0848f099093bda6a925ad40e8a4516b1c6",
+      "5": "6be2a151159b58fee069acb7794ba20d2356f1871e6d628ed7154bd1e7c82220",
+      "7": "3003587d96fc615edb4d70e3362e59f8d259544dc6fc1deee298da07c73604f1",
+      "8": "9282a5fb602a7adddbff94ea502f002ac0b9b925b71330e2e79cff05d7043993",
+      "9": "29250b653d8bc96cd1d17c1e7a5a328e84770352b7bf94d66a2bc3b5d047c67a"
+    },
+    "valid": true
+  },
+  "legacy_exports_preserved_at": "C:\\Users\\tedu\\Desktop\\RadioTEDU Play History\\legacy",
+  "source": "RadioTEDU OnAir immutable music_usage_log",
+  "total": {
+    "checksum": "28718eebcb279dc21884034c569137dafb3c778139e3535f3801da374b06b227",
+    "path": "C:\\Users\\tedu\\Desktop\\RadioTEDU Play History\\RadioTEDU-play-history-total.csv",
+    "record_count": 47676
+  },
+  "total_mesam_station_forms": [
+    {
+      "checksum": "9a5218744e68d40711d81fba0a9a3d99786653c80a2cece6f8493105e4587338",
+      "path": "C:\\Users\\tedu\\Desktop\\RadioTEDU Play History\\licensor\\MESAM\\all-time-station-1-radio-form.csv",
+      "record_count": 2522,
+      "station_id": 1,
+      "station_name": "RadioTEDU Classical"
+    },
+    {
+      "checksum": "aa4588dc460e17bb2204fb0a50d18816ca6b6deb9740c2fd32951004d4e52dd1",
+      "path": "C:\\Users\\tedu\\Desktop\\RadioTEDU Play History\\licensor\\MESAM\\all-time-station-2-radio-form.csv",
+      "record_count": 4424,
+      "station_id": 2,
+      "station_name": "RadioTEDU Lo-Fi"
+    },
+    {
+      "checksum": "38f3c62595a254af6c0d6f2cd9f35adab78198e6b427b0bf18e2583714dd9670",
+      "path": "C:\\Users\\tedu\\Desktop\\RadioTEDU Play History\\licensor\\MESAM\\all-time-station-4-radio-form.csv",
+      "record_count": 802,
+      "station_id": 4,
+      "station_name": "RadioTEDU Pop"
+    },
+    {
+      "checksum": "b6be8d4010225960f729618c28660e85de4adbe1b3e19f38ccaee8929174c446",
+      "path": "C:\\Users\\tedu\\Desktop\\RadioTEDU Play History\\licensor\\MESAM\\all-time-station-5-radio-form.csv",
+      "record_count": 2081,
+      "station_id": 5,
+      "station_name": "RadioTEDU Jazz"
+    },
+    {
+      "checksum": "79999b6e41a5c02ac51c9c7bae3500ac73be73fcf3c537a8541fe2a9b882ea1f",
+      "path": "C:\\Users\\tedu\\Desktop\\RadioTEDU Play History\\licensor\\MESAM\\all-time-station-7-radio-form.csv",
+      "record_count": 318,
+      "station_id": 7,
+      "station_name": "RadioTEDU"
+    },
+    {
+      "checksum": "9ba50fde617f942a830de57dd8a093e6d7a7e7c2982d010e2172543b344b82fc",
+      "path": "C:\\Users\\tedu\\Desktop\\RadioTEDU Play History\\licensor\\MESAM\\all-time-station-8-radio-form.csv",
+      "record_count": 1086,
+      "station_id": 8,
+      "station_name": "RadioTEDU Rock"
+    },
+    {
+      "checksum": "3329acdae402a3a9abf0443af66655ddd472deea5a038df26a803b7c4c9a3f70",
+      "path": "C:\\Users\\tedu\\Desktop\\RadioTEDU Play History\\licensor\\MESAM\\all-time-station-9-radio-form.csv",
+      "record_count": 1256,
+      "station_id": 9,
+      "station_name": "RadioTEDU Energize"
+    },
+    {
+      "checksum": "5663f2578551c04f2e702837d70b74c84514334645f2e56b211367c684c68dba",
+      "path": "C:\\Users\\tedu\\Desktop\\RadioTEDU Play History\\licensor\\MESAM\\all-time-station-10-radio-form.csv",
+      "record_count": 357,
+      "station_id": 10,
+      "station_name": "RadioTEDU Situation Room"
+    }
+  ],
+  "total_play_counts": {
+    "checksum": "59f0456872f3d3feee613b43e689f5cc10307e381a3b6718b73714af6d9bbaa8",
+    "path": "C:\\Users\\tedu\\Desktop\\RadioTEDU Play History\\RadioTEDU-play-counts-total.csv",
+    "record_count": 12975
+  },
+  "total_rights_report": {
+    "checksum": "7f99603c4f3d0b2b7d1688379b362574f864d655af1cb48db5dc3ae1c49664d4",
+    "path": "C:\\Users\\tedu\\Desktop\\RadioTEDU Play History\\licensor\\RadioTEDU-rights-report-total.csv",
+    "record_count": 12846
+  }
+}
