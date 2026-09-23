@@ -150,7 +150,7 @@ node --check app\static\onair\app.js
 
 The Windows installer produces `Setup.exe` for either the current user or all users. The desktop shell lives in the system tray; its tray menu opens the operator wall, reports backend state, and performs controlled start, restart, or shutdown actions without owning the stream service.
 
-On first launch, the managed dependency bootstrap verifies or installs `yt-dlp`, FFmpeg, `ffplay`, and `ffprobe` under `%LOCALAPPDATA%\RadioTEDU OnAir\Tools`. Packaged smoke tests use `CLEANROOM_OPEN_PANEL=0` and a free loopback port so validation never opens an operator browser or collides with the live service.
+On first launch, the managed dependency bootstrap verifies or installs `yt-dlp`, FFmpeg, `ffplay`, and `ffprobe` under `%LOCALAPPDATA%\RadioTEDU OnAir\Tools`; once Icecast details are configured, the station can reach a ready-to-stream state. Packaged smoke tests use `CLEANROOM_OPEN_PANEL=0` and a free loopback port so validation never opens an operator browser or collides with the live service.
 
 Build and validate the packaged backend, portable release, and desktop installer:
 

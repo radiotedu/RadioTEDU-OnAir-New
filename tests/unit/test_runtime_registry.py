@@ -3,12 +3,22 @@ import time
 import builtins
 import json
 
+import pytest
+
 import app.engine.runtime_registry as runtime_registry_module
 from app.audio.gst_pipeline import StationPipelineConfig
 from app.db import get_connection, init_db
 from app.engine.runtime_registry import StationRuntimeRegistry
 from app.repositories.settings_repo import SettingsRepository
 from app.repositories.station_output_repo import StationOutputRepository
+
+
+@pytest.fixture(autouse=True)
+def _local_playback_is_enabled_by_default(monkeypatch):
+    # A host-level service setting can disable local playback. Keep this test
+    # module deterministic; the dedicated service-policy test opts back in to
+    # that setting explicitly.
+    monkeypatch.setenv("CLEANROOM_DISABLE_LOCAL_PLAYBACK", "0")
 
 
 def test_station_names_select_one_programme_neutral_processing_profile():
