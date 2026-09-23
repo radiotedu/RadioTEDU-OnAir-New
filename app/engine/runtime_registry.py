@@ -1233,7 +1233,7 @@ class StationRuntimeRegistry:
         if crossfade_seconds is None:
             raw_crossfade_seconds = station_settings.get(
                 "default_crossfade_seconds",
-                settings.get("default_crossfade_seconds", 0.0),
+                settings.get("default_crossfade_seconds", 5.0),
             )
         else:
             raw_crossfade_seconds = crossfade_seconds
@@ -1588,8 +1588,27 @@ class StationRuntimeRegistry:
         mount = status.get("icecast_mount_health")
         if not isinstance(mount, dict):
             return False
+        if "network_writer_running" in mount:
+            # Each source connector owns its startup delay, backpressure, and
+            # network retries. A second recovery loop must not reset that work
+            # or disconnect healthy sibling outputs while one mount reconnects.
+            # A stalled producer cannot be repaired by tearing down its outputs.
+            mounts = {"icecast": mount}
+            for item in status.get("extra_icecast_mounts") or ():
+                mounts[str(item.get("branch") or "")] = dict(item.get("health") or {})
+            return bool(
+                all(
+                    mounts.get(branch, {}).get("network_writer_running")
+                    and mounts.get(branch, {}).get("writer_running")
+                    and not mounts.get(branch, {}).get("writer_failed", False)
+                    for branch in required_branches
+                )
+            )
         try:
             pcm_age = float(status.get("program_pcm_age_seconds"))
+        except (TypeError, ValueError):
+            return False
+        try:
             write_age = float(mount.get("last_write_age_seconds"))
         except (TypeError, ValueError):
             return False

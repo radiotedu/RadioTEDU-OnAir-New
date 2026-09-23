@@ -72,6 +72,7 @@
           <button class="operator-nav-button" type="button" data-operator-nav="stations"><span class="nav-icon" aria-hidden="true">ST</span><span><b>Stations</b><small>Fleet and outputs</small></span></button>
           <button class="operator-nav-button" type="button" data-operator-nav="queue"><span class="nav-icon" aria-hidden="true">Q</span><span><b>Queue</b><small>Durable playout order</small></span></button>
           <button class="operator-nav-button" type="button" data-operator-nav="scheduler"><span class="nav-icon" aria-hidden="true">SC</span><span><b>Scheduler</b><small>Exact-time events</small></span></button>
+          <button class="operator-nav-button" type="button" data-operator-nav="broadcast-planner"><span class="nav-icon" aria-hidden="true">BP</span><span><b>Broadcast planner</b><small>Ads, sweepers and programmes</small></span></button>
           <button class="operator-nav-button" type="button" data-operator-nav="dayparting"><span class="nav-icon" aria-hidden="true">DP</span><span><b>Dayparting</b><small>Weekly tempo clock</small></span></button>
           <button class="operator-nav-button" type="button" data-operator-nav="shows"><span class="nav-icon" aria-hidden="true">SH</span><span><b>Shows</b><small>Programs and presenters</small></span></button>
           <button class="operator-nav-button" type="button" data-operator-nav="compliance"><span class="nav-icon" aria-hidden="true">CP</span><span><b>Compliance</b><small>Music-use records</small></span></button>
@@ -711,6 +712,47 @@
           </form>
           <p id="scheduleResult" class="action-result" aria-live="polite"></p>
           <div id="scheduleItems" class="media-list" aria-live="polite"></div>
+        </article>
+
+        <article class="panel planner-panel" data-operator-view="broadcast-planner">
+          <div class="panel-heading"><div><div class="eyebrow">MULTI-STATION SCHEDULING</div><h2>Broadcast planner</h2></div><button id="refreshBroadcastPlansButton" class="button secondary compact" type="button">Refresh plans</button></div>
+          <p class="card-copy">Build a recurring rule once, choose the stations it serves, and the scheduler places each occurrence into the live playout system. Times use Europe/Istanbul.</p>
+          <form id="broadcastPlanForm" class="operator-form">
+            <input id="broadcastPlanId" type="hidden" value="">
+            <label>Plan name<input id="broadcastPlanName" maxlength="120" required placeholder="Morning sponsor spot"></label>
+            <div class="field-grid two">
+              <label>What should play?<select id="broadcastPlanType"><option value="ad">Advertisement</option><option value="sweeper">Sweeper / station ID</option><option value="recorded_program">Recorded programme</option></select></label>
+              <label>Audio library station<select id="broadcastPlanSourceStation"></select></label>
+            </div>
+            <div class="field-grid two planner-track-search">
+              <label>Find audio<input id="broadcastPlanTrackSearch" type="search" placeholder="Title or artist"></label>
+              <div class="planner-track-search-action"><span></span><button id="searchBroadcastPlanTracksButton" class="button secondary" type="button">Search audio</button></div>
+            </div>
+            <p id="broadcastPlanSelectedTrack" class="planner-selected-track" aria-live="polite">Choose audio from search results.</p>
+            <div id="broadcastPlanTrackResults" class="planner-track-results" aria-live="polite"></div>
+            <fieldset class="planner-stations"><legend>Send to stations</legend><div class="planner-station-tools"><button id="selectAllPlanStationsButton" class="button ghost compact" type="button">Select all</button><button id="clearPlanStationsButton" class="button ghost compact" type="button">Clear</button></div><div id="broadcastPlanStations" class="planner-station-list"></div></fieldset>
+            <div class="field-grid two">
+              <label>Starts on<input id="broadcastPlanStartsOn" type="date" required></label>
+              <label>Ends on<input id="broadcastPlanEndsOn" type="date" required></label>
+            </div>
+            <fieldset class="planner-weekdays"><legend>Play on</legend><div class="planner-weekday-list">
+              <label><input type="checkbox" data-broadcast-weekday="1" checked>Mon</label><label><input type="checkbox" data-broadcast-weekday="2" checked>Tue</label><label><input type="checkbox" data-broadcast-weekday="3" checked>Wed</label><label><input type="checkbox" data-broadcast-weekday="4" checked>Thu</label><label><input type="checkbox" data-broadcast-weekday="5" checked>Fri</label><label><input type="checkbox" data-broadcast-weekday="6" checked>Sat</label><label><input type="checkbox" data-broadcast-weekday="7" checked>Sun</label>
+            </div></fieldset>
+            <div class="field-grid two">
+              <label>Daily window starts<input id="broadcastPlanLocalStart" type="time" value="09:00" required></label>
+              <label>Daily window ends<input id="broadcastPlanLocalEnd" type="time" value="21:00" required></label>
+            </div>
+            <label id="broadcastPlanRepeatField">Repeat within the window<select id="broadcastPlanRepeat"><option value="0">Once, at the start time</option><option value="15">Every 15 minutes</option><option value="30">Every 30 minutes</option><option value="60" selected>Every hour</option><option value="120">Every 2 hours</option><option value="240">Every 4 hours</option></select></label>
+            <label id="broadcastPlanSweeperField" hidden>Songs between sweepers<input id="broadcastPlanSweeperInterval" type="number" min="1" max="100" step="1" value="2"></label>
+            <div class="field-grid two">
+              <label id="broadcastPlanPlayWindowField">Allowed start delay for programmes (minutes)<input id="broadcastPlanPlayWindow" type="number" min="1" max="240" value="15"></label>
+              <label>Priority<input id="broadcastPlanPriority" type="number" min="-100" max="1000" value="0"></label>
+            </div>
+            <label class="check-row"><input id="broadcastPlanEnabled" type="checkbox" checked> Plan enabled</label>
+            <div class="button-row"><button id="saveBroadcastPlanButton" class="button primary" type="submit">Save and schedule</button><button id="resetBroadcastPlanButton" class="button secondary" type="button">New plan</button></div>
+          </form>
+          <p id="broadcastPlanResult" class="action-result" aria-live="polite"></p>
+          <div id="broadcastPlanList" class="planner-plan-list" aria-live="polite"><div class="empty-state">Load plans to see the schedule.</div></div>
         </article>
 
         <article class="panel" data-operator-view="recovery">

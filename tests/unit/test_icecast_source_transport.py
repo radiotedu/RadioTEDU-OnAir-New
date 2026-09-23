@@ -121,3 +121,36 @@ def test_flac_source_handshake_is_unchanged_by_bitrate_metadata_policy():
         assert b"Ice-Audio-Info:" not in handshake
     finally:
         transport.close()
+
+
+def test_established_source_does_not_timeout_during_origin_backpressure():
+    class BackpressuredSocket(FakeSocket):
+        def sendall(self, payload):
+            if self.sent and self.timeout is not None:
+                raise socket.timeout("temporary origin backpressure")
+            super().sendall(payload)
+
+    source_socket = BackpressuredSocket()
+    transport = IcecastSourceTransport(
+        _config(), socket_factory=lambda *_args, **_kwargs: source_socket
+    )
+    try:
+        assert source_socket.timeout is None
+        transport.send(b"programme-before-pause")
+        transport.send(b"programme-after-pause")
+        assert source_socket.sent[-1] == b"programme-after-pause"
+        assert not source_socket.closed
+    finally:
+        transport.close()
+
+
+def test_explicit_source_write_timeout_is_still_supported():
+    source_socket = FakeSocket()
+    transport = IcecastSourceTransport(
+        _config(), socket_factory=lambda *_args, **_kwargs: source_socket,
+        write_timeout_sec=2.5,
+    )
+    try:
+        assert source_socket.timeout == 2.5
+    finally:
+        transport.close()

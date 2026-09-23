@@ -1,7 +1,10 @@
 import threading
+import re
+import unicodedata
 
 from app.repositories.queue_repo import QueueRepository
 from app.repositories.settings_repo import SettingsRepository
+from app.engine.broadcast_plan_policy import resolve_sweeper_plan
 
 _QUEUE_AUTOFILL_LOCK = threading.Lock()
 
@@ -33,7 +36,21 @@ def _get_sweeper_settings(conn, station_id: int) -> dict:
     interval_unit = str(settings.get("sweeper_interval_unit", "tracks") or "tracks").strip().lower()
     if interval_unit not in {"tracks", "minutes"}:
         interval_unit = "tracks"
-    return {"enabled": enabled, "interval": interval, "interval_unit": interval_unit, "mode": mode}
+    result = {"enabled": enabled, "interval": interval, "interval_unit": interval_unit, "mode": mode}
+    try:
+        planned = resolve_sweeper_plan(conn, int(station_id))
+        if planned.get("governed"):
+            active_plan = planned.get("active")
+            result["enabled"] = active_plan is not None
+            if active_plan:
+                result["interval"] = int(active_plan["interval"])
+                result["interval_unit"] = "tracks"
+                result["mode"] = str(active_plan.get("mode") or "ordered")
+                result["track_id"] = int(active_plan["track_id"])
+    except Exception:
+        # Preserve the station's ordinary sweeper config if a plan record is malformed.
+        pass
+    return result
 
 
 def _pick_rotation_track(
@@ -42,6 +59,7 @@ def _pick_rotation_track(
     track_type: str,
     mode: str = "random",
     exclude_ids: set[int] | None = None,
+    preferred_track_id: int | None = None,
 ) -> dict | None:
     """Select the least-used active jingle or ad for deterministic rotation."""
     normalized_type = str(track_type or "").strip().lower()
@@ -55,6 +73,9 @@ def _pick_rotation_track(
         "COALESCE(file_path, '') <> ''",
     ]
     params: list = [int(station_id), normalized_type]
+    if preferred_track_id:
+        where.append("id=?")
+        params.append(int(preferred_track_id))
     if blocked:
         placeholders = ",".join("?" for _ in blocked)
         where.append(f"id NOT IN ({placeholders})")
@@ -77,6 +98,7 @@ def _pick_rotation_track(
             normalized_type,
             mode=mode,
             exclude_ids=None,
+            preferred_track_id=preferred_track_id,
         )
     if not rows:
         return None
@@ -88,9 +110,11 @@ def _pick_jingle(
     station_id: int,
     mode: str = "random",
     exclude_ids: set[int] | None = None,
+    preferred_track_id: int | None = None,
 ) -> dict | None:
     return _pick_rotation_track(
-        conn, station_id, "jingle", mode=mode, exclude_ids=exclude_ids
+        conn, station_id, "jingle", mode=mode, exclude_ids=exclude_ids,
+        preferred_track_id=preferred_track_id,
     )
 
 
@@ -212,10 +236,46 @@ def select_broadcast_queue_autofill_tracks(
         + "CASE WHEN last_played_at IS NULL OR TRIM(last_played_at)='' THEN 0 ELSE 1 END ASC, "
         + "last_played_at ASC, id ASC LIMIT ?"
     )
-    params.append(max(1, int(limit)))
+    safe_limit = max(1, min(int(limit), 500))
+    params.append(min(5000, safe_limit * 10))
     cur = conn.cursor()
     cur.execute(query, tuple(params))
-    return [dict(row) for row in cur.fetchall()]
+    candidates = [dict(row) for row in cur.fetchall()]
+
+    def normalize(value: str) -> str:
+        text = unicodedata.normalize("NFKD", str(value or "").casefold())
+        text = "".join(char for char in text if not unicodedata.combining(char))
+        text = re.sub(r"\b(?:official\s+(?:audio|video)|lyrics?(?:\s+video)?|audio\s+only|hd|4k)\b", " ", text)
+        return " ".join(re.sub(r"[^a-z0-9]+", " ", text).split())
+
+    deduped: list[dict] = []
+    seen_songs: set[tuple[str, str]] = set()
+    by_artist: dict[str, list[dict]] = {}
+    for track in candidates:
+        title = normalize(track.get("title", ""))
+        artist = normalize(track.get("artist", ""))
+        identity = (title, artist)
+        if title and artist and identity in seen_songs:
+            continue
+        if title and artist:
+            seen_songs.add(identity)
+        deduped.append(track)
+        artist_key = artist or f"unknown:{int(track['id'])}"
+        by_artist.setdefault(artist_key, []).append(track)
+
+    # Fill the next queue slice with one song per artist before rotating back.
+    # Candidate ordering remains least-played/least-recent, with duplicate
+    # title+artist file variants collapsed before the round-robin pass.
+    balanced: list[dict] = []
+    while len(balanced) < safe_limit and by_artist:
+        for artist_key in list(by_artist):
+            tracks = by_artist[artist_key]
+            balanced.append(tracks.pop(0))
+            if not tracks:
+                del by_artist[artist_key]
+            if len(balanced) >= safe_limit:
+                break
+    return balanced
 
 
 def _interleave_with_jingles(
@@ -249,6 +309,7 @@ def _interleave_with_jingles(
                 station_id,
                 sweeper["mode"],
                 exclude_ids=recent_jingle_ids | used_jingle_ids,
+                preferred_track_id=sweeper.get("track_id"),
             )
             if jingle:
                 result.append(jingle)

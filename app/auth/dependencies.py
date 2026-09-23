@@ -49,6 +49,7 @@ _ROUTE_ROLE_RULES: list[tuple[str, set[str], set[str]]] = [
     ("/api/program/", set(_ALL_ROLES), {"admin", "dj", "producer"}),
     ("/api/schedule/", set(_ALL_ROLES), {"admin", "dj", "producer"}),
     ("/api/ads/", {"admin", "producer", "viewer"}, {"admin", "producer"}),
+    ("/api/broadcast-plans", {"admin", "dj", "producer"}, {"admin", "dj", "producer"}),
     ("/api/ad-break-sets", {"admin", "producer", "viewer"}, {"admin", "producer"}),
     ("/api/ad-campaigns", {"admin", "producer", "viewer"}, {"admin", "producer"}),
     ("/api/tracks/", set(_ALL_ROLES), {"admin", "dj", "producer"}),

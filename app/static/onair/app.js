@@ -16,6 +16,7 @@ const OPERATOR_VIEWS = Object.freeze({
   playlists: { eyebrow: 'REUSABLE PROGRAMMING', title: 'Playlists', description: 'Create reusable track lists and verify every ordering change.' },
   queue: { eyebrow: 'DURABLE PLAYOUT', title: 'Queue', description: 'Inspect, reorder, skip, and verify the selected station queue.' },
   scheduler: { eyebrow: 'EXACT-TIME EVENTS', title: 'Scheduler', description: 'Schedule station tracks inside explicit playout windows.' },
+  'broadcast-planner': { eyebrow: 'MULTI-STATION SCHEDULING', title: 'Broadcast planner', description: 'Schedule ads, sweepers, and recorded programmes by station, weekday, and time.' },
   dayparting: { eyebrow: 'WEEKLY CLOCK', title: 'Dayparting', description: 'Define timezone-aware tempo programs for every day.' },
   automation: { eyebrow: 'DETERMINISTIC RULES', title: 'Automation', description: 'Manage jingles and exact, operator-defined insertion rules.' },
   emergency: { eyebrow: 'PRIORITY TAKEOVER', title: 'Emergency Broadcast', description: 'Preview and broadcast an approved external public-service source.' },
@@ -65,6 +66,9 @@ const state = {
   sweeper: null,
   dayparts: null,
   scheduleItems: [],
+  broadcastPlans: [],
+  selectedBroadcastTrack: null,
+  broadcastTrackResults: [],
   recoveryPoints: [],
   shows: [],
   selectedShowId: 0,
@@ -1668,6 +1672,195 @@ async function createScheduleItem(event) {
     logActivity(`Scheduled track ${Number($('scheduleTrackId').value)} for ${selectedStationName()}.`);
   } catch (error) { setResult('scheduleResult', errorMessage(error), 'error'); }
   finally { setBusy(false); }
+}
+
+function initializeBroadcastPlanDefaults() {
+  const today = new Date();
+  const end = new Date(today);
+  end.setMonth(end.getMonth() + 12);
+  const asDate = (value) => `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`;
+  if (!$('broadcastPlanStartsOn').value) $('broadcastPlanStartsOn').value = asDate(today);
+  if (!$('broadcastPlanEndsOn').value) $('broadcastPlanEndsOn').value = asDate(end);
+  renderBroadcastPlanTypeFields();
+}
+
+function renderBroadcastPlanTypeFields() {
+  const type = $('broadcastPlanType').value;
+  $('broadcastPlanRepeatField').hidden = type === 'sweeper';
+  $('broadcastPlanSweeperField').hidden = type !== 'sweeper';
+  $('broadcastPlanPlayWindowField').hidden = type !== 'recorded_program';
+  $('broadcastPlanTrackResults').innerHTML = '';
+  state.broadcastTrackResults = [];
+  state.selectedBroadcastTrack = null;
+  $('broadcastPlanSelectedTrack').textContent = 'Choose audio from search results.';
+}
+
+function renderBroadcastPlanStations(checkedIds = null) {
+  const selected = checkedIds ? new Set(checkedIds.map(Number)) : new Set([Number(state.stationId || 0)]);
+  $('broadcastPlanStations').innerHTML = state.stations.length ? state.stations.map((station) => `<label class="planner-station-choice"><input type="checkbox" data-broadcast-plan-station="${Number(station.id)}" ${selected.has(Number(station.id)) ? 'checked' : ''}><span>${escapeHtml(station.name || `Station ${Number(station.id)}`)}</span></label>`).join('') : '<div class="empty-state">No stations are available.</div>';
+}
+
+function renderBroadcastPlanTrackResults() {
+  const node = $('broadcastPlanTrackResults');
+  if (!state.broadcastTrackResults.length) {
+    node.innerHTML = '<div class="empty-state">Search the selected station library to choose audio.</div>';
+    return;
+  }
+  node.innerHTML = state.broadcastTrackResults.map((track) => {
+    const selected = Number(state.selectedBroadcastTrack?.id) === Number(track.id);
+    const title = track.title || 'Untitled audio';
+    const artist = track.artist || 'Artist unknown';
+    return `<button class="planner-track-option" type="button" data-broadcast-plan-track="${Number(track.id)}" aria-pressed="${selected}"><span><b>${escapeHtml(title)}</b><br><small>${escapeHtml(artist)} · ${escapeHtml(track.track_type || 'music')}</small></span><small>${formatDuration(track.duration)}</small></button>`;
+  }).join('');
+}
+
+async function searchBroadcastPlanTracks() {
+  const sourceStationId = Number($('broadcastPlanSourceStation').value || state.stationId || 0);
+  if (!sourceStationId) return setResult('broadcastPlanResult', 'Choose a source station first.', 'error');
+  const type = $('broadcastPlanType').value;
+  const trackType = type === 'ad' ? 'ad' : (type === 'sweeper' ? 'jingle' : 'music');
+  const params = new URLSearchParams({
+    station_id: String(sourceStationId), library_scope: 'station', source_station_id: String(sourceStationId),
+    track_type: trackType, search: $('broadcastPlanTrackSearch').value.trim(), page: '1', limit: '100',
+  });
+  const payload = await api(`/api/tracks?${params.toString()}`);
+  state.broadcastTrackResults = Array.isArray(payload?.tracks) ? payload.tracks : (Array.isArray(payload?.items) ? payload.items : []);
+  if (state.selectedBroadcastTrack && Number(state.selectedBroadcastTrack.station_id) !== sourceStationId) state.selectedBroadcastTrack = null;
+  renderBroadcastPlanTrackResults();
+  if (!state.broadcastTrackResults.length) setResult('broadcastPlanResult', 'No matching audio was found in that station library.', '');
+}
+
+async function loadBroadcastPlanner() {
+  const sourceSelect = $('broadcastPlanSourceStation');
+  const priorSource = Number(sourceSelect.value || state.stationId || 0);
+  if (!state.stations.length) {
+    const payload = await api('/api/stations');
+    state.stations = Array.isArray(payload?.stations) ? payload.stations : [];
+  }
+  sourceSelect.innerHTML = state.stations.map((station) => `<option value="${Number(station.id)}">${escapeHtml(station.name || `Station ${Number(station.id)}`)}</option>`).join('');
+  sourceSelect.value = String(state.stations.some((station) => Number(station.id) === priorSource) ? priorSource : Number(state.stationId || state.stations[0]?.id || 0));
+  renderBroadcastPlanStations();
+  const payload = await api('/api/broadcast-plans');
+  state.broadcastPlans = Array.isArray(payload?.plans) ? payload.plans : [];
+  renderBroadcastPlans();
+  if (!state.selectedBroadcastTrack) renderBroadcastPlanTrackResults();
+}
+
+function renderBroadcastPlans() {
+  const node = $('broadcastPlanList');
+  if (!state.broadcastPlans.length) {
+    node.innerHTML = '<div class="empty-state">No broadcast plans yet. Create one above to schedule a station or network wide rule.</div>';
+    return;
+  }
+  const labels = { ad: 'Advertisement', sweeper: 'Sweeper', recorded_program: 'Recorded programme' };
+  node.innerHTML = state.broadcastPlans.map((plan) => {
+    const targets = (plan.targets || []).map((target) => `${target.station_name || `Station ${target.station_id}`} · ${target.track_title || 'audio'}${target.track_artist ? ` — ${target.track_artist}` : ''}`).join(', ');
+    const days = (plan.weekdays || []).map((day) => ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][Number(day) - 1]).filter(Boolean).join(', ');
+    const repeat = plan.plan_type === 'sweeper' ? `Every ${Number(plan.sweeper_every_songs)} songs` : (Number(plan.repeat_every_minutes) > 0 ? `Every ${Number(plan.repeat_every_minutes)} min` : 'Once at window start');
+    return `<article class="planner-plan-card"><div><h3>${escapeHtml(plan.name)}<span class="planner-plan-status ${plan.enabled ? 'enabled' : ''}">${plan.enabled ? 'Enabled' : 'Paused'}</span></h3><p><b>${escapeHtml(labels[plan.plan_type] || plan.plan_type)}</b> · ${escapeHtml(targets || 'No target stations')}</p><p>${escapeHtml(plan.starts_on)} – ${escapeHtml(plan.ends_on)} · ${escapeHtml(days)} · ${escapeHtml(plan.local_start)}–${escapeHtml(plan.local_end)} · ${escapeHtml(repeat)}</p><p>${Number(plan.pending_occurrences)} queued occurrences · priority ${Number(plan.priority)}</p></div><div class="planner-plan-actions"><button class="button ghost compact" type="button" data-broadcast-plan-edit="${Number(plan.id)}">Edit</button><button class="button secondary compact" type="button" data-broadcast-plan-toggle="${Number(plan.id)}" data-enabled="${plan.enabled ? 'true' : 'false'}">${plan.enabled ? 'Pause' : 'Resume'}</button><button class="button danger compact" type="button" data-broadcast-plan-delete="${Number(plan.id)}">Delete</button></div></article>`;
+  }).join('');
+}
+
+function resetBroadcastPlanForm() {
+  $('broadcastPlanForm').reset();
+  $('broadcastPlanId').value = '';
+  $('broadcastPlanSourceStation').value = String(state.stationId || state.stations[0]?.id || 0);
+  $('broadcastPlanEnabled').checked = true;
+  $('broadcastPlanRepeat').value = '60';
+  $('broadcastPlanSweeperInterval').value = '2';
+  $('broadcastPlanPriority').value = '0';
+  $('broadcastPlanPlayWindow').value = '15';
+  state.selectedBroadcastTrack = null;
+  renderBroadcastPlanStations();
+  initializeBroadcastPlanDefaults();
+  $('broadcastPlanSelectedTrack').textContent = 'Choose audio from search results.';
+  $('broadcastPlanTrackResults').innerHTML = '<div class="empty-state">Search the selected station library to choose audio.</div>';
+  setResult('broadcastPlanResult');
+  $('saveBroadcastPlanButton').textContent = 'Save and schedule';
+}
+
+function editBroadcastPlan(planId) {
+  const plan = state.broadcastPlans.find((item) => Number(item.id) === Number(planId));
+  if (!plan) return;
+  $('broadcastPlanId').value = String(plan.id);
+  $('broadcastPlanName').value = plan.name;
+  $('broadcastPlanType').value = plan.plan_type;
+  $('broadcastPlanSourceStation').value = String(plan.source_station_id);
+  $('broadcastPlanStartsOn').value = plan.starts_on;
+  $('broadcastPlanEndsOn').value = plan.ends_on;
+  $('broadcastPlanLocalStart').value = plan.local_start;
+  $('broadcastPlanLocalEnd').value = plan.local_end;
+  $('broadcastPlanSweeperInterval').value = String(plan.sweeper_every_songs);
+  $('broadcastPlanPlayWindow').value = String(plan.play_window_minutes);
+  $('broadcastPlanPriority').value = String(plan.priority);
+  $('broadcastPlanEnabled').checked = Boolean(plan.enabled);
+  const repeat = String(plan.repeat_every_minutes);
+  if (!$('broadcastPlanRepeat').querySelector(`option[value="${repeat}"]`)) $('broadcastPlanRepeat').add(new Option(`Every ${repeat} minutes`, repeat));
+  $('broadcastPlanRepeat').value = repeat;
+  document.querySelectorAll('[data-broadcast-weekday]').forEach((checkbox) => { checkbox.checked = (plan.weekdays || []).includes(Number(checkbox.dataset.broadcastWeekday)); });
+  renderBroadcastPlanStations((plan.targets || []).map((target) => Number(target.station_id)));
+  state.selectedBroadcastTrack = { id: Number(plan.source_track_id), station_id: Number(plan.source_station_id), title: plan.source_track_title, artist: plan.source_track_artist };
+  $('broadcastPlanSelectedTrack').textContent = `Selected: #${state.selectedBroadcastTrack.id} · ${state.selectedBroadcastTrack.title || 'Untitled audio'}${state.selectedBroadcastTrack.artist ? ` — ${state.selectedBroadcastTrack.artist}` : ''}`;
+  renderBroadcastPlanTypeFields();
+  state.selectedBroadcastTrack = { id: Number(plan.source_track_id), station_id: Number(plan.source_station_id), title: plan.source_track_title, artist: plan.source_track_artist };
+  $('broadcastPlanSelectedTrack').textContent = `Selected: #${state.selectedBroadcastTrack.id} · ${state.selectedBroadcastTrack.title || 'Untitled audio'}${state.selectedBroadcastTrack.artist ? ` — ${state.selectedBroadcastTrack.artist}` : ''}`;
+  $('saveBroadcastPlanButton').textContent = 'Save plan changes';
+  setResult('broadcastPlanResult', `Editing “${plan.name}”.`, '');
+  $('broadcastPlanForm').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+async function saveBroadcastPlan(event) {
+  event.preventDefault();
+  const stationIds = [...document.querySelectorAll('[data-broadcast-plan-station]:checked')].map((checkbox) => Number(checkbox.dataset.broadcastPlanStation));
+  const weekdays = [...document.querySelectorAll('[data-broadcast-weekday]:checked')].map((checkbox) => Number(checkbox.dataset.broadcastWeekday));
+  const track = state.selectedBroadcastTrack;
+  if (!track || Number(track.station_id) !== Number($('broadcastPlanSourceStation').value)) return setResult('broadcastPlanResult', 'Search and select an audio track from the chosen source station.', 'error');
+  if (!stationIds.length) return setResult('broadcastPlanResult', 'Select at least one target station.', 'error');
+  if (!weekdays.length) return setResult('broadcastPlanResult', 'Select at least one weekday.', 'error');
+  const body = {
+    name: $('broadcastPlanName').value.trim(), plan_type: $('broadcastPlanType').value,
+    source_station_id: Number($('broadcastPlanSourceStation').value), track_id: Number(track.id), station_ids: stationIds,
+    starts_on: $('broadcastPlanStartsOn').value, ends_on: $('broadcastPlanEndsOn').value, weekdays,
+    local_start: $('broadcastPlanLocalStart').value, local_end: $('broadcastPlanLocalEnd').value,
+    timezone: 'Europe/Istanbul', repeat_every_minutes: $('broadcastPlanType').value === 'sweeper' ? 0 : Number($('broadcastPlanRepeat').value),
+    sweeper_every_songs: Number($('broadcastPlanSweeperInterval').value), play_window_minutes: Number($('broadcastPlanPlayWindow').value),
+    priority: Number($('broadcastPlanPriority').value), enabled: $('broadcastPlanEnabled').checked,
+  };
+  setBusy(true, 'Saving broadcast plan…', 'Applying station targets and refreshing upcoming playout');
+  setResult('broadcastPlanResult');
+  try {
+    const planId = Number($('broadcastPlanId').value || 0);
+    const result = await api(planId ? `/api/broadcast-plans/${planId}` : '/api/broadcast-plans', {
+      method: planId ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    await loadBroadcastPlanner();
+    resetBroadcastPlanForm();
+    setResult('broadcastPlanResult', `Saved “${body.name}” for ${stationIds.length} station${stationIds.length === 1 ? '' : 's'}.`, 'success');
+    logActivity(`Saved broadcast plan “${body.name}” for ${stationIds.length} station(s).`);
+    return result;
+  } catch (error) { setResult('broadcastPlanResult', errorMessage(error), 'error'); }
+  finally { setBusy(false); }
+}
+
+async function toggleBroadcastPlan(button) {
+  const planId = Number(button.dataset.broadcastPlanToggle);
+  const enabled = button.dataset.enabled !== 'true';
+  try {
+    await api(`/api/broadcast-plans/${planId}/enabled`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled }) });
+    await loadBroadcastPlanner();
+    setResult('broadcastPlanResult', enabled ? 'Plan resumed and upcoming occurrences were scheduled.' : 'Plan paused; future pending occurrences were cancelled.', 'success');
+  } catch (error) { setResult('broadcastPlanResult', errorMessage(error), 'error'); }
+}
+
+async function deleteBroadcastPlan(planId) {
+  const plan = state.broadcastPlans.find((item) => Number(item.id) === Number(planId));
+  if (!plan || !window.confirm(`Delete “${plan.name}” and cancel its future pending slots?`)) return;
+  try {
+    await api(`/api/broadcast-plans/${Number(planId)}`, { method: 'DELETE' });
+    await loadBroadcastPlanner();
+    resetBroadcastPlanForm();
+    setResult('broadcastPlanResult', 'Plan deleted and future pending slots cancelled.', 'success');
+  } catch (error) { setResult('broadcastPlanResult', errorMessage(error), 'error'); }
 }
 
 async function loadRecoveryPoints() {
@@ -5578,6 +5771,9 @@ async function loadOperatorViewData(view) {
   if (view === 'ads') {
     try { await loadAdvertising(); } catch (error) { setResult('adItemResult', errorMessage(error), 'error'); }
   }
+  if (view === 'broadcast-planner') {
+    try { await loadBroadcastPlanner(); } catch (error) { setResult('broadcastPlanResult', errorMessage(error), 'error'); }
+  }
   if (!IS_RTAI_ONAIR && view === 'settings') {
     try { await loadHlsSettings(); } catch (error) { setResult('hlsSettingsResult', errorMessage(error), 'error'); }
   }
@@ -5741,6 +5937,15 @@ function bindEvents() {
   $('daypartForm').addEventListener('submit', saveDayparts);
   $('resetDaypartsButton').addEventListener('click', resetDayparts);
   $('scheduleForm').addEventListener('submit', createScheduleItem);
+  $('broadcastPlanForm').addEventListener('submit', saveBroadcastPlan);
+  $('broadcastPlanType').addEventListener('change', renderBroadcastPlanTypeFields);
+  $('broadcastPlanSourceStation').addEventListener('change', () => { state.selectedBroadcastTrack = null; $('broadcastPlanSelectedTrack').textContent = 'Choose audio from search results.'; renderBroadcastPlanTrackResults(); });
+  $('searchBroadcastPlanTracksButton').addEventListener('click', () => searchBroadcastPlanTracks().catch((error) => setResult('broadcastPlanResult', errorMessage(error), 'error')));
+  $('broadcastPlanTrackSearch').addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); searchBroadcastPlanTracks().catch((error) => setResult('broadcastPlanResult', errorMessage(error), 'error')); } });
+  $('selectAllPlanStationsButton').addEventListener('click', () => document.querySelectorAll('[data-broadcast-plan-station]').forEach((checkbox) => { checkbox.checked = true; }));
+  $('clearPlanStationsButton').addEventListener('click', () => document.querySelectorAll('[data-broadcast-plan-station]').forEach((checkbox) => { checkbox.checked = false; }));
+  $('refreshBroadcastPlansButton').addEventListener('click', () => loadBroadcastPlanner().catch((error) => setResult('broadcastPlanResult', errorMessage(error), 'error')));
+  $('resetBroadcastPlanButton').addEventListener('click', resetBroadcastPlanForm);
   $('recoveryForm').addEventListener('submit', createRecoveryPoint);
   $('refreshRecoveryButton').addEventListener('click', () => loadRecoveryPoints().catch((error) => setResult('recoveryResult', errorMessage(error), 'error')));
   $('showSelect').addEventListener('change', () => selectShow().catch((error) => setResult('showResult', errorMessage(error), 'error')));
@@ -5837,6 +6042,21 @@ function bindEvents() {
     if (playlistMove) movePlaylistItem(Number(playlistMove.dataset.playlistItem), playlistMove.dataset.playlistMove);
     const playlistRemove = event.target.closest('[data-playlist-remove]');
     if (playlistRemove) removePlaylistItem(Number(playlistRemove.dataset.playlistRemove));
+    const planTrackButton = event.target.closest('[data-broadcast-plan-track]');
+    if (planTrackButton) {
+      const selected = state.broadcastTrackResults.find((track) => Number(track.id) === Number(planTrackButton.dataset.broadcastPlanTrack));
+      if (selected) {
+        state.selectedBroadcastTrack = { ...selected, station_id: Number($('broadcastPlanSourceStation').value) };
+        $('broadcastPlanSelectedTrack').textContent = `Selected: #${Number(selected.id)} · ${selected.title || 'Untitled audio'}${selected.artist ? ` — ${selected.artist}` : ''}`;
+        renderBroadcastPlanTrackResults();
+      }
+    }
+    const planEdit = event.target.closest('[data-broadcast-plan-edit]');
+    if (planEdit) editBroadcastPlan(Number(planEdit.dataset.broadcastPlanEdit));
+    const planToggle = event.target.closest('[data-broadcast-plan-toggle]');
+    if (planToggle) toggleBroadcastPlan(planToggle);
+    const planDelete = event.target.closest('[data-broadcast-plan-delete]');
+    if (planDelete) deleteBroadcastPlan(Number(planDelete.dataset.broadcastPlanDelete));
     const metadataRuleToggle = event.target.closest('[data-metadata-rule-toggle]');
     if (metadataRuleToggle) toggleMetadataRule(Number(metadataRuleToggle.dataset.metadataRuleToggle));
     const metadataRuleDelete = event.target.closest('[data-metadata-rule-delete]');
@@ -5849,6 +6069,7 @@ async function boot() {
   applyProductEdition();
   initializeComplianceDefaults();
   initializeAdDefaults();
+  initializeBroadcastPlanDefaults();
   initializeOperatorNavigation();
   bindEvents();
   toggleIcecastFields();

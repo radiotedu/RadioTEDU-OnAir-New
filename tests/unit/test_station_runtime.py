@@ -983,3 +983,22 @@ def test_stop_reaps_owned_process_when_active_reference_was_lost():
     assert spawned is proc
     assert proc.terminated is True
     assert runtime._owned_processes == []
+
+
+def test_primary_source_does_not_start_recurring_listener_probes(monkeypatch):
+    captured = {}
+
+    class Sink:
+        def __init__(self, *_args, **kwargs):
+            captured.update(kwargs)
+
+        def ensure_started(self, cfg):
+            captured["cfg"] = cfg
+
+    monkeypatch.setattr(runtime_module, "IcecastAudioSink", Sink)
+    runtime = StationRuntime(process_factory=lambda *_args, **_kwargs: None)
+    runtime.ffmpeg_bin = "ffmpeg.exe"
+    cfg = _make_cfg(local_output_enabled=False)
+    assert runtime._ensure_icecast_sink(cfg)
+    assert captured["mount_probe"] is None
+    assert captured["cfg"] is cfg

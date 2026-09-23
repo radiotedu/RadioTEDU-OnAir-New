@@ -1825,7 +1825,7 @@ def _runtime_start_track(conn, station_id: int, track_id: int) -> dict:
     track_type = str(row["track_type"] or "music").strip().lower() or "music"
     crossfade_seconds = max(
         0.0,
-        _parse_float(system_settings.get("default_crossfade_seconds"), 0.0),
+        _parse_float(system_settings.get("default_crossfade_seconds"), 5.0),
     )
     if track_type != "music":
         crossfade_seconds = 0.0
@@ -2619,7 +2619,7 @@ def _list_legacy_queue_from_connection(conn, station_id: int):
     try:
         from app.repositories.settings_repo import SettingsRepository
         crossfade = float(
-            SettingsRepository(conn).get_system().get("default_crossfade_seconds", 0.0)
+            SettingsRepository(conn).get_system().get("default_crossfade_seconds", 5.0)
         )
     except Exception:
         pass

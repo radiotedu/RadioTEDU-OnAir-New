@@ -11,7 +11,7 @@ from pathlib import Path
 from app.config import get_data_root, get_db_path
 from app.auth.permissions import GLOBAL_PERMISSION_KEYS, SHOW_PERMISSION_KEYS
 
-_SCHEMA_VERSION = 23
+_SCHEMA_VERSION = 24
 _INIT_LOCK = threading.Lock()
 _HEALTH_LOCK = threading.Lock()
 _HEALTH_CACHE: dict[str, object] = {"checked_at": 0.0, "path": "", "value": {}}
@@ -1688,6 +1688,51 @@ def _bootstrap_schema(cur) -> None:
     _migrate_ad_break_sets(cur)
     cur.execute(
         "CREATE TABLE IF NOT EXISTS ad_campaigns (id INTEGER PRIMARY KEY, station_id INTEGER NOT NULL, name TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, payload_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+    )
+    cur.execute(
+        "CREATE TABLE IF NOT EXISTS broadcast_plans ("
+        "id INTEGER PRIMARY KEY, name TEXT NOT NULL, plan_type TEXT NOT NULL, "
+        "source_station_id INTEGER NOT NULL, source_track_id INTEGER NOT NULL, "
+        "starts_on TEXT NOT NULL, ends_on TEXT NOT NULL, weekdays_json TEXT NOT NULL DEFAULT '[1,2,3,4,5,6,7]', "
+        "local_start TEXT NOT NULL DEFAULT '09:00', local_end TEXT NOT NULL DEFAULT '17:00', "
+        "timezone TEXT NOT NULL DEFAULT 'Europe/Istanbul', repeat_every_minutes INTEGER NOT NULL DEFAULT 0, "
+        "sweeper_every_songs INTEGER NOT NULL DEFAULT 2, play_window_minutes INTEGER NOT NULL DEFAULT 15, "
+        "priority INTEGER NOT NULL DEFAULT 0, enabled INTEGER NOT NULL DEFAULT 1, "
+        "created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"
+        ")"
+    )
+    cur.execute(
+        "CREATE TABLE IF NOT EXISTS broadcast_plan_targets ("
+        "plan_id INTEGER NOT NULL REFERENCES broadcast_plans(id) ON DELETE CASCADE, "
+        "station_id INTEGER NOT NULL, track_id INTEGER NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, "
+        "PRIMARY KEY(plan_id, station_id)"
+        ")"
+    )
+    cur.execute(
+        "CREATE TABLE IF NOT EXISTS broadcast_plan_occurrences ("
+        "id INTEGER PRIMARY KEY, plan_id INTEGER NOT NULL REFERENCES broadcast_plans(id) ON DELETE CASCADE, "
+        "station_id INTEGER NOT NULL, scheduled_at TEXT NOT NULL, target_kind TEXT NOT NULL, "
+        "target_item_id INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', "
+        "created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(plan_id, station_id, scheduled_at)"
+        ")"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_broadcast_plans_enabled_type "
+        "ON broadcast_plans(enabled, plan_type, starts_on, ends_on)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_broadcast_plan_targets_station "
+        "ON broadcast_plan_targets(station_id, enabled, plan_id)"
+    )
+    cur.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_plan_ad_break_dedupe "
+        "ON ad_break_items(station_id, dedupe_key) "
+        "WHERE dedupe_key LIKE 'broadcast-plan:%' AND status IN ('pending','playing','done')"
+    )
+    cur.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_plan_schedule_event "
+        "ON schedule_items(station_id, event_name) "
+        "WHERE event_name LIKE 'broadcast-plan:%'"
     )
     cur.execute(
         "CREATE TABLE IF NOT EXISTS broadcast_campaigns ("

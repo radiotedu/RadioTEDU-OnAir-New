@@ -732,11 +732,13 @@ class StationRuntime:
             crossfade_seconds = max(0.0, float(next_cfg.crossfade_seconds or 0.0))
         except (TypeError, ValueError):
             crossfade_seconds = 0.0
+        current_type = _normalize_track_type(current_cfg.track_type)
+        next_type = _normalize_track_type(next_cfg.track_type)
         return (
             self.is_running()
             and crossfade_seconds > 0.0
-            and _normalize_track_type(current_cfg.track_type) in {"music", "jingle"}
-            and _normalize_track_type(next_cfg.track_type) in {"music", "jingle"}
+            and current_type == "music"
+            and next_type == "music"
         )
 
     @staticmethod
@@ -744,17 +746,13 @@ class StationRuntime:
         current_cfg: StationPipelineConfig,
         next_cfg: StationPipelineConfig,
     ) -> StationPipelineConfig:
-        """Cap station-ID overlap while keeping the configured music blend."""
+        """Let songs overlap; start jingles and other inserts at item boundaries."""
 
         current_type = _normalize_track_type(current_cfg.track_type)
         next_type = _normalize_track_type(next_cfg.track_type)
-        if "jingle" not in {current_type, next_type}:
+        if current_type == "music" and next_type == "music":
             return next_cfg
-        try:
-            seconds = max(0.0, float(next_cfg.crossfade_seconds or 0.0))
-        except (TypeError, ValueError):
-            seconds = 0.0
-        return replace(next_cfg, crossfade_seconds=min(0.25, seconds))
+        return replace(next_cfg, crossfade_seconds=0.0)
 
     def _terminate_process(self, proc) -> None:
         if not proc:
@@ -916,10 +914,9 @@ class StationRuntime:
                 self._icecast_sink = IcecastAudioSink(
                     self.ffmpeg_bin,
                     self._spawn_process,
-                    mount_probe=probe_icecast_mount,
-                    probe_interval_sec=5.0,
-                    probe_failure_threshold=3,
-                    reconnect_failure_threshold=3,
+                    # Listener GET failures must not tear down a healthy source.
+                    # The connector retries actual source/encoder failures.
+                    mount_probe=None,
                     initial_connect_spread_sec=30.0,
                     drop_on_backpressure=True,
                 )

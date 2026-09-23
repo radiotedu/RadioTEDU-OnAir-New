@@ -142,6 +142,7 @@ def _icecast_output_args(
     cfg: StationPipelineConfig,
     *,
     include_audio_filters: bool = True,
+    include_content_type: bool = True,
 ) -> list[str]:
     profile = resolve_stream_profile(cfg.stream_codec_profile, cfg.stream_bitrate_kbps)
     args: list[str] = []
@@ -161,14 +162,9 @@ def _icecast_output_args(
     format_name = str(profile["format"])
     if format_name == "ogg":
         args.extend(["-page_duration", "20000", "-flush_packets", "1"])
-    args.extend(
-        [
-            "-content_type",
-            str(profile["content_type"]),
-            "-f",
-            format_name,
-        ]
-    )
+    if include_content_type:
+        args.extend(["-content_type", str(profile["content_type"])])
+    args.extend(["-f", format_name])
     return args
 
 
@@ -522,7 +518,10 @@ def build_ffmpeg_icecast_cmd(cfg: StationPipelineConfig, ffmpeg_bin: str) -> lis
         "error",
         *_build_input_args(cfg.input_uri, realtime=True),
         "-vn",
-        *_icecast_output_args(cfg),
+        # Content-Type is sent by IcecastSourceTransport's HTTP headers. FFmpeg
+        # is writing to a pipe here, where -content_type is not a supported
+        # output option.
+        *_icecast_output_args(cfg, include_content_type=False),
         *_icecast_protocol_args(cfg),
     ]
     _append_track_metadata(cmd, cfg)
@@ -576,7 +575,9 @@ def build_ffmpeg_encoded_sink_cmd(
         "-i",
         "pipe:0",
         "-vn",
-        *_icecast_output_args(cfg),
+        # IcecastSourceTransport adds Content-Type to the HTTP source request.
+        # FFmpeg writes encoded bytes to stdout, where -content_type is invalid.
+        *_icecast_output_args(cfg, include_content_type=False),
         "pipe:1",
     ]
 

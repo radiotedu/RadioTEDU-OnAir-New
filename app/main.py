@@ -18,6 +18,7 @@ from app.api.ai_host_fast import router as ai_host_fast_router
 from app.api.ai_diagnostics import router as ai_diagnostics_router
 from app.api.auth import router as auth_router
 from app.api.audio import router as audio_router
+from app.api.broadcast_planner import router as broadcast_planner_router
 from app.api.campaigns import router as campaigns_router
 from app.api.watchdog import router as watchdog_router
 from app.api.dayparts import router as dayparts_router
@@ -372,12 +373,17 @@ async def lifespan(_app: FastAPI):
     shutdown_product_catalog = None
     shutdown_music_usage_export = None
     shutdown_bpm_maintenance = None
+    shutdown_broadcast_planner = None
     threading.Thread(
         target=_run_dependency_bootstrap_background,
         daemon=True,
         name="dependency-bootstrap",
     ).start()
     init_db()
+    from app.services.broadcast_planner import BroadcastPlannerScheduler
+
+    shutdown_broadcast_planner = BroadcastPlannerScheduler()
+    shutdown_broadcast_planner.start()
     if not rtai_edition:
         try:
             from app.services.codec_migration import migrate_ogg_outputs_to_he_aac
@@ -504,6 +510,8 @@ async def lifespan(_app: FastAPI):
     try:
         yield
     finally:
+        if shutdown_broadcast_planner is not None:
+            shutdown_broadcast_planner.stop()
         connection_manager.reset()
         live_mic_registry.reset()
         guest_audio_registry.reset()
@@ -584,6 +592,7 @@ app.include_router(outbox_router)
 app.include_router(public_router)
 app.include_router(ads_router)
 app.include_router(schedule_router)
+app.include_router(broadcast_planner_router)
 app.include_router(streaming_router)
 app.include_router(stream_config_router)
 app.include_router(tracks_router)

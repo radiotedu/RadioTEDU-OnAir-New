@@ -22,13 +22,13 @@ _log = logging.getLogger(__name__)
 # on saturation it discarded the whole queue, producing audible multi-second
 # jumps.  1024 chunks is ~21.8 s and about 4 MiB per active sink. The cache
 # prefetch path prevents cold-volume stalls from filling this reserve.
-# Keep roughly 44 seconds of per-mount PCM reserve. This absorbs Windows
+# Keep roughly 22 seconds of per-mount PCM reserve. This absorbs Windows
 # encoder/TCP startup stalls without deleting the already scheduled song.
 _PCM_QUEUE_MAX_CHUNKS = 1024
-# FLAC is lossless and its Ogg pages can briefly need more write-side reserve
-# on a busy origin. Keep the larger reserve only on the two FLAC branches so
-# AAC and local programme timing remain unchanged.
-_PCM_FLAC_QUEUE_MAX_CHUNKS = 2048
+# A FLAC branch can spend longer draining Ogg pages during origin backpressure.
+# Keep about 175 seconds (32 MiB) of its PCM so a temporary stall does not
+# trigger the lossy three-second resync used by live lossy-codec outputs.
+_PCM_FLAC_QUEUE_MAX_CHUNKS = 8192
 _PCM_INITIAL_PROGRAMME_GRACE_SECONDS = 0.25
 _PCM_PROGRAMME_START_RESERVE_BYTES = 48 * 1024
 _PCM_PROGRAMME_START_MAX_WAIT_SECONDS = 0.25
@@ -54,6 +54,8 @@ _ENCODER_ERROR_TOKENS = (
     "timed out",
     "closed",
     "invalid",
+    "unrecognized option",
+    "unknown encoder",
     "server returned",
     "end of file",
 )
@@ -62,13 +64,16 @@ _ENCODER_ERROR_TOKENS = (
 def current_codec_fallback(
     cfg: StationPipelineConfig,
 ) -> StationPipelineConfig | None:
-    """Return the already-proven legacy profile for a new AAC policy profile."""
+    """Use native AAC-LC when the selected FFmpeg build lacks FDK-AAC."""
 
     token = str(cfg.stream_codec_profile or "").strip().lower().replace("-", "_")
     if token.startswith("aac_low"):
         return replace(
             cfg,
-            stream_codec_profile="he_aac_192",
+            # Keep the configured AAC bitrate and transport profile. The native
+            # FFmpeg AAC encoder supports LC without the FDK-only afterburner
+            # option, so this fallback works on ordinary FFmpeg distributions.
+            stream_codec_profile="aac_lc_192",
             stream_bitrate_kbps=192,
         )
     if token.startswith(("aac_he_v2", "he_aac_v2")):
@@ -205,9 +210,9 @@ class IcecastAudioSink:
         self._initial_connect_spread_sec = max(
             0.0, float(initial_connect_spread_sec)
         )
-        # Legacy/unit callers can retain the bounded live-resync policy. The
-        # real station runtime disables destructive drops so an encoder stall
-        # pauses the producer instead of jumping to a later PCM timestamp.
+        # Lossy live outputs may resync to the current programme under sustained
+        # backpressure. FLAC outputs override this and retain queued PCM in order.
+        self._configured_drop_on_backpressure = bool(drop_on_backpressure)
         self._drop_on_backpressure = bool(drop_on_backpressure)
         self._source = None
         self._connector_thread = None
@@ -238,6 +243,7 @@ class IcecastAudioSink:
         self._stderr_thread = None
         self._stderr_lock = threading.Lock()
         self._last_encoder_error = ""
+        self._last_encoder_option_error = ""
         self._encoder_error_count = 0
         self._effective_stream_codec_profile = ""
         self._requested_stream_codec_profile = ""
@@ -323,8 +329,8 @@ class IcecastAudioSink:
                             self._writer_backpressure_started_monotonic = time.monotonic()
                         self._writer_dropped_chunks += 1
                     # Keep the already scheduled programme reserve intact.
-                    # The caller will retry on the next PCM frame after the
-                    # encoder writer makes room.
+                    # Reject only this newest frame while this bounded branch
+                    # has no room; do not discard older queued programme audio.
                     return False
             # This mount is already far behind. Resync only this failed branch
             # to a byte-measured three-second live window; chunk counts vary by
@@ -462,6 +468,8 @@ class IcecastAudioSink:
         if stderr is None:
             return
         self._stderr_stop.clear()
+        with self._stderr_lock:
+            self._last_encoder_option_error = ""
 
         def run() -> None:
             while not self._stderr_stop.is_set():
@@ -474,8 +482,20 @@ class IcecastAudioSink:
                 safe = self._sanitize_encoder_line(line, cfg)
                 if not safe or not any(token in safe.casefold() for token in _ENCODER_ERROR_TOKENS):
                     continue
+                folded = safe.casefold()
                 with self._stderr_lock:
-                    self._last_encoder_error = safe
+                    if "unrecognized option" in folded or "unknown encoder" in folded:
+                        self._last_encoder_option_error = safe
+                        self._last_encoder_error = safe
+                    elif (
+                        "error splitting the argument list" in folded
+                        and self._last_encoder_option_error
+                    ):
+                        self._last_encoder_error = (
+                            f"{self._last_encoder_option_error} | {safe}"
+                        )[:500]
+                    else:
+                        self._last_encoder_error = safe
                     self._encoder_error_count += 1
 
         self._stderr_thread = threading.Thread(
@@ -553,12 +573,19 @@ class IcecastAudioSink:
             programme_started = False
             initial_grace_deadline = None
             first_programme_queued_at = None
+            pending_chunk = None
+            failed_stdin = None
             while not self._writer_stop.is_set():
                 # Never remove programme audio while the encoder/source is
                 # reconnecting.  The bounded queue is the continuity reserve
                 # that lets a short origin failure recover without skipping
                 # forward in the station timeline.
                 stdin = self.stdin
+                if stdin is not None and stdin is failed_stdin:
+                    # A failed pipe can remain attached briefly while the
+                    # connector observes the encoder exit and opens a new one.
+                    self._writer_stop.wait(0.05)
+                    continue
                 if stdin is None or not self.accepts_input():
                     # Do not carry a synthetic-silence deadline across an
                     # encoder reconnect. The first frame starts a fresh clock.
@@ -578,6 +605,8 @@ class IcecastAudioSink:
                             now + _PCM_INITIAL_PROGRAMME_GRACE_SECONDS
                         )
                     queued_bytes = self._queued_pcm_bytes()
+                    if pending_chunk is not None:
+                        queued_bytes += len(pending_chunk)
                     if queued_bytes > 0 and first_programme_queued_at is None:
                         first_programme_queued_at = now
                     if queued_bytes <= 0:
@@ -629,6 +658,8 @@ class IcecastAudioSink:
                     return
                 if starting:
                     queued_bytes = self._queued_pcm_bytes()
+                    if pending_chunk is not None:
+                        queued_bytes += len(pending_chunk)
                     reserve_ready = bool(
                         queued_bytes >= _PCM_PROGRAMME_START_RESERVE_BYTES
                         or (
@@ -641,12 +672,16 @@ class IcecastAudioSink:
                 else:
                     reserve_ready = True
                 if reserve_ready:
-                    try:
-                        chunk = self._pcm_queue.get_nowait()
+                    if pending_chunk is not None:
+                        chunk = pending_chunk
                         silence = False
-                    except queue.Empty:
-                        chunk = silence_chunk
-                        silence = True
+                    else:
+                        try:
+                            chunk = self._pcm_queue.get_nowait()
+                            silence = False
+                        except queue.Empty:
+                            chunk = silence_chunk
+                            silence = True
                     if not silence:
                         programme_started = True
                 else:
@@ -657,6 +692,9 @@ class IcecastAudioSink:
                     flush = getattr(stdin, "flush", None)
                     if callable(flush):
                         flush()
+                    if pending_chunk is not None and chunk is pending_chunk:
+                        pending_chunk = None
+                    failed_stdin = None
                     with self._writer_lock:
                         self._writer_failed = False
                         self._last_write_monotonic = time.monotonic()
@@ -676,7 +714,15 @@ class IcecastAudioSink:
                 except Exception:
                     with self._writer_lock:
                         self._writer_failed = True
-                    return
+                    if not silence:
+                        pending_chunk = chunk
+                    failed_stdin = stdin
+                    output_clock_started = False
+                    next_write = time.monotonic()
+                    initial_grace_deadline = None
+                    first_programme_queued_at = None
+                    self._writer_stop.wait(0.05)
+                    continue
                 wrote_at = time.monotonic()
                 frame_seconds = len(chunk) / _PCM_BYTES_PER_SECOND
                 # Sustained output cannot outrun its PCM clock. Permit at most
@@ -747,10 +793,11 @@ class IcecastAudioSink:
                     if self._writer_stop.is_set():
                         source.close()
                         return
-                    # A reconnect creates a fresh public stream clock. Keep
-                    # only the newest live reserve so the mount returns near
-                    # the current programme instead of staying far behind.
-                    self._trim_pcm_queue_to_latest_bytes(_PCM_LIVE_RESYNC_BYTES)
+                    # Lossy live streams discard stale PCM on reconnect. FLAC
+                    # keeps the queued programme in order to avoid skipping
+                    # already-scheduled audio after an origin stall.
+                    if self._drop_on_backpressure:
+                        self._trim_pcm_queue_to_latest_bytes(_PCM_LIVE_RESYNC_BYTES)
                     command = build_ffmpeg_encoded_sink_cmd(
                         effective_cfg, self.ffmpeg_bin
                     )
@@ -855,7 +902,6 @@ class IcecastAudioSink:
                     healthy = bool(self._mount_probe(cfg))
                 except Exception:
                     healthy = False
-                request_reconnect = False
                 with self._probe_lock:
                     if healthy:
                         self._probe_failures = 0
@@ -864,24 +910,8 @@ class IcecastAudioSink:
                         self._probe_failures += 1
                         if self._probe_failures >= self._probe_failure_threshold:
                             self._mount_healthy = False
-                        request_reconnect = (
-                            self._probe_failures
-                            >= self._reconnect_failure_threshold
-                            and self._probe_failures
-                            % self._reconnect_failure_threshold
-                            == 0
-                        )
-                if request_reconnect:
-                    # A listener mount can disappear while the source socket
-                    # still accepts buffered writes. Terminating only the local
-                    # encoder unblocks the connector and re-registers the mount;
-                    # transient probe noise below this threshold remains passive.
-                    proc = self._process
-                    if proc is not None and proc.poll() is None:
-                        try:
-                            proc.terminate()
-                        except Exception:
-                            pass
+                # Listener health is diagnostic evidence only. Source writes
+                # and encoder failures own reconnection, never a failed GET.
                 if self._probe_stop.wait(self._probe_interval_sec):
                     return
 
@@ -898,10 +928,16 @@ class IcecastAudioSink:
             return self._process
         self.stop(preserve_probe_state=False)
         profile = str(cfg.stream_codec_profile or "").strip().lower()
+        flac_output = profile.startswith(("ogg_flac", "flac_ogg"))
         queue_capacity = (
             _PCM_FLAC_QUEUE_MAX_CHUNKS
-            if profile.startswith(("ogg_flac", "flac_ogg"))
+            if flac_output
             else _PCM_QUEUE_MAX_CHUNKS
+        )
+        # Preserve the FLAC branch's queued audio across origin stalls. Lossy
+        # streams keep the existing bounded live-resync behavior.
+        self._drop_on_backpressure = (
+            self._configured_drop_on_backpressure and not flac_output
         )
         if queue_capacity != self._pcm_queue_capacity_chunks:
             self._pcm_queue_capacity_chunks = queue_capacity

@@ -9,7 +9,9 @@ from typing import Callable
 from app.audio.gst_pipeline import StationPipelineConfig, resolve_stream_profile
 
 
-DEFAULT_SOURCE_WRITE_TIMEOUT_SECONDS = 5.0
+# Once authenticated, transient origin backpressure must not disconnect listeners.
+# Connect and handshake deadlines remain bounded; peer/network errors still retry.
+DEFAULT_SOURCE_WRITE_TIMEOUT_SECONDS = None
 
 
 class IcecastSourceProtocolError(RuntimeError):

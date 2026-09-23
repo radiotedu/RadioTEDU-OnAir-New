@@ -11,6 +11,7 @@ from app.audio.virtual_sources import is_silence_input_uri
 from app.db import get_connection
 from app.engine.lease import LeaseService
 from app.engine.ad_policy import ads_enabled_from_settings, station_ads_enabled
+from app.engine.broadcast_plan_policy import resolve_sweeper_plan, station_has_planned_ad
 from app.media_paths import resolve_runtime_media_path
 from app.engine.playout_state import PlayoutStateService
 from app.engine.priority import choose_source
@@ -128,7 +129,7 @@ class StationWorker:
 
     def _default_crossfade_seconds(self) -> float:
         raw_value = SettingsRepository(self.conn).get_system().get(
-            "default_crossfade_seconds", 0.0
+            "default_crossfade_seconds", 5.0
         )
         try:
             return max(0.0, float(raw_value or 0.0))
@@ -856,7 +857,9 @@ class StationWorker:
         if conn is None:
             return False
         try:
-            return station_ads_enabled(conn, self.station_id)
+            return station_ads_enabled(conn, self.station_id) or station_has_planned_ad(
+                conn, self.station_id
+            )
         except Exception:
             _log.exception(
                 "Could not evaluate ad policy for station_id=%s; ads disabled",
@@ -1209,15 +1212,9 @@ class StationWorker:
                     next_type = str(next_pending["track_type"] or "music").strip().lower()
                 except (KeyError, IndexError):
                     next_type = "music"
-                if (
-                    next_type in {"music", "jingle"}
-                    and current_type in {"music", "jingle"}
-                ):
-                    configured_crossfade = self._default_crossfade_seconds()
-                    if configured_crossfade > 0.0:
-                        crossfade = min(0.25, configured_crossfade)
-                    if current_type == "music" and next_type == "music":
-                        crossfade = configured_crossfade
+                if current_type == "music" and next_type == "music":
+                    # Station IDs start at a song boundary; only songs overlap.
+                    crossfade = self._default_crossfade_seconds()
         advance_at = max(0.0, duration - crossfade)
 
         # A healthy encoder process can still be rendering the wrong file after
@@ -1291,8 +1288,8 @@ class StationWorker:
 
         if elapsed >= advance_at:
             music_crossfade_due = (
-                current_type in {"music", "jingle"}
-                and next_type in {"music", "jingle"}
+                current_type == "music"
+                and next_type == "music"
                 and crossfade > 0.0
             )
             if self.runtime_registry and not music_crossfade_due:
@@ -1476,13 +1473,27 @@ class StationWorker:
             baseline_queue_id = max(0, int(settings.get("sweeper_baseline_queue_id", 0) or 0))
         except (TypeError, ValueError):
             baseline_queue_id = 0
-        return {
+        output = {
             "enabled": enabled,
             "interval": interval,
             "interval_unit": interval_unit,
             "baseline_queue_id": baseline_queue_id,
             "mode": mode,
+            "track_id": None,
         }
+        try:
+            planned = resolve_sweeper_plan(self.conn, self.station_id)
+            if planned.get("governed"):
+                active_plan = planned.get("active")
+                output["enabled"] = active_plan is not None
+                if active_plan:
+                    output["interval"] = int(active_plan["interval"])
+                    output["interval_unit"] = "tracks"
+                    output["mode"] = str(active_plan.get("mode") or "ordered")
+                    output["track_id"] = int(active_plan["track_id"])
+        except Exception:
+            _log.exception("Could not evaluate broadcast sweeper plans for station_id=%s", self.station_id)
+        return output
 
     def _count_music_since_last_jingle(self) -> int:
         """Count how many music tracks have been played since the last jingle."""
@@ -1540,16 +1551,20 @@ class StationWorker:
 
     def _pick_random_jingle(self) -> dict | None:
         """Pick the next active jingle deterministically for this station only."""
+        planned_track_id = self._get_sweeper_settings().get("track_id")
+        track_filter = "AND id=? " if planned_track_id else ""
+        params = (self.station_id, int(planned_track_id)) if planned_track_id else (self.station_id,)
         cur = self.conn.cursor()
         cur.execute(
             "SELECT id FROM tracks "
             "WHERE station_id=? "
             "AND LOWER(COALESCE(track_type, ''))='jingle' AND is_active=1 "
             "AND COALESCE(file_path, '') <> '' "
-            "ORDER BY COALESCE(play_count, 0) ASC, "
+            + track_filter
+            + "ORDER BY COALESCE(play_count, 0) ASC, "
             "CASE WHEN last_played_at IS NULL OR TRIM(last_played_at)='' THEN 0 ELSE 1 END ASC, "
             "last_played_at ASC, id ASC LIMIT 1",
-            (self.station_id,),
+            params,
         )
         rows = cur.fetchall()
         if not rows:
