@@ -48,6 +48,14 @@ class _FakePipe:
         return None
 
 
+def _advance_fake_monotonic(monkeypatch, clock):
+    def now():
+        clock["value"] += 0.01
+        return clock["value"]
+
+    monkeypatch.setattr(runtime_module.time, "monotonic", now)
+
+
 class _FakeLiveMicRegistry:
     def __init__(self, *, transmitting: bool, active_user: dict | None = None, mic_pcm: bytes = b""):
         self.transmitting = bool(transmitting)
@@ -312,7 +320,7 @@ def test_runtime_restarts_when_input_changes():
     assert len(launched) == 2
 
 
-def test_runtime_uses_crossfade_path_for_music_to_music():
+def test_runtime_uses_crossfade_path_for_music_to_music(monkeypatch):
     launched = []
     procs = [_FakeProcess(), _FakeProcess(), _FakeProcess()]
 
@@ -321,6 +329,9 @@ def test_runtime_uses_crossfade_path_for_music_to_music():
         return procs[len(launched) - 1]
 
     runtime = StationRuntime(process_factory=_factory)
+    runtime.ffmpeg_bin = "ffmpeg.exe"
+    runtime._refresh_runtime_bins = lambda: None
+    monkeypatch.setattr(runtime_module.os.path, "isfile", lambda _path: True)
     runtime.start(
         _make_cfg(
             input_uri="C:/music/a.mp3",
@@ -371,7 +382,7 @@ def test_runtime_keeps_hard_cut_for_music_to_ads():
     assert sum("-filter_complex" in cmd for cmd in launched) == 0
 
 
-def test_runtime_uses_short_crossfade_for_music_to_jingle():
+def test_runtime_keeps_full_song_before_jingle_boundary():
     launched = []
     procs = [_FakeProcess(), _FakeProcess(), _FakeProcess()]
 
@@ -397,8 +408,9 @@ def test_runtime_uses_short_crossfade_for_music_to_jingle():
         )
     )
 
-    assert runtime._last_transition_mode == "crossfade"
-    assert runtime._active_cfg.crossfade_seconds == 0.25
+    assert runtime._last_transition_mode == "restart"
+    assert runtime._active_cfg.track_type == "jingle"
+    assert sum("-filter_complex" in cmd for cmd in launched) == 0
 
 
 def test_runtime_keeps_hard_cut_for_ads_to_music():
@@ -470,9 +482,11 @@ def test_runtime_uses_ffmpeg_transition_for_music_to_music_when_supported(monkey
         launched.append(cmd)
         return procs[len(launched) - 1]
 
-    monkeypatch.setattr(runtime_module.time, "monotonic", lambda: clock["value"])
+    _advance_fake_monotonic(monkeypatch, clock)
     runtime = StationRuntime(process_factory=_factory)
     runtime.ffmpeg_bin = "ffmpeg.exe"
+    runtime._refresh_runtime_bins = lambda: None
+    monkeypatch.setattr(runtime_module.os.path, "isfile", lambda _path: True)
 
     runtime.start(
         _make_cfg(
@@ -500,7 +514,7 @@ def test_runtime_uses_ffmpeg_transition_for_music_to_music_when_supported(monkey
     # so FFmpeg owns only the original and transition PCM producers.
     assert len(ffmpeg_cmds) == 2
     assert "-ss" in transition_cmd
-    assert "5.000" in " ".join(transition_cmd)
+    assert "d=3.000" in " ".join(transition_cmd)
     assert procs[0].terminated is True
     assert procs[1].terminated is False
     assert runtime.is_running() is True
@@ -524,6 +538,8 @@ def test_runtime_falls_back_to_restart_when_transition_setup_fails(monkeypatch):
     monkeypatch.setattr(runtime_module.time, "monotonic", lambda: clock["value"])
     runtime = StationRuntime(process_factory=_factory)
     runtime.ffmpeg_bin = "ffmpeg.exe"
+    runtime._refresh_runtime_bins = lambda: None
+    monkeypatch.setattr(runtime_module.os.path, "isfile", lambda _path: True)
 
     runtime.start(
         _make_cfg(
@@ -563,6 +579,7 @@ def test_runtime_falls_back_to_restart_when_local_transition_backend_is_missing(
     monkeypatch.setattr(runtime_module.time, "monotonic", lambda: clock["value"])
     runtime = StationRuntime(process_factory=_factory)
     runtime.ffmpeg_bin = "ffmpeg.exe"
+    runtime._refresh_runtime_bins = lambda: None
     runtime.ffplay_bin = None
 
     runtime.start(
@@ -598,9 +615,11 @@ def test_runtime_does_not_chain_crossfade_during_active_transition(monkeypatch):
         launched.append(cmd)
         return procs[len(launched) - 1]
 
-    monkeypatch.setattr(runtime_module.time, "monotonic", lambda: clock["value"])
+    _advance_fake_monotonic(monkeypatch, clock)
     runtime = StationRuntime(process_factory=_factory)
     runtime.ffmpeg_bin = "ffmpeg.exe"
+    runtime._refresh_runtime_bins = lambda: None
+    monkeypatch.setattr(runtime_module.os.path, "isfile", lambda _path: True)
 
     runtime.start(
         _make_cfg(
@@ -641,6 +660,7 @@ def test_runtime_local_only_start_uses_raw_pcm_ffmpeg_producer_when_gst_is_missi
     runtime = StationRuntime(process_factory=factory)
     runtime.ffmpeg_bin = "ffmpeg.exe"
     runtime.ffplay_bin = "ffplay.exe"
+    runtime._refresh_runtime_bins = lambda: None
 
     runtime.start(
         _make_cfg(
@@ -706,6 +726,8 @@ def test_runtime_local_only_crossfade_reuses_persistent_sink_when_gst_is_missing
     runtime = StationRuntime(process_factory=factory)
     runtime.ffmpeg_bin = "ffmpeg.exe"
     runtime.ffplay_bin = "ffplay.exe"
+    runtime._refresh_runtime_bins = lambda: None
+    monkeypatch.setattr(runtime_module.os.path, "isfile", lambda _path: True)
 
     runtime.start(
         _make_cfg(
@@ -806,6 +828,7 @@ def test_runtime_icecast_only_track_change_reuses_persistent_sink_when_gst_is_mi
     runtime = StationRuntime(process_factory=factory)
     runtime.ffmpeg_bin = "ffmpeg.exe"
     runtime.ffplay_bin = None
+    runtime._refresh_runtime_bins = lambda: None
 
     runtime.start(
         _make_cfg(
@@ -842,10 +865,12 @@ def test_runtime_icecast_only_crossfade_reuses_persistent_sink_when_gst_is_missi
     launched, ffmpeg_procs, ffplay_procs, factory = _make_gst_missing_factory()
     clock = {"value": 80.0}
 
-    monkeypatch.setattr(runtime_module.time, "monotonic", lambda: clock["value"])
+    _advance_fake_monotonic(monkeypatch, clock)
     runtime = StationRuntime(process_factory=factory)
     runtime.ffmpeg_bin = "ffmpeg.exe"
     runtime.ffplay_bin = None
+    runtime._refresh_runtime_bins = lambda: None
+    monkeypatch.setattr(runtime_module.os.path, "isfile", lambda _path: True)
 
     runtime.start(
         _make_cfg(

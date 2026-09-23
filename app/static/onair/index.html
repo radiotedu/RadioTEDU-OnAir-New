@@ -522,6 +522,17 @@
           <p id="passwordResult" class="action-result" aria-live="polite"></p>
         </article>
 
+        <article id="systemAudioSettingsPanel" class="panel configuration-panel" data-operator-view="settings">
+          <div class="panel-heading"><div><div class="eyebrow">PLAYOUT QUALITY</div><h2>Music transitions</h2></div><span id="systemAudioSettingsState" class="mini-state">Loading</span></div>
+          <p class="card-copy">Set the overlap between consecutive music tracks. Sweepers, ads, and recorded programmes start at track boundaries so music is never cut short for an insert.</p>
+          <form id="systemAudioSettingsForm" class="operator-form">
+            <label>Music crossfade (seconds)<input id="defaultCrossfadeSeconds" type="number" min="0" max="30" step="0.5" value="5" required></label>
+            <small>0 disables crossfade. Use 2–6 seconds for a conventional radio blend; the current default is 5 seconds.</small>
+            <div class="button-row"><button id="saveSystemAudioSettingsButton" class="button primary" type="submit">Save and verify</button><button id="refreshSystemAudioSettingsButton" class="button secondary" type="button">Reload settings</button></div>
+          </form>
+          <p id="systemAudioSettingsResult" class="action-result" aria-live="polite"></p>
+        </article>
+
         <article id="hlsSettingsPanel" class="panel configuration-panel" data-operator-view="settings">
           <div class="panel-heading"><div><div class="eyebrow">LIVE DELIVERY</div><h2>HLS</h2></div><span id="hlsSettingsState" class="mini-state">Off · hazır değil</span></div>
           <p class="card-copy">RadioTEDU’nun altı normal mount’unu doğrudan okur ve yalnızca <strong>libfdk_aac ile HE-AAC v1</strong> Low 96 / High 192 kbit/s HLS üretir. Kaynak ses byte’ları doğrulanmadan hiçbir FFmpeg writer başlatılmaz; Opus fallback yoktur.</p>

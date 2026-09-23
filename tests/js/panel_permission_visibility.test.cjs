@@ -4,7 +4,7 @@ const { html, appJs, section } = require('./unified_test_helpers.cjs');
 
 const expectedViews = [
   'onair', 'media', 'playlists', 'automation', 'emergency', 'services', 'settings', 'diagnostics',
-  'stations', 'queue', 'scheduler', 'dayparting', 'shows', 'compliance', 'ads', 'streaming', 'recovery',
+  'stations', 'queue', 'scheduler', 'broadcast-planner', 'dayparting', 'shows', 'compliance', 'ads', 'streaming', 'recovery',
 ];
 
 test('navigation exposes every required RadioTEDU workspace', () => {

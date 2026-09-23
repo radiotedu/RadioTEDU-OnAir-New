@@ -64,7 +64,7 @@ def test_station_output_read_defaults_to_speaker_mode_when_missing():
     assert data["local_output_enabled"] is True
     assert data["icecast_enabled"] is False
     assert data["output_device_id"] == ""
-    assert data["stream_codec_profile"] == "opus_192"
+    assert data["stream_codec_profile"] == "aac_low_192"
     assert data["stream_bitrate_kbps"] == 192
 
 

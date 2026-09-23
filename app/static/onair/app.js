@@ -5267,6 +5267,48 @@ async function loadHlsSettings() {
   return state.hlsSettings;
 }
 
+async function loadSystemAudioSettings() {
+  const payload = await api('/api/settings/system');
+  const settings = payload?.settings || payload || {};
+  const input = $('defaultCrossfadeSeconds');
+  if (input.dataset.dirty !== '1') {
+    input.value = String(Number(settings.default_crossfade_seconds ?? 5));
+  }
+  const seconds = Number(settings.default_crossfade_seconds ?? 5);
+  $('systemAudioSettingsState').textContent = `${seconds.toFixed(1)} s saved`;
+  return settings;
+}
+
+async function saveSystemAudioSettings(event) {
+  event.preventDefault();
+  const input = $('defaultCrossfadeSeconds');
+  const seconds = Number(input.value);
+  if (!Number.isFinite(seconds) || seconds < 0 || seconds > 30) {
+    setResult('systemAudioSettingsResult', 'Crossfade must be between 0 and 30 seconds.', 'error');
+    return;
+  }
+  setBusy(true, 'Saving music transition settings…', 'Writing settings and verifying the saved value');
+  setResult('systemAudioSettingsResult');
+  try {
+    await api('/api/settings/system', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ default_crossfade_seconds: seconds }),
+    });
+    input.dataset.dirty = '0';
+    const settings = await loadSystemAudioSettings();
+    const saved = Number(settings.default_crossfade_seconds);
+    if (!Number.isFinite(saved) || Math.abs(saved - seconds) > 0.001) {
+      throw new Error('Crossfade setting did not match the saved value');
+    }
+    setResult('systemAudioSettingsResult', `Verified: music crossfade is ${saved.toFixed(1)} seconds. The next music transition will use this value.`, 'success');
+  } catch (error) {
+    setResult('systemAudioSettingsResult', errorMessage(error), 'error');
+  } finally {
+    setBusy(false);
+  }
+}
+
 async function startHls() {
   setBusy(true, 'HLS başlatılıyor...', 'Altı Icecast mount’unda ses byte’ları ve HE-AAC playlistleri doğrulanıyor');
   setResult('hlsSettingsResult');
@@ -5774,8 +5816,11 @@ async function loadOperatorViewData(view) {
   if (view === 'broadcast-planner') {
     try { await loadBroadcastPlanner(); } catch (error) { setResult('broadcastPlanResult', errorMessage(error), 'error'); }
   }
-  if (!IS_RTAI_ONAIR && view === 'settings') {
-    try { await loadHlsSettings(); } catch (error) { setResult('hlsSettingsResult', errorMessage(error), 'error'); }
+  if (view === 'settings') {
+    try { await loadSystemAudioSettings(); } catch (error) { setResult('systemAudioSettingsResult', errorMessage(error), 'error'); }
+    if (!IS_RTAI_ONAIR) {
+      try { await loadHlsSettings(); } catch (error) { setResult('hlsSettingsResult', errorMessage(error), 'error'); }
+    }
   }
   if (view === 'streaming') {
     try { await loadStreamingFeatures(); } catch (error) { setResult('streamingFeaturesResult', errorMessage(error), 'error'); }
@@ -5789,7 +5834,11 @@ async function loadOperatorViewData(view) {
 function startRefreshTimer() {
   stopRefreshTimer();
   state.refreshTimer = window.setInterval(() => {
-    if (!state.busy && !document.hidden) Promise.all([loadCoreStatus(), loadQueue()]).then(() => setConnection('online', 'Backend connected')).catch(() => setConnection('offline', 'Connection failed'));
+    if (!state.busy && !document.hidden) {
+      const refreshes = [loadCoreStatus()];
+      if (['onair', 'queue'].includes(state.activeView)) refreshes.push(loadQueue());
+      Promise.all(refreshes).then(() => setConnection('online', 'Backend connected')).catch(() => setConnection('offline', 'Connection failed'));
+    }
   }, 5000);
 }
 
@@ -5804,6 +5853,8 @@ function bindEvents() {
   $('continueSessionButton').addEventListener('click', recordUserActivity);
   ['pointerdown', 'keydown', 'touchstart'].forEach((eventName) => document.addEventListener(eventName, recordUserActivity, { passive: true }));
   $('refreshButton').addEventListener('click', () => refreshAll(false));
+  $('systemAudioSettingsForm').addEventListener('submit', saveSystemAudioSettings);
+  $('refreshSystemAudioSettingsButton').addEventListener('click', () => loadSystemAudioSettings().then(() => setResult('systemAudioSettingsResult', 'Music transition settings reloaded.', 'success')).catch((error) => setResult('systemAudioSettingsResult', errorMessage(error), 'error')));
   $('queueRefreshButton').addEventListener('click', () => loadQueue().catch((error) => toast(errorMessage(error), 'error')));
   $('speakerMonitorForm').addEventListener('submit', saveSpeakerMonitor);
   $('startupSoundForm').addEventListener('submit', saveStartupSound);

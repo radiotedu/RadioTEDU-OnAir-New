@@ -153,7 +153,7 @@ def test_worker_process_once_autofills_empty_queue_and_starts_first_track(
             "stream_title": "Fresh Song",
             "stream_artist": "Artist A",
             "track_type": "music",
-            "crossfade_seconds": 3.0,
+            "crossfade_seconds": 5.0,
             "start_offset_seconds": 0.0,
         }
     ]
@@ -883,7 +883,7 @@ def test_worker_process_once_prerolls_next_music_track_inside_crossfade_window(
             "stream_title": "Next Song",
             "stream_artist": "Artist B",
             "track_type": "music",
-            "crossfade_seconds": 3.0,
+            "crossfade_seconds": 5.0,
             "start_offset_seconds": 0.0,
         }
     ]

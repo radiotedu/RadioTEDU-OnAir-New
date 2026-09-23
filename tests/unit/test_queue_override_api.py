@@ -6,7 +6,16 @@ from app.repositories.ad_break_repo import AdBreakRepository
 from app.repositories.schedule_repo import ScheduleRepository
 
 
-def test_queue_push_and_state_show_manual_source():
+def test_queue_push_and_state_show_manual_source(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLEANROOM_DB_PATH", str(tmp_path / "cleanroom.db"))
+    init_db()
+    conn = get_connection()
+    conn.execute(
+        "INSERT INTO tracks (id, station_id, title, artist, file_path, track_type, is_active, duration) "
+        "VALUES (77, 1, 'Manual test', 'Test Artist', 'C:/music/manual.mp3', 'music', 1, 180)"
+    )
+    conn.commit()
+    conn.close()
     client = TestClient(app)
     push_res = client.post("/api/queue/push", json={"station_id": 1, "track_id": 77})
     assert push_res.status_code == 200
@@ -15,7 +24,16 @@ def test_queue_push_and_state_show_manual_source():
     assert state_res.json()["next_source"] == "manual"
 
 
-def test_queue_items_endpoint_lists_recent_items():
+def test_queue_items_endpoint_lists_recent_items(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLEANROOM_DB_PATH", str(tmp_path / "cleanroom.db"))
+    init_db()
+    conn = get_connection()
+    conn.execute(
+        "INSERT INTO tracks (id, station_id, title, artist, file_path, track_type, is_active, duration) "
+        "VALUES (88, 2, 'Manual test', 'Test Artist', 'C:/music/manual.mp3', 'music', 1, 180)"
+    )
+    conn.commit()
+    conn.close()
     client = TestClient(app)
     push_res = client.post("/api/queue/push", json={"station_id": 2, "track_id": 88})
     assert push_res.status_code == 200

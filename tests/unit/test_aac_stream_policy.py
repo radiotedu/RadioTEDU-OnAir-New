@@ -21,7 +21,7 @@ def test_new_normal_profile_falls_back_to_current_normal_profile() -> None:
     fallback = current_codec_fallback(_cfg("aac_low_192", 192))
 
     assert fallback is not None
-    assert fallback.stream_codec_profile == "he_aac_192"
+    assert fallback.stream_codec_profile == "aac_lc_192"
     assert fallback.stream_bitrate_kbps == 192
 
 

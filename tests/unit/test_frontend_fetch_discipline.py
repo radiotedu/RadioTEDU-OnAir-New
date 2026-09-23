@@ -43,8 +43,20 @@ def test_background_refresh_skips_hidden_or_busy_operator_shell():
     polling = _function_source(source, "startRefreshTimer")
 
     assert "!state.busy && !document.hidden" in polling
-    assert "Promise.all([loadCoreStatus(), loadQueue()])" in polling
+    assert "const refreshes = [loadCoreStatus()]" in polling
+    assert "if (['onair', 'queue'].includes(state.activeView)) refreshes.push(loadQueue())" in polling
     assert "}, 5000);" in polling
+
+
+def test_music_crossfade_has_an_operator_control_and_insert_hard_boundaries():
+    html = (ROOT / "app" / "static" / "onair" / "index.html").read_text(encoding="utf-8")
+    source = APP_JS.read_text(encoding="utf-8")
+
+    assert 'id="defaultCrossfadeSeconds"' in html
+    assert 'id="systemAudioSettingsForm"' in html
+    assert "default_crossfade_seconds: seconds" in source
+    assert "Sweepers, ads, and recorded programmes start at track boundaries" in html
+    assert "Save and verify" in html
 
 
 def test_boot_defers_station_state_until_session_is_validated():

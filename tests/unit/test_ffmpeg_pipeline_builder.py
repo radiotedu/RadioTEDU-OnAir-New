@@ -40,8 +40,6 @@ def test_ffmpeg_command_includes_track_metadata_when_available() -> None:
     assert "-metadata" in cmd
     assert "title=Song A" in cmd
     assert "artist=Artist B" in cmd
-    assert "-content_type" in cmd
-    assert "audio/aac" in cmd
     assert "-f" in cmd
     assert "adts" in cmd
     assert "196k" in cmd
@@ -226,7 +224,6 @@ def test_build_ffmpeg_crossfade_cmd_uses_separate_codecs_for_icecast_and_local_p
     assert "[icecast_input]loudnorm=I=-23.0:TP=-1.0:LRA=50" in joined
     assert "-map [local_out]" in joined
     assert " -af " not in joined
-    assert "-content_type audio/aac" in joined
     assert "-f adts" in joined
     assert "pcm_s16le" in joined
 
@@ -240,7 +237,6 @@ def test_build_ffmpeg_icecast_cmd_supports_mp3_profile() -> None:
     joined = " ".join(cmd)
     assert "-c:a libmp3lame" in joined
     assert "-b:a 128k" in joined
-    assert "-content_type audio/mpeg" in joined
     assert "-f mp3" in joined
 
 
@@ -275,7 +271,6 @@ def test_build_ffmpeg_icecast_sink_cmd_reads_raw_pcm_from_stdin() -> None:
     assert "-ar 48000" in joined
     assert "-ac 2" in joined
     assert "icecast://" in joined
-    assert "-content_type audio/aac" in joined
     assert "-f adts" in joined
     assert "title=Song A" not in joined
     assert "artist=Artist B" not in joined

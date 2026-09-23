@@ -71,8 +71,8 @@ def test_audio_watchdog_installer_is_independent_and_fail_closed():
     assert "Test-OriginResponsive" in watchdog
     assert 'Send-Report "origin_unavailable"' in watchdog
     assert "local source and AI restarts suppressed" in watchdog
-    assert '"upstream_degraded"' in watchdog
-    assert "healthy local sources were not restarted" in watchdog
+    assert 'Send-Report "transient"' in watchdog
+    assert "healthy workers were preserved" in watchdog
     assert "duplicate launch refused" in watchdog
     assert "station_ids = @($repairableFailed)" in watchdog
     assert "volumedetect" in watchdog

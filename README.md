@@ -161,6 +161,8 @@ powershell -ExecutionPolicy Bypass -File .\installer\build_setup.ps1
 powershell -ExecutionPolicy Bypass -File .\smoke_test_desktop_bundle.ps1
 ```
 
+The packaged backend bundle is the self-contained service payload used by the desktop and portable releases.
+
 `last_build_path.txt` and `last_setup_path.txt` record the verified backend and installer artifacts used by the smoke workflow.
 
 ## Browser audio and deployment
@@ -186,6 +188,8 @@ For reverse-proxy deployment, place the app behind HTTPS and let the browser rea
 - Every material configuration mutation is read back before the operator wall reports success.
 
 See [Quality-output architecture](docs/QUALITY_OUTPUTS_ARCHITECTURE.md), [16-mount operations](docs/16_MOUNT_STREAM_OPERATIONS.md), and [Deterministic operator guide](docs/DETERMINISTIC_OPERATOR_GUIDE.md).
+
+Operator references: [Deterministic operator guide](docs/DETERMINISTIC_OPERATOR_GUIDE.md), [Troubleshooting](docs/TROUBLESHOOTING.md), [Configuration reference](docs/CONFIGURATION_REFERENCE.md), and [Test report](docs/TEST_REPORT.md).
 
 ## Portable recovery and macOS
 

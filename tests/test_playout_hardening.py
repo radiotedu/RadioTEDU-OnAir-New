@@ -1995,7 +1995,7 @@ class PlayoutHardeningTests(unittest.TestCase):
             allow_success.set()
             sink.stop()
 
-    def test_icecast_sink_reconnects_after_sustained_listener_probe_failure(self):
+    def test_icecast_sink_does_not_reconnect_only_for_listener_probe_failure(self):
         import time
 
         spawned = []
@@ -2033,7 +2033,7 @@ class PlayoutHardeningTests(unittest.TestCase):
 
             second = sink.ensure_started(cfg)
 
-            self.assertTrue(first.terminated)
+            self.assertFalse(first.terminated)
             self.assertIn(second, (None, first, *spawned))
             self.assertGreaterEqual(len(spawned), 1)
             self.assertTrue(sink._connector_thread.is_alive())

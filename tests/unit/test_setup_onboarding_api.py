@@ -344,7 +344,7 @@ def test_setup_configure_parses_operator_icecast_url(client, monkeypatch):
             "icecast_mount": "",
             "icecast_user": "source",
             "icecast_password": "",
-            "stream_codec_profile": "opus_192",
+            "stream_codec_profile": "aac_low_192",
             "ai_enabled": False,
             "ai_warmth": "warm",
         },
@@ -397,7 +397,7 @@ def test_setup_allows_system_default_monitor_without_device_enumeration(client, 
             icecast_mount="/live",
             icecast_user="source",
             icecast_password="hackme",
-            stream_codec_profile="opus_192",
+            stream_codec_profile="aac_low_192",
             stream_bitrate_kbps=192,
         )
     finally:
@@ -439,7 +439,7 @@ def test_setup_configure_resolves_invalid_station_to_active_station(client, monk
     assert payload["station_id"] == 1
     assert payload["station"]["name"] == "Upgrade Safe Station"
     assert payload["config"]["icecast_mount"] == "/live"
-    assert payload["config"]["stream_codec_profile"] == "opus_192"
+    assert payload["config"]["stream_codec_profile"] == "aac_low_192"
 
 
 def test_setup_exposes_only_the_approved_aac_quality_presets():

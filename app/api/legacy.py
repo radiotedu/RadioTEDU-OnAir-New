@@ -1,6 +1,7 @@
 import csv
 import hashlib
 import json
+import math
 import logging
 import os
 import shutil
@@ -2140,20 +2141,40 @@ def set_speaker_monitor_station(
 def get_system_settings():
     init_db()
     conn = get_connection()
-    settings = _system_settings_snapshot(conn)
-    return {"settings": settings, **settings}
+    try:
+        settings = _system_settings_snapshot(conn)
+        return {"settings": settings, **settings}
+    finally:
+        conn.close()
 
 
 @router.put("/api/settings/system")
 def update_system_settings(payload: dict | None = Body(default=None)):
     init_db()
     conn = get_connection()
-    repo = SettingsRepository(conn)
-    _system_settings_snapshot(conn)
-    values = _extract_update_values(payload)
-    repo.upsert_system(values)
-    settings = _system_settings_snapshot(conn)
-    return {"ok": True, "settings": settings, **settings}
+    try:
+        repo = SettingsRepository(conn)
+        _system_settings_snapshot(conn)
+        values = _extract_update_values(payload)
+        if "default_crossfade_seconds" in values:
+            try:
+                crossfade = float(values["default_crossfade_seconds"])
+            except (TypeError, ValueError):
+                raise HTTPException(
+                    status_code=422,
+                    detail="default_crossfade_seconds_must_be_between_0_and_30",
+                )
+            if not math.isfinite(crossfade) or not 0.0 <= crossfade <= 30.0:
+                raise HTTPException(
+                    status_code=422,
+                    detail="default_crossfade_seconds_must_be_between_0_and_30",
+                )
+            values["default_crossfade_seconds"] = str(crossfade)
+        repo.upsert_system(values)
+        settings = _system_settings_snapshot(conn)
+        return {"ok": True, "settings": settings, **settings}
+    finally:
+        conn.close()
 
 
 @router.get("/api/settings/station")

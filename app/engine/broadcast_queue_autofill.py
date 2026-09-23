@@ -188,14 +188,30 @@ def _purge_inactive_pending_queue_items(conn, station_id: int) -> int:
     This also prevents already-queued jingles from collapsing together when deleted
     music rows disappear from a replace-managed live folder.
     """
+    # Legacy databases may not have completed the track_type migration yet.
+    # Treat tracks in those databases as music while still removing rows for
+    # missing or explicitly inactive media.
+    track_columns = {
+        str(row["name"] if hasattr(row, "keys") else row[1])
+        for row in conn.execute("PRAGMA table_info(tracks)").fetchall()
+    }
+    track_type_expr = (
+        "LOWER(COALESCE(t.track_type, 'music'))"
+        if "track_type" in track_columns
+        else "'music'"
+    )
+    inactive_track_expr = (
+        f"COALESCE(t.is_active,0)=0 AND {track_type_expr}<>'announcement'"
+        if "is_active" in track_columns
+        else "0"
+    )
+    owned_transaction = not bool(conn.in_transaction)
     cur = conn.cursor()
     cur.execute(
         "DELETE FROM queue_items AS q "
         "WHERE q.station_id=? AND q.status='pending' AND ("
         "  NOT EXISTS (SELECT 1 FROM tracks t WHERE t.id=q.track_id) OR "
-        "  EXISTS (SELECT 1 FROM tracks t WHERE t.id=q.track_id "
-        "          AND COALESCE(t.is_active,0)=0 "
-        "          AND LOWER(COALESCE(t.track_type,'music'))<>'announcement')"
+        f"  EXISTS (SELECT 1 FROM tracks t WHERE t.id=q.track_id AND {inactive_track_expr})"
         ")",
         (int(station_id),),
     )
@@ -204,7 +220,7 @@ def _purge_inactive_pending_queue_items(conn, station_id: int) -> int:
     # Leaving that empty transaction open makes QueueRepository believe an
     # outer transaction owns the subsequent enqueue, so it neither commits
     # the new queue rows nor releases the database lock.
-    if conn.in_transaction:
+    if owned_transaction and conn.in_transaction:
         conn.commit()
     return removed
 
