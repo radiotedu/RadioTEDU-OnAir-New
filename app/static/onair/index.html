@@ -522,17 +522,6 @@
           <p id="passwordResult" class="action-result" aria-live="polite"></p>
         </article>
 
-        <article id="systemAudioSettingsPanel" class="panel configuration-panel" data-operator-view="settings">
-          <div class="panel-heading"><div><div class="eyebrow">PLAYOUT QUALITY</div><h2>Music transitions</h2></div><span id="systemAudioSettingsState" class="mini-state">Loading</span></div>
-          <p class="card-copy">Set the overlap between consecutive music tracks. Sweepers, ads, and recorded programmes start at track boundaries so music is never cut short for an insert.</p>
-          <form id="systemAudioSettingsForm" class="operator-form">
-            <label>Music crossfade (seconds)<input id="defaultCrossfadeSeconds" type="number" min="0" max="30" step="0.5" value="5" required></label>
-            <small>0 disables crossfade. Use 2–6 seconds for a conventional radio blend; the current default is 5 seconds.</small>
-            <div class="button-row"><button id="saveSystemAudioSettingsButton" class="button primary" type="submit">Save and verify</button><button id="refreshSystemAudioSettingsButton" class="button secondary" type="button">Reload settings</button></div>
-          </form>
-          <p id="systemAudioSettingsResult" class="action-result" aria-live="polite"></p>
-        </article>
-
         <article id="hlsSettingsPanel" class="panel configuration-panel" data-operator-view="settings">
           <div class="panel-heading"><div><div class="eyebrow">LIVE DELIVERY</div><h2>HLS</h2></div><span id="hlsSettingsState" class="mini-state">Off · hazır değil</span></div>
           <p class="card-copy">RadioTEDU’nun altı normal mount’unu doğrudan okur ve yalnızca <strong>libfdk_aac ile HE-AAC v1</strong> Low 96 / High 192 kbit/s HLS üretir. Kaynak ses byte’ları doğrulanmadan hiçbir FFmpeg writer başlatılmaz; Opus fallback yoktur.</p>
@@ -885,11 +874,21 @@
           <p id="musicClosureResult" class="action-result" aria-live="polite"></p>
         </article>
 
+        <article id="adCatalogPanel" class="panel" data-operator-view="ads">
+          <div class="panel-heading"><div><div class="eyebrow">APPROVED AD LIBRARY</div><h2>Ads folder</h2></div><span id="adCatalogCount" class="count-badge">Loading</span></div>
+          <p class="card-copy">Prepare approved files from the watched Ads folder for selected stations. This creates ad-library entries only; it does not schedule or interrupt a broadcast.</p>
+          <div id="adCatalogList" class="record-list"><div class="empty-state">Load Advertising to check the Ads folder.</div></div>
+          <label>Target stations<select id="adCatalogTargetStations" multiple size="5" aria-describedby="adCatalogTargetHelp"></select></label>
+          <small id="adCatalogTargetHelp">Select one or more stations. Ctrl-click selects several on desktop.</small>
+          <div class="button-row"><button id="syncAdCatalogButton" class="button primary" type="button">Prepare Ads for selected stations</button><button id="refreshAdCatalogButton" class="button secondary" type="button">Refresh Ads folder</button></div>
+          <p id="adCatalogResult" class="action-result" aria-live="polite"></p>
+        </article>
+
         <article id="adItemsPanel" class="panel" data-operator-view="ads">
           <div class="panel-heading"><div><div class="eyebrow">AD QUEUE</div><h2>Scheduled advertising items</h2></div><span id="adItemCount" class="count-badge">0</span></div>
           <p class="card-copy">Queue an approved library track for a specific time. The station and system ad-insertion policies must both be enabled.</p>
           <form id="adItemForm" class="operator-form">
-            <div class="field-grid two"><label>Track ID<input id="adItemTrackId" type="number" min="1" step="1" required></label><label>Due at<input id="adItemDueAt" type="datetime-local" required></label></div>
+            <div class="field-grid two"><label>Ad track<select id="adItemTrackId" required><option value="">Prepare an Ads folder item first</option></select></label><label>Due at<input id="adItemDueAt" type="datetime-local" required></label></div>
             <label>Priority<input id="adItemPriority" type="number" step="1" value="0"></label>
             <div class="button-row"><button id="enqueueAdItemButton" class="button primary" type="submit">Queue and verify ad item</button><button id="refreshAdsButton" class="button secondary" type="button">Refresh advertising</button></div>
           </form>
@@ -1028,7 +1027,7 @@
 
   <div id="busyOverlay" class="busy-overlay" hidden><div class="busy-card"><span class="spinner"></span><b id="busyTitle">Working...</b><small id="busyDetail">Waiting for verified state</small></div></div>
   <div id="toastRegion" class="toast-region" aria-live="assertive"></div>
-    <script src="/static/onair/app.js?v=42" defer></script>
+    <script src="/static/onair/app.js?v=49" defer></script>
     <script src="/static/onair/guest-room.js?v=6" defer></script>
     <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js', { scope: '/' });</script>
 </body>

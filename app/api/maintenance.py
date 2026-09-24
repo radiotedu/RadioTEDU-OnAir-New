@@ -52,7 +52,7 @@ def request_supervised_backend_reload(
             status_code=409,
             detail=(
                 "The updated Windows supervisor is not active yet. Restart "
-                "RadioTEDU.BroadcastSupervisor as Administrator or reboot once."
+                "RadioTEDU.OnAir.Supervisor as Administrator or reboot once."
             ),
         )
     try:

@@ -7,11 +7,11 @@ const root = path.resolve(__dirname, '..', '..');
 const html = fs.readFileSync(path.join(root, 'app', 'static', 'onair', 'index.html'), 'utf8');
 const app = fs.readFileSync(path.join(root, 'app', 'static', 'onair', 'app.js'), 'utf8');
 
-test('Streaming exposes the approved 14-local plus 2-external mount plan', () => {
+test('Streaming exposes eight configurable variants across six canonical music stations', () => {
   assert.match(html, /id="qualityOutputsPanel"/);
   assert.match(html, /8 ADDITIONAL OUTPUTS/);
-  assert.match(html, /six suffix-free music mounts/);
-  assert.match(html, /`\/en` and `\/fr` remain the two independent AI streams/);
+  assert.match(html, /six suffix-free music mounts use AAC-LC 192 Normal/);
+  assert.match(html, /14 mounts from this PC; `\/en` and `\/fr` remain the two independent AI streams/);
   assert.match(app, /expected\.channels\.length !== 6/);
   assert.match(app, /\/api\/streaming\/quality-outputs/);
   assert.match(html, /id="applyQualityOutputsButton"/);
@@ -21,7 +21,7 @@ test('Streaming exposes the approved 14-local plus 2-external mount plan', () =>
 });
 
 test('quality settings save and verify read-back without editable credentials', () => {
-  assert.match(html, /inherits protected source credentials/);
+  assert.match(html, /Every quality variant inherits protected source credentials/);
   assert.match(html, /AAC-LC 192 Normal/);
   assert.match(app, /qualityOutputsMatch\(expected, stored\)/);
   assert.match(app, /protected credentials were not copied/);
@@ -33,9 +33,11 @@ test('quality variants expose enable and public settings while canonical codec t
   assert.match(app, /data-quality-public/);
   assert.match(app, /variant\.codec/);
   assert.match(app, /variant\.bitrate_kbps/);
-  assert.match(html, /suffix-free station mount uses AAC-LC at 192 kbps/);
+  assert.match(app, /primary\.codec/);
+  assert.match(app, /variant\.enabled \? 'checked'/);
+  assert.match(app, /variant\.icecast_public \? 'checked'/);
   assert.match(html, /HE-AAC v2 64 Low/);
-  assert.match(html, /only Classical plus Cazz add lossless FLAC/);
+  assert.match(html, /lossless FLAC/);
 });
 
 test('operators can apply and diagnose quality outputs without Codex or exposed secrets', () => {

@@ -1,3 +1,5 @@
+import sqlite3
+
 from app.db import get_connection
 
 
@@ -32,8 +34,55 @@ def test_login_returns_access_and_refresh_tokens(client):
     assert payload["refresh_token"]
 
 
+def test_login_returns_retryable_error_when_auth_database_is_locked(
+    client, monkeypatch
+):
+    def locked_connection(**_kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr("app.api.auth.get_connection", locked_connection)
+
+    response = client.post(
+        "/api/auth/login",
+        json={"username": "admin", "password": "changeme"},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "auth_storage_busy"
+    assert response.headers.get("retry-after") == "1"
+
+
+def test_authenticated_read_returns_retryable_error_when_auth_database_is_locked(
+    client, monkeypatch
+):
+    login = client.post(
+        "/api/auth/login",
+        json={"username": "admin", "password": "changeme"},
+    )
+    assert login.status_code == 200
+
+    def locked_connection(**_kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr("app.api.auth.get_read_connection", locked_connection)
+    response = client.get(
+        "/api/auth/me",
+        headers={"Authorization": f"Bearer {login.json()['access_token']}"},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "auth_storage_busy"
+    assert response.headers.get("retry-after") == "1"
+
+
 def test_auth_contract_recovers_legacy_permissions_on_existing_v6_db(client):
+    from app import db as db_module
+
     _stale_legacy_templates()
+    # Simulate a fresh backend process starting against an older schema. The
+    # compatibility repair belongs to startup, not to each login request.
+    db_module._INITIALIZED_DATABASES.clear()
+    db_module.init_db()
 
     login = client.post(
         "/api/auth/login",

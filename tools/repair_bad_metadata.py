@@ -37,5 +37,3 @@ def main()->int:
     con.commit(); args.backup.parent.mkdir(parents=True,exist_ok=True); args.backup.write_text(json.dumps(backup,ensure_ascii=False,indent=2),encoding='utf-8')
     print(json.dumps({'scanned_audio':scanned,'changed':changed,'tag_backup':str(args.backup),'backup_files':len(backup)},ensure_ascii=True)); return 0
 if __name__=='__main__': raise SystemExit(main())
-
-

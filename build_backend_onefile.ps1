@@ -3,22 +3,6 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-
-function Get-Sha256Hex {
-    param([Parameter(Mandatory = $true)][string]$LiteralPath)
-
-    $stream = [System.IO.File]::OpenRead($LiteralPath)
-    $algorithm = [System.Security.Cryptography.SHA256]::Create()
-    try {
-        $bytes = $algorithm.ComputeHash($stream)
-    }
-    finally {
-        $stream.Dispose()
-        $algorithm.Dispose()
-    }
-    return [System.BitConverter]::ToString($bytes).Replace("-", "")
-}
-
 $BackendExeName = "RadioTEDU-OnAir-Backend"
 $BackendEntrypoint = "run_cleanroom.py"
 $SupervisorExeName = "RadioTEDU-OnAir-Supervisor.exe"
@@ -240,7 +224,7 @@ function Get-BackendSourceManifest {
     )
     foreach ($file in @($files | Sort-Object FullName)) {
         $relative = $file.FullName.Substring($root.Length).TrimStart("\", "/").Replace("\", "/")
-        $hash = Get-Sha256Hex -LiteralPath $file.FullName
+        $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash
         [PSCustomObject]@{
             RelativePath = $relative
             Sha256 = $hash
@@ -728,12 +712,12 @@ $provenance = [ordered]@{
     git_commit = $gitCommit
     git_tracked_tree_dirty = [bool]($gitTrackedChanges.Count -gt 0)
     source_sha256 = $sourceFingerprintAfter
-    dependency_lock_sha256 = (Get-Sha256Hex -LiteralPath $lockedRequirements)
+    dependency_lock_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $lockedRequirements).Hash
     python_version = $pythonBuildVersion
     pyinstaller_version = $requiredPyInstaller
-    ffmpeg_sha256 = (Get-Sha256Hex -LiteralPath $ffmpeg.Source)
-    ffplay_sha256 = (Get-Sha256Hex -LiteralPath $ffplay.Source)
-    ffprobe_sha256 = (Get-Sha256Hex -LiteralPath $ffprobe.Source)
+    ffmpeg_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $ffmpeg.Source).Hash
+    ffplay_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $ffplay.Source).Hash
+    ffprobe_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $ffprobe.Source).Hash
 }
 $provenance | ConvertTo-Json | Set-Content `
     -LiteralPath (Join-Path $stagedOut "build-provenance.json") `

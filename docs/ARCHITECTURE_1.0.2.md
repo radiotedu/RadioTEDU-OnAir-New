@@ -1,7 +1,7 @@
 # RadioTEDU OnAir 1.0.2 architecture
 
-Status: implementation gate
-Prepared: 2026-08-09
+Status: implementation gate  
+Prepared: 2026-08-09  
 Scope: the canonical Windows installation, supervisor, API, station workers,
 audio/output processes, operator UI, data, recovery, and optional modules.
 

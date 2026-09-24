@@ -62,6 +62,7 @@ const state = {
   serviceActionArmed: {},
   activeView: 'onair',
   setupState: null,
+  backendReloadArmedUntil: 0,
   audioDevices: [],
   sweeper: null,
   dayparts: null,
@@ -81,7 +82,14 @@ const state = {
   musicUsage: [],
   musicClosures: [],
   adItems: [],
+  adCatalog: null,
+  adCatalogApiUnavailable: false,
+  adCatalogTargetStationIds: null,
+  adCatalogTargetStationOwnerId: 0,
+  adCatalogRequestSequence: 0,
   adRuntime: null,
+  adLoaded: false,
+  adLoading: false,
   adBreakSets: [],
   selectedAdBreakSetId: 0,
   adCampaigns: [],
@@ -116,6 +124,7 @@ const state = {
   idleTimer: null,
   lastUserActivityAt: 0,
   timelineAnchorAt: 0,
+  stationStatusLoading: false,
   startArmedUntil: 0,
   startArmTimer: null,
   stopArmedUntil: 0,
@@ -143,6 +152,16 @@ const state = {
     sourceUrl: '',
   },
 };
+let advertisingLoadSequence = 0;
+let stationContextRevision = 0;
+let coreStatusRequestSequence = 0;
+let queueRequestSequence = 0;
+let operatorConfigurationRequestSequence = 0;
+let connectionRefreshSequence = 0;
+let stationRefreshInFlight = false;
+function isCurrentStationContext(stationId, revision = stationContextRevision) {
+  return Number(stationId) === Number(state.stationId) && Number(revision) === Number(stationContextRevision);
+}
 // Small companion panels are loaded as separate deferred scripts. Expose the
 // shared UI state deliberately so they do not spin on ReferenceError and flood
 // the browser/backend every two seconds.
@@ -569,12 +588,14 @@ async function ensureSignedIn() {
 async function login(event) {
   event.preventDefault();
   $('loginButton').disabled = true;
+  const buttonLabel = $('loginButton').textContent;
+  $('loginButton').textContent = 'Signing in…';
   $('loginError').textContent = '';
   try {
     const response = await rawFetch('/api/auth/login', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username: $('loginUsername').value.trim(), password: $('loginPassword').value }),
-    }, 12000);
+    }, 30000);
     const text = await response.text();
     if (!response.ok) throw parseResponseError(text, response.status, response.headers.get('X-Request-ID') || '');
     saveSession(JSON.parse(text));
@@ -584,6 +605,7 @@ async function login(event) {
     $('loginError').textContent = errorMessage(error);
   } finally {
     $('loginButton').disabled = false;
+    $('loginButton').textContent = buttonLabel;
   }
 }
 
@@ -591,10 +613,15 @@ async function showApp() {
   $('authGate').hidden = true;
   $('appShell').hidden = false;
   await loadStations();
-  await loadAdminAccess();
-  await refreshAll(true);
-  await loadDiagnosticBundles();
-  await loadOperatorViewData(state.activeView);
+  // Start the selected workspace immediately beside the broader background
+  // refresh. Ads must not wait for status, queue, or diagnostics reads before
+  // its queue, break clocks, and campaigns can appear.
+  await Promise.allSettled([
+    loadAdminAccess(),
+    refreshAll(true),
+    loadDiagnosticBundles(),
+    loadOperatorViewData(state.activeView),
+  ]);
   startRefreshTimer();
   startTimelineTimer();
   startIdleTimer();
@@ -662,6 +689,22 @@ async function loadStations(preferredId = null) {
   const candidate = Number(preferredId || requested || state.stationId || saved || activePayload?.station_id || state.stations[0]?.id || 0);
   state.stationId = state.stations.some((station) => Number(station.id) === candidate) ? candidate : Number(state.stations[0]?.id || 0);
   if (!state.stationId) throw new Error('No station is available');
+  if (previousStationId !== Number(state.stationId)) {
+    stationContextRevision += 1;
+    connectionRefreshSequence += 1;
+    state.stationStatusLoading = true;
+    state.health = null;
+    state.runtime = null;
+    state.publicStation = null;
+    state.ai = null;
+    state.sweeper = null;
+    state.dayparts = null;
+    state.stationSettings = null;
+    state.stationOutput = {};
+    state.queue = [];
+    state.queueRevision = '';
+    state.timelineAnchorAt = Date.now();
+  }
   if (previousStationId && previousStationId !== Number(state.stationId)) {
     state.studios = [];
     state.selectedStudioId = 0;
@@ -677,7 +720,9 @@ async function loadStations(preferredId = null) {
 }
 
 async function loadCoreStatus() {
-  const sid = state.stationId;
+  const sid = Number(state.stationId);
+  const revision = stationContextRevision;
+  const requestSequence = ++coreStatusRequestSequence;
   const [health, runtime, ai, sweeper, dayparts, publicStations, stationSettings, stationOutput, libraryWatcher, productCatalog] = await Promise.all([
     api(`/api/health?station_id=${sid}`),
     api(`/api/runtime/${sid}/status`),
@@ -692,8 +737,10 @@ async function loadCoreStatus() {
       ? Promise.resolve({ running: false, products: [] })
       : api('/api/library/product-catalog/status').catch(() => ({ running: false, products: [] })),
   ]);
+  if (!isCurrentStationContext(sid, revision) || requestSequence !== coreStatusRequestSequence) return false;
   state.health = health;
   state.runtime = runtime;
+  state.stationStatusLoading = false;
   state.timelineAnchorAt = Date.now();
   state.ai = ai;
   state.sweeper = sweeper;
@@ -713,11 +760,15 @@ async function loadCoreStatus() {
   renderDayparts();
   renderTimeline();
   renderEmergencyStatus(runtime);
+  return true;
 }
 
 async function loadOperatorConfiguration() {
+  const sid = Number(state.stationId);
+  const revision = stationContextRevision;
+  const requestSequence = ++operatorConfigurationRequestSequence;
   const [setupState, devicePayload, campaign, integrations, radioteduServices, unifiedMedia, watchdog] = await Promise.all([
-    api(`/api/setup/state?station_id=${state.stationId}`),
+    api(`/api/setup/state?station_id=${sid}`),
     api('/api/audio/devices').catch(() => ({ devices: [] })),
     IS_RTAI_ONAIR
       ? Promise.resolve({ configured: false, active: false, stations: [] })
@@ -744,6 +795,7 @@ async function loadOperatorConfiguration() {
       : api('/api/library/unified-media/status').catch(() => ({ root: '', views: [], source_map_configured: false, last_error: '' })),
     api('/api/watchdog/status').catch(() => null),
   ]);
+  if (!isCurrentStationContext(sid, revision) || requestSequence !== operatorConfigurationRequestSequence) return false;
   state.setupState = setupState || {};
   state.audioDevices = Array.isArray(devicePayload?.devices) ? devicePayload.devices : [];
   state.campaign = campaign || { configured: false, active: false, stations: [] };
@@ -758,20 +810,23 @@ async function loadOperatorConfiguration() {
   renderRadioTEDUServices();
   renderReadiness();
   renderWatchdog();
+  return true;
 }
 
 async function loadSelectedStationOutput() {
   const sid = Number(state.stationId);
+  const revision = stationContextRevision;
   const [stationSettings, stationOutput] = await Promise.all([
     api(`/api/settings/station?station_id=${sid}`),
     api(`/api/stations/output?station_id=${sid}`),
   ]);
   // Ignore a late response from the station that was selected previously.
-  if (sid !== Number(state.stationId)) return;
+  if (!isCurrentStationContext(sid, revision)) return false;
   state.stationSettings = stationSettings?.settings || stationSettings || {};
   state.stationOutput = stationOutput || {};
   renderOutputConfiguration();
   renderLibraryProfile();
+  return true;
 }
 
 function renderWatchdog() {
@@ -791,7 +846,7 @@ function renderWatchdog() {
   const lastRun = watchdog.last_run || {};
   const lastStatus = String(lastRun.status || 'not reported');
   $('watchdogState').textContent = healthyRuntime === stations.length && profilesOk ? 'Healthy' : 'Attention';
-  $('watchdogSummary').textContent = `${healthyRuntime}/${stations.length || 6} station runtimes healthy · managed H: profiles ${profilesOk ? 'healthy' : 'need repair'} · last task: ${lastStatus}`;
+  $('watchdogSummary').textContent = `${healthyRuntime}/${stations.length} station runtimes healthy · managed H: profiles ${profilesOk ? 'healthy' : 'need repair'} · last task: ${lastStatus}`;
 }
 
 function localDateTimeValue(value, fallbackDate) {
@@ -1204,18 +1259,19 @@ function isBroadcastVerifiedLive(publicStation = state.publicStation) {
 }
 
 function renderCoreStatus(publicStation = state.publicStation) {
+  const statusLoading = Boolean(state.stationStatusLoading);
   const health = state.health || {};
   const runtime = health.runtime || state.runtime || {};
   const loop = health.worker_loop || state.runtime?.worker_loop || {};
   const branches = health.runtime_branch_health || runtime.branch_health || {};
   const deliveries = health.runtime_delivery_health || runtime.delivery_health || branches;
   const onAir = isBroadcastVerifiedLive(publicStation);
-  $('broadcastTitle').textContent = onAir ? 'Broadcast is live' : 'Broadcast is stopped';
-  $('onAirLamp').className = `status-lamp ${onAir ? 'live' : 'off'}`;
-  $('onAirLamp').innerHTML = `<span></span><b>${onAir ? 'ON AIR' : 'OFF AIR'}</b>`;
-  $('engineState').textContent = runtime.running || health.engine_running ? 'Running' : 'Stopped';
-  $('loopState').textContent = loop.running ? 'Running' : 'Stopped';
-  $('icecastState').textContent = deliveries.icecast ? 'Connected' : (health.output_mode === 'icecast' ? 'Disconnected' : 'Not selected');
+  $('broadcastTitle').textContent = statusLoading ? `Loading ${selectedStationName()} status` : (onAir ? 'Broadcast is live' : 'Broadcast is stopped');
+  $('onAirLamp').className = `status-lamp ${statusLoading ? 'warming' : (onAir ? 'live' : 'off')}`;
+  $('onAirLamp').innerHTML = `<span></span><b>${statusLoading ? 'CHECKING' : (onAir ? 'ON AIR' : 'OFF AIR')}</b>`;
+  $('engineState').textContent = statusLoading ? 'Checking' : (runtime.running || health.engine_running ? 'Running' : 'Stopped');
+  $('loopState').textContent = statusLoading ? 'Checking' : (loop.running ? 'Running' : 'Stopped');
+  $('icecastState').textContent = statusLoading ? 'Checking' : (deliveries.icecast ? 'Connected' : (health.output_mode === 'icecast' ? 'Disconnected' : 'Not selected'));
   const recovery = runtime.recovery || state.runtime?.recovery || {};
   $('recoveryState').textContent = recovery.state === 'retry_wait'
     ? `Retry in ${Math.ceil(Number(recovery.retry_in_seconds || 0))}s`
@@ -1223,23 +1279,23 @@ function renderCoreStatus(publicStation = state.publicStation) {
   $('recoveryState').title = recovery.message || recovery.error_code || '';
   const nowPlaying = publicStation?.now_playing || {};
   const preservedItem = publicStation?.preserved_item || {};
-  $('nowPlayingTitle').textContent = nowPlaying.title || preservedItem.title || 'No track reported';
+  $('nowPlayingTitle').textContent = statusLoading ? 'Loading current track…' : (nowPlaying.title || preservedItem.title || 'No track reported');
   $('nowPlayingArtist').textContent = nowPlaying.artist || (preservedItem.title
     ? `Preserved at the front of the queue — ${preservedItem.artist || 'artist not provided'}`
-    : (onAir ? selectedStationName() : 'Broadcast is not running'));
+    : (statusLoading ? selectedStationName() : (onAir ? selectedStationName() : 'Broadcast is not running')));
 
   const aiEnabled = asBool(state.ai?.ai_host_enabled);
   const readiness = health.ai_prefetch?.startup_state || {};
-  $('aiTitle').textContent = aiEnabled ? 'AI host is enabled' : 'AI host is disabled';
-  $('aiLamp').className = `status-lamp ${aiEnabled ? (readiness.ready ? 'live' : 'warming') : 'off'}`;
-  $('aiLamp').innerHTML = `<span></span><b>${aiEnabled ? (readiness.ready ? 'ENABLED' : 'WARMING') : 'DISABLED'}</b>`;
-  $('aiDescription').textContent = aiEnabled ? (readiness.message || 'AI intros are enabled for upcoming music.') : 'Tracks play without generated AI introductions.';
-  $('aiProvider').textContent = state.ai?.tts_provider || '—';
-  $('aiReadiness').textContent = aiEnabled ? (readiness.ready ? 'Ready' : readiness.state || 'Warming') : 'Disabled';
+  $('aiTitle').textContent = statusLoading ? 'Loading host settings' : (aiEnabled ? 'AI host is enabled' : 'AI host is disabled');
+  $('aiLamp').className = `status-lamp ${statusLoading ? 'warming' : (aiEnabled ? (readiness.ready ? 'live' : 'warming') : 'off')}`;
+  $('aiLamp').innerHTML = `<span></span><b>${statusLoading ? 'CHECKING' : (aiEnabled ? (readiness.ready ? 'ENABLED' : 'WARMING') : 'DISABLED')}</b>`;
+  $('aiDescription').textContent = statusLoading ? `Checking ${selectedStationName()} configuration.` : (aiEnabled ? (readiness.message || 'AI intros are enabled for upcoming music.') : 'Tracks play without generated AI introductions.');
+  $('aiProvider').textContent = statusLoading ? '…' : (state.ai?.tts_provider || '—');
+  $('aiReadiness').textContent = statusLoading ? 'Checking' : (aiEnabled ? (readiness.ready ? 'Ready' : readiness.state || 'Warming') : 'Disabled');
   setCleanChecked('sweeperEnabled', Boolean(state.sweeper?.enabled));
-  $('sweeperLamp').textContent = state.sweeper?.enabled
+  $('sweeperLamp').textContent = statusLoading ? 'Checking' : (state.sweeper?.enabled
     ? `On - every ${state.sweeper.interval} completed song${Number(state.sweeper.interval) === 1 ? '' : 's'}`
-    : 'Off';
+    : 'Off');
   setCleanValue('sweeperInterval', String(state.sweeper?.interval || 2));
   setCleanValue('sweeperMode', ['ordered', 'random'].includes(state.sweeper?.mode) ? state.sweeper.mode : 'ordered');
   setCleanChecked('broadcastAutostartEnabled', asBool(state.stationSettings?.broadcast_autostart_enabled));
@@ -1608,11 +1664,16 @@ function disarmStopBroadcast() {
 }
 
 async function loadQueue() {
-  const payload = await api(`/api/queue?station_id=${state.stationId}`);
+  const sid = Number(state.stationId);
+  const revision = stationContextRevision;
+  const requestSequence = ++queueRequestSequence;
+  const payload = await api(`/api/queue?station_id=${sid}`);
+  if (!isCurrentStationContext(sid, revision) || requestSequence !== queueRequestSequence) return false;
   state.queue = Array.isArray(payload?.items) ? payload.items : [];
   state.queueRevision = String(payload?.revision || '');
   renderQueue();
   renderTimeline();
+  return true;
 }
 
 function renderQueue() {
@@ -2204,7 +2265,11 @@ async function refreshAll(silent = false) {
   // refreshes must still replace station-scoped caches (library, queue,
   // jingles, and settings), otherwise a newly selected station can briefly
   // display the previous station's controls and media.
-  if (!state.stationId || (state.busy && !silent)) return;
+  if (!state.stationId || (state.busy && !silent) || stationRefreshInFlight) return false;
+  stationRefreshInFlight = true;
+  const sid = Number(state.stationId);
+  const revision = stationContextRevision;
+  const requestSequence = ++connectionRefreshSequence;
   if (!silent) setConnection('', 'Refreshing');
   try {
     const currentView = String(state.activeView || 'onair');
@@ -2217,10 +2282,16 @@ async function refreshAll(silent = false) {
     if (currentView === 'scheduler') jobs.push(loadScheduleItems());
     if (currentView === 'recovery') jobs.push(loadRecoveryPoints());
     await Promise.all(jobs);
+    if (!isCurrentStationContext(sid, revision) || requestSequence !== connectionRefreshSequence) return false;
     setConnection('online', 'Backend connected');
+    return true;
   } catch (error) {
+    if (!isCurrentStationContext(sid, revision) || requestSequence !== connectionRefreshSequence) return false;
     setConnection('offline', 'Connection failed');
     if (!silent) toast(errorMessage(error), 'error');
+    return false;
+  } finally {
+    stationRefreshInFlight = false;
   }
 }
 
@@ -2683,10 +2754,29 @@ async function repairDependencies() {
 }
 
 async function reloadBackendSafely() {
-  const confirmed = window.confirm(
-    'Reload the OnAir backend now? Active items remain in queue and restart from their beginning. Only stations with restart authorization enabled resume automatically.',
-  );
-  if (!confirmed) return;
+  const button = $('reloadBackendButton');
+  const now = Date.now();
+  if (!state.backendReloadArmedUntil || state.backendReloadArmedUntil <= now) {
+    state.backendReloadArmedUntil = now + 20000;
+    button.classList.add('armed');
+    button.textContent = 'Confirm safe backend reload';
+    setResult(
+      'readinessResult',
+      'Click “Confirm safe backend reload” again within 20 seconds. Active items keep their queue position and restart from the beginning; only authorized stations resume automatically.',
+      'error',
+    );
+    window.setTimeout(() => {
+      if (state.backendReloadArmedUntil <= Date.now()) {
+        state.backendReloadArmedUntil = 0;
+        button.classList.remove('armed');
+        button.textContent = 'Reload backend safely';
+      }
+    }, 20500);
+    return;
+  }
+  state.backendReloadArmedUntil = 0;
+  button.classList.remove('armed');
+  button.textContent = 'Reload backend safely';
   setBusy(true, 'Preparing a safe backend reload...', 'Stopping station processes, preserving queue order, and handing restart ownership to the supervisor');
   setResult('readinessResult');
   try {
@@ -5039,24 +5129,140 @@ function parseAdSlots() {
 function renderAdItems() {
   $('adItemCount').textContent = String(state.adItems.length);
   $('adItemList').innerHTML = state.adItems.length ? state.adItems.map((item) => `
-    <div class="record-row"><div class="record-copy"><b>${escapeHtml(item.title || `Track ${item.track_id}`)}</b><span>${escapeHtml(item.artist || 'Unknown artist')}</span><small>Track ${Number(item.track_id)} / priority ${Number(item.priority || 0)}</small></div><div class="record-meta"><span>${escapeHtml(item.status || 'pending')}</span><small>${escapeHtml(item.due_at || '')}</small></div></div>`).join('') : '<div class="empty-state">No advertising items are queued for this station.</div>';
+    <div class="record-row"><div class="record-copy"><b>${escapeHtml(item.title || `Track ${item.track_id}`)}</b><span>${escapeHtml(item.artist || 'Unknown artist')}</span><small>Track ${Number(item.track_id)} / priority ${Number(item.priority || 0)}</small></div><div class="record-meta"><span>${escapeHtml(item.status || 'pending')}</span><small>${escapeHtml(item.due_at || '')}</small></div></div>`).join('')
+    : `<div class="empty-state">${state.adLoading ? 'Loading advertising queue…' : state.adLoaded ? 'No advertising items are queued for this station.' : 'Advertising queue has not loaded yet.'}</div>`;
+}
+
+function renderAdCatalog() {
+  const catalog = state.adCatalog;
+  if (state.adCatalogApiUnavailable) {
+    $('adCatalogCount').textContent = 'Pending update';
+    $('adCatalogList').innerHTML = '<div class="empty-state">Ads-folder preparation will be available after the safe backend update. Existing queue and campaign controls remain available.</div>';
+    $('adCatalogTargetStations').innerHTML = '';
+    $('adCatalogTargetStations').disabled = true;
+    $('syncAdCatalogButton').disabled = true;
+    $('refreshAdCatalogButton').disabled = true;
+    const trackControl = $('adItemTrackId');
+    if (trackControl?.tagName === 'SELECT') {
+      const fallback = document.createElement('input');
+      fallback.type = 'number';
+      fallback.id = 'adItemTrackId';
+      fallback.min = '1';
+      fallback.step = '1';
+      fallback.required = true;
+      trackControl.replaceWith(fallback);
+    }
+    return;
+  }
+  const items = Array.isArray(catalog?.catalog_items) ? catalog.catalog_items : [];
+  const stations = Array.isArray(catalog?.stations) ? catalog.stations : [];
+  const tracks = Array.isArray(catalog?.tracks) ? catalog.tracks : [];
+  $('adCatalogCount').textContent = catalog ? String(items.length) : '—';
+  $('adCatalogList').innerHTML = items.length ? items.map((item) => {
+    const prepared = Object.keys(item.track_ids_by_station || {}).length;
+    const status = item.stale ? 'File changed; rescan the Ads folder.' : `${prepared} station${prepared === 1 ? '' : 's'} prepared`;
+    return `<div class="record-row"><div class="record-copy"><b>${escapeHtml(item.title || item.file_name || 'Ad file')}</b><span>${escapeHtml(item.file_name || '')}</span><small>${escapeHtml(status)} · ${Math.max(0, Number(item.size_bytes || 0))} bytes</small></div><div class="record-meta"><span>${item.stale ? 'Needs rescan' : `Generation ${Number(item.generation || 0)}`}</span></div></div>`;
+  }).join('') : `<div class="empty-state">${catalog ? 'No stable audio files are available in the Ads folder.' : 'The Ads folder has not loaded.'}</div>`;
+
+  const target = $('adCatalogTargetStations');
+  const ownerStationId = Number(catalog?.station_id || state.stationId || 0);
+  if (state.adCatalogTargetStationOwnerId !== ownerStationId) {
+    state.adCatalogTargetStationOwnerId = ownerStationId;
+    state.adCatalogTargetStationIds = [ownerStationId];
+  }
+  const selectedIds = new Set((state.adCatalogTargetStationIds || [ownerStationId]).map(Number));
+  target.innerHTML = stations.map((station) => `<option value="${Number(station.id)}"${selectedIds.has(Number(station.id)) ? ' selected' : ''}>${escapeHtml(station.name || `Station #${station.id}`)}</option>`).join('');
+  target.disabled = !stations.length;
+  $('syncAdCatalogButton').disabled = !items.length || items.some((item) => item.stale) || !stations.length;
+
+  const currentStationTracks = tracks.filter((track) => Number(track.station_id) === Number(state.stationId));
+  const previousTrackId = $('adItemTrackId').value;
+  $('adItemTrackId').innerHTML = '<option value="">Select an ad track</option>' + currentStationTracks.map((track) => {
+    const label = [track.title || `Track ${track.id}`, track.artist].filter(Boolean).join(' — ');
+    return `<option value="${Number(track.id)}">${escapeHtml(label)} · #${Number(track.id)}</option>`;
+  }).join('');
+  if (currentStationTracks.some((track) => Number(track.id) === Number(previousTrackId))) {
+    $('adItemTrackId').value = previousTrackId;
+  }
+}
+
+async function loadAdCatalog() {
+  if (!state.stationId) return;
+  if (state.adCatalogApiUnavailable) return;
+  const stationId = Number(state.stationId);
+  const requestSequence = ++state.adCatalogRequestSequence;
+  try {
+    const payload = await api(`/api/ads/catalog?station_id=${stationId}`, {
+      timeoutMs: 8000,
+      transportAttempts: 2,
+    });
+    if (requestSequence !== state.adCatalogRequestSequence || Number(state.stationId) !== stationId) return;
+    if (Number(payload?.station_id) !== stationId
+      || !Array.isArray(payload?.catalog_items)
+      || !Array.isArray(payload?.tracks)
+      || !Array.isArray(payload?.stations)) {
+      throw new Error('Ads catalog response did not match the selected station');
+    }
+    state.adCatalog = payload;
+    renderAdCatalog();
+    setResult('adCatalogResult');
+  } catch (error) {
+    if (requestSequence !== state.adCatalogRequestSequence || Number(state.stationId) !== stationId) return;
+    state.adCatalog = null;
+    state.adCatalogApiUnavailable = Number(error?.status) === 404;
+    renderAdCatalog();
+    if (state.adCatalogApiUnavailable) {
+      setResult('adCatalogResult', 'Ads-folder synchronization is waiting for a safe backend update.');
+    } else {
+      setResult('adCatalogResult', errorMessage(error), 'error');
+    }
+  }
+}
+
+async function syncAdCatalog() {
+  const stationIds = Array.from($('adCatalogTargetStations').selectedOptions || [])
+    .map((option) => Number(option.value))
+    .filter((id) => Number.isInteger(id) && id > 0);
+  if (!stationIds.length) return setResult('adCatalogResult', 'Select at least one target station.', 'error');
+  const button = $('syncAdCatalogButton');
+  button.disabled = true;
+  setResult('adCatalogResult', 'Preparing approved ad files; no ads will play until a schedule is created.');
+  try {
+    const result = await api('/api/ads/catalog/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ station_ids: stationIds }),
+      timeoutMs: 30000,
+      transportAttempts: 1,
+    });
+    await loadAdCatalog();
+    setResult('adCatalogResult', `${Number(result.created || 0)} ad tracks prepared and ${Number(result.reused || 0)} verified for ${stationIds.length} station${stationIds.length === 1 ? '' : 's'}.`, 'success');
+  } catch (error) {
+    setResult('adCatalogResult', errorMessage(error), 'error');
+  } finally {
+    button.disabled = false;
+    renderAdCatalog();
+  }
 }
 
 function renderAdRuntime() {
   const runtime = state.adRuntime || {};
   const due = Array.isArray(runtime.due_slots) ? runtime.due_slots : [];
   const next = Array.isArray(runtime.next_slots) ? runtime.next_slots : [];
-  $('adRuntimeState').textContent = `${Number(runtime.break_set_count || 0)} break set / ${Number(runtime.campaign_count || 0)} campaign`;
+  $('adRuntimeState').textContent = state.adLoading && !state.adLoaded
+    ? 'Loading advertising data…'
+    : `${Number(runtime.break_set_count || 0)} break set / ${Number(runtime.campaign_count || 0)} campaign`;
   const rows = [
     ...due.map((item) => ({ label: 'Due now', item })),
     ...next.map((item) => ({ label: 'Upcoming', item })),
   ];
   $('adRuntimeList').innerHTML = rows.length ? rows.map(({ label, item }) => `
-    <div class="record-row"><div class="record-copy"><b>${escapeHtml(item.name || item.title || label)}</b><span>${escapeHtml(item.slot_time || item.due_at || JSON.stringify(item))}</span></div><div class="record-meta"><span>${label}</span></div></div>`).join('') : '<div class="empty-state">No due or upcoming advertising breaks.</div>';
+    <div class="record-row"><div class="record-copy"><b>${escapeHtml(item.name || item.title || label)}</b><span>${escapeHtml(item.slot_time || item.due_at || JSON.stringify(item))}</span></div><div class="record-meta"><span>${label}</span></div></div>`).join('')
+    : `<div class="empty-state">${state.adLoading && !state.adLoaded ? 'Loading scheduled breaks…' : state.adLoaded ? 'No due or upcoming advertising breaks.' : 'Advertising break schedule has not loaded yet.'}</div>`;
 }
 
 function renderAdBreakSetEditor() {
-  $('adBreakSetCount').textContent = String(state.adBreakSets.length);
+  $('adBreakSetCount').textContent = state.adLoading && !state.adLoaded ? '…' : String(state.adBreakSets.length);
   $('adBreakSetSelect').innerHTML = '<option value="0">Create a new break set</option>' + state.adBreakSets.map((item) => `<option value="${Number(item.id)}">${escapeHtml(item.name)}</option>`).join('');
   $('adBreakSetSelect').value = String(state.selectedAdBreakSetId || 0);
   const item = state.adBreakSets.find((row) => Number(row.id) === Number(state.selectedAdBreakSetId));
@@ -5071,7 +5277,7 @@ function renderAdBreakSetEditor() {
 }
 
 function renderAdCampaignEditor() {
-  $('adCampaignCount').textContent = String(state.adCampaigns.length);
+  $('adCampaignCount').textContent = state.adLoading && !state.adLoaded ? '…' : String(state.adCampaigns.length);
   $('adCampaignSelect').innerHTML = '<option value="0">Create a new campaign</option>' + state.adCampaigns.map((item) => `<option value="${Number(item.id)}">${escapeHtml(item.name)}</option>`).join('');
   $('adCampaignSelect').value = String(state.selectedAdCampaignId || 0);
   const item = state.adCampaigns.find((row) => Number(row.id) === Number(state.selectedAdCampaignId));
@@ -5092,16 +5298,63 @@ function renderAdCampaignEditor() {
 async function loadAdvertising(preferredBreakSetId = state.selectedAdBreakSetId, preferredCampaignId = state.selectedAdCampaignId) {
   if (!state.stationId) return;
   const stationId = Number(state.stationId);
-  const [items, runtime, breakSets, campaigns] = await Promise.all([
-    api(`/api/ads/items?station_id=${stationId}&limit=50`),
-    api(`/api/ads/runtime?station_id=${stationId}`),
-    api(`/api/ad-break-sets?station_id=${stationId}`),
-    api(`/api/ad-campaigns?station_id=${stationId}`),
-  ]);
-  state.adItems = items?.items || [];
-  state.adRuntime = runtime || {};
-  state.adBreakSets = breakSets?.break_sets || [];
-  state.adCampaigns = campaigns?.campaigns || [];
+  const requestSequence = ++advertisingLoadSequence;
+  state.adLoading = true;
+  renderAdItems();
+  renderAdRuntime();
+  renderAdBreakSetEditor();
+  renderAdCampaignEditor();
+  if (!state.adLoaded) setResult('adItemResult', 'Loading this station’s advertising queue, breaks, and campaigns…');
+  let payload;
+  try {
+    payload = await api(`/api/ads/console?station_id=${stationId}&limit=50`, {
+      // The server retries brief SQLite contention internally and should answer
+      // within this window; avoid turning one stalled read into three 20s waits.
+      timeoutMs: 8000,
+      transportAttempts: 2,
+    });
+  } catch (error) {
+    // A slower response from an older station selection or manual refresh must
+    // not overwrite the result of the latest successful load.
+    if (requestSequence !== advertisingLoadSequence || Number(state.stationId) !== stationId) return;
+    state.adLoading = false;
+    renderAdItems();
+    renderAdRuntime();
+    renderAdBreakSetEditor();
+    renderAdCampaignEditor();
+    throw error;
+  }
+  if (requestSequence !== advertisingLoadSequence || Number(state.stationId) !== stationId) return;
+  if (Number(payload?.station_id) !== stationId
+    || Number(payload?.items?.station_id) !== stationId
+    || Number(payload?.runtime?.station_id) !== stationId
+    || Number(payload?.break_sets?.station_id) !== stationId
+    || Number(payload?.campaigns?.station_id) !== stationId) {
+    state.adLoading = false;
+    renderAdItems();
+    renderAdRuntime();
+    renderAdBreakSetEditor();
+    renderAdCampaignEditor();
+    throw new Error('Advertising data response did not match the selected station');
+  }
+  const items = payload.items.items;
+  const breakSets = payload.break_sets.break_sets;
+  const campaigns = payload.campaigns.campaigns;
+  if (!Array.isArray(items) || !Array.isArray(breakSets) || !Array.isArray(campaigns)) {
+    state.adLoading = false;
+    renderAdItems();
+    renderAdRuntime();
+    renderAdBreakSetEditor();
+    renderAdCampaignEditor();
+    throw new Error('Advertising data response was incomplete; the previous view was preserved');
+  }
+  if (Number(state.stationId) !== stationId || requestSequence !== advertisingLoadSequence) return;
+  state.adItems = items;
+  state.adRuntime = payload.runtime;
+  state.adBreakSets = breakSets;
+  state.adCampaigns = campaigns;
+  state.adLoaded = true;
+  state.adLoading = false;
   state.selectedAdBreakSetId = state.adBreakSets.some((item) => Number(item.id) === Number(preferredBreakSetId)) ? Number(preferredBreakSetId) : 0;
   state.selectedAdCampaignId = state.adCampaigns.some((item) => Number(item.id) === Number(preferredCampaignId)) ? Number(preferredCampaignId) : 0;
   renderAdItems();
@@ -5109,6 +5362,8 @@ async function loadAdvertising(preferredBreakSetId = state.selectedAdBreakSetId,
   renderAdBreakSetEditor();
   renderAdCampaignEditor();
   initializeAdDefaults();
+  loadAdCatalog();
+  setResult('adItemResult');
 }
 
 async function enqueueAdItem(event) {
@@ -5265,48 +5520,6 @@ async function loadHlsSettings() {
   state.hlsSettings = await api('/api/settings/hls');
   renderHlsSettings();
   return state.hlsSettings;
-}
-
-async function loadSystemAudioSettings() {
-  const payload = await api('/api/settings/system');
-  const settings = payload?.settings || payload || {};
-  const input = $('defaultCrossfadeSeconds');
-  if (input.dataset.dirty !== '1') {
-    input.value = String(Number(settings.default_crossfade_seconds ?? 5));
-  }
-  const seconds = Number(settings.default_crossfade_seconds ?? 5);
-  $('systemAudioSettingsState').textContent = `${seconds.toFixed(1)} s saved`;
-  return settings;
-}
-
-async function saveSystemAudioSettings(event) {
-  event.preventDefault();
-  const input = $('defaultCrossfadeSeconds');
-  const seconds = Number(input.value);
-  if (!Number.isFinite(seconds) || seconds < 0 || seconds > 30) {
-    setResult('systemAudioSettingsResult', 'Crossfade must be between 0 and 30 seconds.', 'error');
-    return;
-  }
-  setBusy(true, 'Saving music transition settings…', 'Writing settings and verifying the saved value');
-  setResult('systemAudioSettingsResult');
-  try {
-    await api('/api/settings/system', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ default_crossfade_seconds: seconds }),
-    });
-    input.dataset.dirty = '0';
-    const settings = await loadSystemAudioSettings();
-    const saved = Number(settings.default_crossfade_seconds);
-    if (!Number.isFinite(saved) || Math.abs(saved - seconds) > 0.001) {
-      throw new Error('Crossfade setting did not match the saved value');
-    }
-    setResult('systemAudioSettingsResult', `Verified: music crossfade is ${saved.toFixed(1)} seconds. The next music transition will use this value.`, 'success');
-  } catch (error) {
-    setResult('systemAudioSettingsResult', errorMessage(error), 'error');
-  } finally {
-    setBusy(false);
-  }
 }
 
 async function startHls() {
@@ -5816,11 +6029,8 @@ async function loadOperatorViewData(view) {
   if (view === 'broadcast-planner') {
     try { await loadBroadcastPlanner(); } catch (error) { setResult('broadcastPlanResult', errorMessage(error), 'error'); }
   }
-  if (view === 'settings') {
-    try { await loadSystemAudioSettings(); } catch (error) { setResult('systemAudioSettingsResult', errorMessage(error), 'error'); }
-    if (!IS_RTAI_ONAIR) {
-      try { await loadHlsSettings(); } catch (error) { setResult('hlsSettingsResult', errorMessage(error), 'error'); }
-    }
+  if (!IS_RTAI_ONAIR && view === 'settings') {
+    try { await loadHlsSettings(); } catch (error) { setResult('hlsSettingsResult', errorMessage(error), 'error'); }
   }
   if (view === 'streaming') {
     try { await loadStreamingFeatures(); } catch (error) { setResult('streamingFeaturesResult', errorMessage(error), 'error'); }
@@ -5834,10 +6044,19 @@ async function loadOperatorViewData(view) {
 function startRefreshTimer() {
   stopRefreshTimer();
   state.refreshTimer = window.setInterval(() => {
-    if (!state.busy && !document.hidden) {
-      const refreshes = [loadCoreStatus()];
-      if (['onair', 'queue'].includes(state.activeView)) refreshes.push(loadQueue());
-      Promise.all(refreshes).then(() => setConnection('online', 'Backend connected')).catch(() => setConnection('offline', 'Connection failed'));
+    if (!state.busy && !document.hidden && !stationRefreshInFlight) {
+      stationRefreshInFlight = true;
+      const sid = Number(state.stationId);
+      const revision = stationContextRevision;
+      const requestSequence = ++connectionRefreshSequence;
+      Promise.all([loadCoreStatus(), loadQueue()])
+        .then(() => {
+          if (isCurrentStationContext(sid, revision) && requestSequence === connectionRefreshSequence) setConnection('online', 'Backend connected');
+        })
+        .catch(() => {
+          if (isCurrentStationContext(sid, revision) && requestSequence === connectionRefreshSequence) setConnection('offline', 'Connection failed');
+        })
+        .finally(() => { stationRefreshInFlight = false; });
     }
   }, 5000);
 }
@@ -5853,8 +6072,6 @@ function bindEvents() {
   $('continueSessionButton').addEventListener('click', recordUserActivity);
   ['pointerdown', 'keydown', 'touchstart'].forEach((eventName) => document.addEventListener(eventName, recordUserActivity, { passive: true }));
   $('refreshButton').addEventListener('click', () => refreshAll(false));
-  $('systemAudioSettingsForm').addEventListener('submit', saveSystemAudioSettings);
-  $('refreshSystemAudioSettingsButton').addEventListener('click', () => loadSystemAudioSettings().then(() => setResult('systemAudioSettingsResult', 'Music transition settings reloaded.', 'success')).catch((error) => setResult('systemAudioSettingsResult', errorMessage(error), 'error')));
   $('queueRefreshButton').addEventListener('click', () => loadQueue().catch((error) => toast(errorMessage(error), 'error')));
   $('speakerMonitorForm').addEventListener('submit', saveSpeakerMonitor);
   $('startupSoundForm').addEventListener('submit', saveStartupSound);
@@ -5891,6 +6108,38 @@ function bindEvents() {
       'aiConfigEnabled', 'aiLlmModel', 'aiTtsProvider', 'aiVoicePersona', 'aiTtsModelPath', 'aiMaxSeconds', 'aiStationInterval', 'aiIncludeHistory', 'aiEducational', 'aiPromptTemplate',
     ]);
     state.stationId = Number($('stationSelect').value);
+    stationContextRevision += 1;
+    connectionRefreshSequence += 1;
+    state.stationStatusLoading = true;
+    state.health = null;
+    state.runtime = null;
+    state.publicStation = null;
+    state.ai = null;
+    state.sweeper = null;
+    state.dayparts = null;
+    state.stationSettings = null;
+    state.stationOutput = {};
+    state.queue = [];
+    state.queueRevision = '';
+    state.timelineAnchorAt = Date.now();
+    renderCoreStatus(null);
+    renderQueue();
+    renderTimeline();
+    setConnection('', 'Refreshing');
+    // Clear station-scoped advertising data immediately. A late response is
+    // invalidated here as well as when the next load begins, so a previous
+    // station's campaigns and break clocks are never shown for this station.
+    advertisingLoadSequence += 1;
+    state.adItems = [];
+    state.adRuntime = null;
+    state.adLoaded = false;
+    state.adLoading = false;
+    state.adBreakSets = [];
+    state.adCampaigns = [];
+    renderAdItems();
+    renderAdRuntime();
+    renderAdBreakSetEditor();
+    renderAdCampaignEditor();
     state.stationOutput = {};
     state.stationSettings = {};
     renderOutputConfiguration();
@@ -5902,9 +6151,12 @@ function bindEvents() {
     state.libraryPage = 1;
     // The output form is the authoritative operator control. Load it first
     // instead of making it wait behind every diagnostics/media request.
+    const stationViewLoad = loadOperatorViewData(state.activeView);
     await loadSelectedStationOutput();
-    await refreshAll(false);
-    await loadOperatorViewData(state.activeView);
+    await Promise.allSettled([
+      refreshAll(false),
+      stationViewLoad,
+    ]);
   });
   $('startBroadcastButton').addEventListener('click', startBroadcast);
   $('stopBroadcastButton').addEventListener('click', stopBroadcast);
@@ -6017,6 +6269,13 @@ function bindEvents() {
   window.addEventListener('radiotedu:guest-recordings-changed', () => loadGuestRecordings().catch((error) => setResult('guestRecordingLibraryResult', errorMessage(error), 'error')));
   $('adItemForm').addEventListener('submit', enqueueAdItem);
   $('refreshAdsButton').addEventListener('click', () => loadAdvertising().catch((error) => setResult('adItemResult', errorMessage(error), 'error')));
+  $('refreshAdCatalogButton').addEventListener('click', () => loadAdCatalog());
+  $('syncAdCatalogButton').addEventListener('click', () => syncAdCatalog());
+  $('adCatalogTargetStations').addEventListener('change', () => {
+    state.adCatalogTargetStationIds = Array.from($('adCatalogTargetStations').selectedOptions || [])
+      .map((option) => Number(option.value))
+      .filter((id) => Number.isInteger(id) && id > 0);
+  });
   $('adBreakSetSelect').addEventListener('change', () => { state.selectedAdBreakSetId = Number($('adBreakSetSelect').value || 0); clearAdDeleteArms(); renderAdBreakSetEditor(); setResult('adBreakSetResult'); });
   $('adBreakSetForm').addEventListener('submit', saveAdBreakSet);
   $('deleteAdBreakSetButton').addEventListener('click', () => deleteAdvertisingEntity('break-set'));

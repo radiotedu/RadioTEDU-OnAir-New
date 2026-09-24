@@ -23,10 +23,10 @@ class BroadcastPlanPayload(BaseModel):
     plan_type: Literal["ad", "sweeper", "recorded_program"]
     source_station_id: int = Field(gt=0)
     track_id: int = Field(gt=0)
-    station_ids: list[int] = Field(min_length=1, max_length=24)
+    station_ids: list[int] = Field(min_items=1, max_items=24)
     starts_on: date
     ends_on: date
-    weekdays: list[int] = Field(min_length=1, max_length=7)
+    weekdays: list[int] = Field(min_items=1, max_items=7)
     local_start: str
     local_end: str
     timezone: str = "Europe/Istanbul"
@@ -172,26 +172,6 @@ def _save_plan(conn, payload: BroadcastPlanPayload, plan_id: int | None = None) 
     if payload.plan_type != "sweeper" and payload.enabled:
         materialize_broadcast_plans(conn, horizon_days=14)
     return saved_id
-
-
-def _plan_days(row) -> set[int]:
-    try:
-        raw_days = json.loads(str(row["weekdays_json"] or "[]"))
-    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-        return set()
-    if not isinstance(raw_days, list):
-        return set()
-    days: set[int] = set()
-    for raw_day in raw_days:
-        try:
-            if isinstance(raw_day, bool):
-                continue
-            day = int(raw_day)
-        except (TypeError, ValueError):
-            continue
-        if 1 <= day <= 7:
-            days.add(day)
-    return days
 
 
 def _serialize_plan(conn, row) -> dict:

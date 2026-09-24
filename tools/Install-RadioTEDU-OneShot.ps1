@@ -211,7 +211,7 @@ function Install-Watchdog {
     ) -join ' '
     $action = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -Argument $arguments
     $periodicTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
-        -RepetitionInterval ([TimeSpan]::FromMinutes(5)) `
+        -RepetitionInterval ([TimeSpan]::FromMinutes(1)) `
         -RepetitionDuration ([TimeSpan]::FromDays(3650))
     $startupTrigger = New-ScheduledTaskTrigger -AtStartup
     $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest

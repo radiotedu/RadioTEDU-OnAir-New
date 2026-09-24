@@ -32,7 +32,10 @@ function classList() {
 }
 
 function createMouseHarness() {
-  const views = ['onair', 'media', 'automation', 'emergency', 'services', 'settings', 'diagnostics'];
+  const views = [
+    'onair', 'media', 'playlists', 'automation', 'emergency', 'services', 'settings', 'diagnostics',
+    'stations', 'queue', 'scheduler', 'broadcast-planner', 'dayparting', 'shows', 'compliance', 'ads', 'streaming', 'recovery',
+  ];
   const attributes = new WeakMap();
   const buttons = views.map((view) => ({
     dataset: { operatorNav: view },
@@ -416,7 +419,10 @@ test('every JavaScript element reference exists in the wall document', () => {
 
 test('mouse navigation activates exactly one current operator workspace and persists its hash', () => {
   const harness = createMouseHarness();
-  const expectedViews = ['onair', 'media', 'playlists', 'automation', 'emergency', 'services', 'settings', 'diagnostics', 'stations', 'queue', 'scheduler', 'broadcast-planner', 'dayparting', 'shows', 'compliance', 'ads', 'streaming', 'recovery'];
+  const expectedViews = [
+    'onair', 'media', 'playlists', 'automation', 'emergency', 'services', 'settings', 'diagnostics',
+    'stations', 'queue', 'scheduler', 'broadcast-planner', 'dayparting', 'shows', 'compliance', 'ads', 'streaming', 'recovery',
+  ];
   const markupViews = [...html.matchAll(/data-operator-nav="([^"]+)"/g)].map((match) => match[1]);
 
   assert.deepEqual(markupViews, expectedViews);

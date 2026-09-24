@@ -38,7 +38,7 @@ The operator changes the rotation key in **On Air → Deterministic rotation key
 | Automatic boot/recovery | On Air restart checkbox; Diagnostics watchdog | `app/api/runtime.py`, `app/api/watchdog.py` | `app/main.py`, `app/services/audio_watchdog.py`, service-host configuration | `test_startup_runtime_autostart.py`, `test_reliability.py`, `test_playout_hardening.py` | Persist `broadcast_autostart_enabled`; start all six music workers after delayed service startup; let each mount reconnect independently; never restart a whole station merely because the origin is offline. |
 | Deterministic rotation | On Air rotation key | `/api/settings/station` in `app/api/legacy.py` | `app/engine/station_worker.py`, `app/engine/broadcast_queue_autofill.py` | `test_station_worker_fallback.py`, `test_juke_library_admin.py` | Validate 3–120 printable characters, persist `playback_selection_policy=stable_rotation`, then read back both fields. |
 | Station creation/deletion | Stations | station endpoints in `app/api/legacy.py` | station repositories and `app/db.py` | `test_station_output_api.py`, operator wall tests | Keep station IDs stable; prevent deletion while runtime owns resources; never synthesize `/radiotedu`. |
-| Mount, host, codec, output | Stations → Current output; Streaming → Quality outputs | `app/api/stations.py`, `app/api/stream_config.py`, `app/api/streaming.py` | `app/services/stream_config_service.py`, `app/services/quality_outputs.py`, `app/repositories/station_output_repo.py` | `test_station_output_api.py`, `test_quality_outputs.py`, `quality_outputs_panel.test.cjs`, `test_ffmpeg_pipeline_builder.py` | Production uses six unsuffixed Opus 192 primaries, six Opus 32 `-low` branches, and FLAC only for Classical/Cazz. Always require persisted read-back. |
+| Mount, host, codec, output | Stations → Current output; Streaming → Quality outputs | `app/api/stations.py`, `app/api/stream_config.py`, `app/api/streaming.py` | `app/services/stream_config_service.py`, `app/services/quality_outputs.py`, `app/repositories/station_output_repo.py` | `test_station_output_api.py`, `test_quality_outputs.py`, `quality_outputs_panel.test.cjs`, `test_ffmpeg_pipeline_builder.py` | Current production uses only six unsuffixed Opus 192 primaries. Quality variants remain persisted disabled until an explicit operator request. Always require persisted read-back. |
 | Encoder and source continuity | Diagnostics / Streaming health | `app/api/streaming.py` | `app/audio/icecast_source_transport.py`, `app/audio/icecast_audio_sink.py`, `app/audio/ffmpeg_pipeline.py` | `test_icecast_source_transport.py`, `test_stream_continuity_monitor.py`, `test_quality_backpressure_resync.py`, `test_playout_hardening.py` | Current protected mode has no application write timeout on an established source socket. Preserve it through TinyIce backpressure; reconnect only after the peer/network closes it. Keep bounded PCM queues, silence continuity, and staggered reconnects. |
 | Station music library | Media → Managed station library | library routes in `app/api/legacy.py`, `app/api/library_automation.py` | `app/services/managed_library_watcher.py` and track repository | library autoplay/import tests, `test_managed_library_watcher.py` | Choose folder in UI, persist recursive/skip/mode settings, then verify active-file count and watcher status. Stable changes hot-import; transient sync errors retry forever with a five-minute cap. |
 | Jingles | Automation | jingle/sweeper routes in `app/api/legacy.py` | `app/engine/broadcast_queue_autofill.py`, station worker | sweeper and legacy runtime tests | Upload or select a jingle folder in UI. Treat legacy wire value `random` as stable shuffled rotation; do not introduce process randomness. |
@@ -68,9 +68,9 @@ The operator changes the rotation key in **On Air → Deterministic rotation key
 6. Add or update a test proving persistence, read-back, permissions, deterministic ordering, and rollback behavior.
 7. Run Python compilation, JavaScript syntax checking, focused Python tests, and all JavaScript tests.
 8. Bump static asset versions when HTML, CSS, or JavaScript changes.
-9. Restart `RadioTEDU.OnAir.Supervisor` only after tests pass. Confirm immediate automatic startup remains enabled.
+9. Restart `RadioTEDU.OnAir.Supervisor` only after tests pass. Confirm delayed automatic startup remains enabled.
 10. Verify the UI from `http://127.0.0.1:18110/`, then verify saved values through API read-back.
-11. For live audio, canary one station family first, then verify all 14 local mounts sequentially or with bounded concurrency. A successful TCP connection is insufficient; require decoded audio continuity and the expected codec.
+11. For live audio, canary one station family first, then verify all 30 local mounts sequentially or with bounded concurrency. A successful TCP connection is insufficient; require decoded audio continuity and the expected codec.
 12. Verify `/en` and `/fr` only as external listener streams; never create their source connections here.
 13. If TinyIce accepts TCP but returns no bytes and remote administration is denied, stop repeated probing and follow `docs/TINYICE_ORIGIN_RECOVERY_RUNBOOK.md`.
 
@@ -81,7 +81,7 @@ The operator should not need Codex for routine work:
 - Start/stop/resume stations and choose restart behavior.
 - Change the deterministic rotation key.
 - Change normal output host, mount, protocol, codec profile, and credentials.
-- Select, save, apply, diagnose, and disable/re-enable the approved 16-mount Opus/FLAC plan.
+- Select, save, apply, diagnose, and disable/re-enable the complete 32-mount Opus/FLAC plan.
 - Import station music; select managed station and jingle folders.
 - Upload/configure jingles and startup audio.
 - Upload, search, safely retire, and restore JukeLocal songs.

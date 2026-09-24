@@ -12,14 +12,15 @@ router = APIRouter(tags=["audio-watchdog"])
 
 
 class WatchdogRepairPayload(BaseModel):
-    station_ids: list[int] = Field(default_factory=list, max_length=6)
+    station_ids: list[int] = Field(default_factory=list, max_length=20)
+    force_station_ids: list[int] = Field(default_factory=list, max_length=20)
     repair_managed_profiles: bool = False
 
 
 class WatchdogReportPayload(BaseModel):
     status: str = Field(min_length=1, max_length=40)
     message: str = Field(default="", max_length=500)
-    failed_station_ids: list[int] = Field(default_factory=list, max_length=6)
+    failed_station_ids: list[int] = Field(default_factory=list, max_length=20)
     managed_profiles_ok: bool = False
 
 
@@ -47,6 +48,7 @@ async def watchdog_repair(payload: WatchdogRepairPayload, request: Request):
     try:
         result = audio_watchdog_service.repair(
             station_ids=payload.station_ids,
+            force_station_ids=payload.force_station_ids,
             repair_managed_profiles=bool(payload.repair_managed_profiles),
         )
     except ValueError as exc:

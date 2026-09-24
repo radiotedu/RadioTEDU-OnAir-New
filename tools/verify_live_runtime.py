@@ -21,7 +21,7 @@ def verify(api_base: str, token_file: Path) -> dict[str, object]:
             "User-Agent": "RadioTEDU-LiveRuntimeVerifier/1",
         },
     )
-    with urlopen(request, timeout=15) as response:
+    with urlopen(request, timeout=60) as response:
         raw = response.read(128 * 1024 + 1)
         status = int(response.status)
     if len(raw) > 128 * 1024:

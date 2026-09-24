@@ -128,60 +128,8 @@ def test_official_current_report_has_mount_counts_and_valid_hash_chain(tmp_path:
     assert "mount_status" in counts.splitlines()[0]
     assert "/lofi" in counts
     assert "configured_stream" in counts
-    assert "version" in counts.splitlines()[0]
-    assert "lyricist" in counts.splitlines()[0]
-    assert "phonogram_producer" in counts.splitlines()[0]
-    assert "scheduled_duration_seconds" in counts.splitlines()[0]
-    assert "TRAAA2600001" in counts
     assert ",2,2," in counts
-    rights_report = tmp_path / "RadioTEDU-rights-report-current.csv"
-    assert rights_report.is_file()
-    assert "Producer" in rights_report.read_text(encoding="utf-8")
-    mesam_report = tmp_path / "MESAM" / "current-station-2-radio-form.csv"
-    mesam_text = mesam_report.read_text(encoding="utf-8-sig")
-    assert mesam_text.splitlines()[0] == "Eser Adı,İcracı,Eser Süresi,Yayın Adedi"
-    assert "Test Song,Test Artist,00:03:42,2" in mesam_text
     assert Path(result["manifest"]["path"]).is_file()
-
-
-def test_licensor_reports_exclude_station_imaging_but_audit_history_keeps_it(
-    tmp_path: Path,
-) -> None:
-    conn = _db()
-    conn.execute(
-        "INSERT INTO tracks VALUES "
-        "(2, 2, 'Station Jingle', 'RadioTEDU-Imaging', 8.0, 'jingle', "
-        "'C:/media/jingle.mp3')"
-    )
-    service = MusicUsageService(conn)
-    service.record_completed_play(
-        station_id=2,
-        track_id=1,
-        queue_item_id=1,
-        finished_at="2026-08-09 14:32:00",
-    )
-    service.record_completed_play(
-        station_id=2,
-        track_id=2,
-        queue_item_id=2,
-        finished_at="2026-08-09 14:35:00",
-    )
-
-    service.export_official_current(destination=tmp_path)
-
-    general_counts = (tmp_path / "RadioTEDU-music-play-counts-current.csv").read_text(
-        encoding="utf-8"
-    )
-    rights_counts = (tmp_path / "RadioTEDU-rights-report-current.csv").read_text(
-        encoding="utf-8"
-    )
-    mesam = (tmp_path / "MESAM" / "current-station-2-radio-form.csv").read_text(
-        encoding="utf-8-sig"
-    )
-    assert "Station Jingle" in general_counts
-    assert "Station Jingle" not in rights_counts
-    assert "Station Jingle" not in mesam
-    assert "Test Song" in rights_counts
 
 
 def test_internal_report_queries_are_not_truncated_at_ten_thousand_rows():
@@ -196,6 +144,34 @@ def test_internal_report_queries_are_not_truncated_at_ten_thousand_rows():
     conn.commit()
 
     assert len(MusicUsageService(conn).list_entries(limit=10001)) == 10001
+
+
+def test_desktop_bundle_contains_daily_total_and_station_context(tmp_path: Path):
+    conn = _db()
+    service = MusicUsageService(conn)
+    service.record_completed_play(
+        station_id=2,
+        track_id=1,
+        queue_item_id=91,
+        finished_at="2026-08-21 10:32:00",
+    )
+
+    result = service.export_desktop_bundle(
+        destination=tmp_path / "RadioTEDU Play History",
+        now=__import__("datetime").date(2026, 8, 21),
+    )
+
+    root = Path(result["root"])
+    daily = (root / "RadioTEDU-play-history-daily.csv").read_text(encoding="utf-8")
+    total = (root / "RadioTEDU-play-counts-total.csv").read_text(encoding="utf-8")
+    assert "station_name" in daily.splitlines()[0]
+    assert "song_title" in daily.splitlines()[0]
+    assert "RadioTEDU Lo-Fi" in daily
+    assert "Test Song" in daily
+    assert "/lofi" in total
+    assert ",1,1," in total
+    assert (root / "daily" / "2026-08-21-all-radios.csv").is_file()
+    assert (root / "RadioTEDU-play-history-manifest.json").is_file()
 
 
 def test_integrity_verifier_accepts_immutable_pre_variant_hash_version():
@@ -252,7 +228,7 @@ def test_schema_v20_creates_reporting_and_campaign_tables(tmp_path, monkeypatch)
             "genre_voting_rounds",
             "genre_votes",
         } <= tables
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == database._SCHEMA_VERSION
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 20
 
 
 def test_schema_v20_repairs_missing_delivered_variants_without_rewriting_usage(

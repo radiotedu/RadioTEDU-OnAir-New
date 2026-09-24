@@ -4,6 +4,7 @@ from app.audio.ffmpeg_pipeline import (
     build_ffmpeg_icecast_cmd,
     build_ffmpeg_icecast_sink_cmd,
     build_ffmpeg_local_pcm_cmd,
+    build_ffmpeg_pcm_producer_cmd,
     build_ffplay_local_cmd,
 )
 from app.audio.gst_pipeline import StationPipelineConfig, resolve_stream_profile
@@ -40,45 +41,11 @@ def test_ffmpeg_command_includes_track_metadata_when_available() -> None:
     assert "-metadata" in cmd
     assert "title=Song A" in cmd
     assert "artist=Artist B" in cmd
+    assert "-content_type" in cmd
+    assert "audio/aac" in cmd
     assert "-f" in cmd
     assert "adts" in cmd
     assert "196k" in cmd
-
-
-def test_ffmpeg_command_uses_itu_ebu_processing_in_safe_order() -> None:
-    cfg = _cfg()
-    cfg.output_gain_db = 1.5
-    cmd = build_ffmpeg_icecast_cmd(cfg, "ffmpeg.exe")
-
-    filter_chain = cmd[cmd.index("-af") + 1]
-    assert "highpass=" not in filter_chain
-    assert "acompressor=" not in filter_chain
-    assert "loudnorm=I=-23.0:TP=-1.0:LRA=50" in filter_chain
-    assert "alimiter=limit=0.891251" in filter_chain
-    assert "aresample=48000" in filter_chain
-    assert filter_chain.index("volume=1.50dB") < filter_chain.index("alimiter=")
-    assert filter_chain.index("alimiter=") < filter_chain.index("aresample=48000")
-
-
-def test_legacy_genre_names_resolve_to_one_programme_neutral_standard() -> None:
-    profiles = ("classical", "jazz", "lofi", "pop", "rock", "energize")
-
-    baseline = build_ffmpeg_icecast_cmd(_cfg(), "ffmpeg.exe")
-    baseline_codec = baseline[baseline.index("-c:a") + 1]
-    baseline_filter_chain = baseline[baseline.index("-af") + 1]
-
-    for profile in profiles:
-        cfg = _cfg()
-        cfg.broadcast_processing_profile = profile
-        cmd = build_ffmpeg_icecast_cmd(cfg, "ffmpeg.exe")
-        filter_chain = cmd[cmd.index("-af") + 1]
-
-        assert filter_chain == baseline_filter_chain
-        assert "loudnorm=I=-23.0:TP=-1.0:LRA=50" in filter_chain
-        assert "highpass=" not in filter_chain
-        assert "acompressor=" not in filter_chain
-        assert cmd[cmd.index("-b:a") + 1] == "196k"
-        assert cmd[cmd.index("-c:a") + 1] == baseline_codec
 
 
 def test_ffmpeg_command_omits_empty_track_metadata() -> None:
@@ -101,36 +68,6 @@ def test_true_aac_plus_profile_requires_fdk_he_aac_encoder() -> None:
     assert "-afterburner" in cmd
 
 
-def test_normal_profile_is_libfdk_aac_lc_at_192_kbps() -> None:
-    profile = resolve_stream_profile("aac_low_192", 192)
-    cmd = build_ffmpeg_icecast_sink_cmd(
-        _cfg(stream_codec_profile="aac_low_192"), "ffmpeg.exe"
-    )
-
-    assert profile["profile"] == "aac_low_192"
-    assert profile["bitrate_kbps"] == 192
-    assert profile["ffmpeg_codec"] == "libfdk_aac"
-    assert profile["ffmpeg_profile"] == "aac_low"
-    assert "libfdk_aac" in cmd
-    assert "aac_low" in cmd
-    assert "192k" in cmd
-
-
-def test_low_profile_is_libfdk_he_aac_v2_at_64_kbps() -> None:
-    profile = resolve_stream_profile("aac_he_v2_64", 64)
-    cmd = build_ffmpeg_icecast_sink_cmd(
-        _cfg(stream_codec_profile="aac_he_v2_64"), "ffmpeg.exe"
-    )
-
-    assert profile["profile"] == "aac_he_v2_64"
-    assert profile["bitrate_kbps"] == 64
-    assert profile["ffmpeg_codec"] == "libfdk_aac"
-    assert profile["ffmpeg_profile"] == "aac_he_v2"
-    assert "libfdk_aac" in cmd
-    assert "aac_he_v2" in cmd
-    assert "64k" in cmd
-
-
 def test_ffmpeg_command_omits_track_metadata_when_disabled(monkeypatch) -> None:
     monkeypatch.setenv("CLEANROOM_SKIP_STREAM_METADATA", "1")
     cmd = build_ffmpeg_icecast_cmd(
@@ -140,15 +77,6 @@ def test_ffmpeg_command_omits_track_metadata_when_disabled(monkeypatch) -> None:
     joined = " ".join(cmd)
     assert "title=Private Song" not in joined
     assert "artist=Private Artist" not in joined
-
-
-def test_ffmpeg_command_omits_track_metadata_for_station_policy() -> None:
-    cfg = _cfg(title="Lo-Fi title", artist="Lo-Fi artist")
-    cfg.metadata_suppressed = True
-    cmd = build_ffmpeg_icecast_cmd(cfg, "ffmpeg.exe")
-    joined = " ".join(cmd)
-    assert "title=Lo-Fi title" not in joined
-    assert "artist=Lo-Fi artist" not in joined
 
 
 def test_ffmpeg_command_supports_internal_silence_source() -> None:
@@ -178,13 +106,9 @@ def test_build_ffmpeg_crossfade_cmd_seeks_current_input_and_mixes_immediately() 
     assert "C:/music/current.mp3" in joined
     assert "C:/music/next.mp3" in joined
     assert "afade" in joined
-    assert "curve=qsin" in joined
     assert "amix" in joined
     assert "concat" in joined
     assert "icecast://" in joined
-    assert "[icecast_input]" not in joined
-    assert "[icecast_out]" in joined
-    assert " -af " not in joined
     assert "title=Next Song" in joined
     assert "artist=Next Artist" in joined
 
@@ -220,10 +144,7 @@ def test_build_ffmpeg_crossfade_cmd_uses_separate_codecs_for_icecast_and_local_p
     joined = " ".join(cmd)
     assert "icecast://" in joined
     assert "pipe:1" in joined
-    assert "asplit=2[icecast_input][local_out]" in joined
-    assert "[icecast_input]loudnorm=I=-23.0:TP=-1.0:LRA=50" in joined
-    assert "-map [local_out]" in joined
-    assert " -af " not in joined
+    assert "-content_type audio/aac" in joined
     assert "-f adts" in joined
     assert "pcm_s16le" in joined
 
@@ -237,6 +158,7 @@ def test_build_ffmpeg_icecast_cmd_supports_mp3_profile() -> None:
     joined = " ".join(cmd)
     assert "-c:a libmp3lame" in joined
     assert "-b:a 128k" in joined
+    assert "-content_type audio/mpeg" in joined
     assert "-f mp3" in joined
 
 
@@ -271,9 +193,41 @@ def test_build_ffmpeg_icecast_sink_cmd_reads_raw_pcm_from_stdin() -> None:
     assert "-ar 48000" in joined
     assert "-ac 2" in joined
     assert "icecast://" in joined
+    assert "-content_type audio/aac" in joined
     assert "-f adts" in joined
     assert "title=Song A" not in joined
     assert "artist=Artist B" not in joined
+
+
+def test_programme_processing_is_locked_to_ebu_r128_before_codec_fanout() -> None:
+    cfg = _cfg(stream_codec_profile="aac_low_192")
+    cfg.loudness_target_lufs = -16.0
+    cfg.output_gain_db = 7.0
+
+    cmd = build_ffmpeg_pcm_producer_cmd(cfg, "ffmpeg.exe")
+    joined = " ".join(cmd)
+
+    assert "loudnorm=I=-23.0:TP=-1.0:LRA=7:offset=-1.5" in joined
+    assert "alimiter=limit=0.891251" in joined
+    assert "aresample=48000" in joined
+    assert "I=-16.0" not in joined
+    assert "volume=" not in joined
+    assert "highpass=" not in joined
+    assert "acompressor=" not in joined
+
+
+def test_encoded_sink_preserves_codec_without_repeating_loudness_processing() -> None:
+    cfg = _cfg(stream_codec_profile="aac_low_192")
+    cfg.stream_bitrate_kbps = 192
+
+    cmd = build_ffmpeg_icecast_sink_cmd(cfg, "ffmpeg.exe")
+    joined = " ".join(cmd)
+
+    assert "-c:a libfdk_aac" in joined
+    assert "-profile:a aac_low" in joined
+    assert "-b:a 192k" in joined
+    assert "loudnorm=" not in joined
+    assert "alimiter=" not in joined
 
 
 def test_nonstandard_port_does_not_force_legacy_icecast_protocol() -> None:

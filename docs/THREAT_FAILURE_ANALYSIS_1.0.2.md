@@ -1,6 +1,6 @@
 # RadioTEDU OnAir 1.0.2 threat and failure analysis
 
-Status: implementation gate
+Status: implementation gate  
 Prepared: 2026-08-09
 
 This analysis covers safety, availability, integrity, confidentiality, and

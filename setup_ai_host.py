@@ -22,7 +22,7 @@ def install_dependencies():
         "accelerate",
         "sentencepiece",
     ]
-
+    
     print("\n📦 Installing AI dependencies...")
     for pkg in packages:
         print(f"  Installing {pkg}...")
@@ -40,13 +40,13 @@ def install_dependencies():
 def enable_ai_in_database():
     """Enable AI host in the database settings."""
     import sqlite3
-
+    
     db_path = Path(__file__).parent / "data" / "cleanroom.db"
     if not db_path.exists():
         print(f"\n⚠️  Database not found at {db_path}")
         print("   AI will be enabled when you first run the server")
         return
-
+    
     conn = sqlite3.connect(str(db_path))
     try:
         # Enable AI host
@@ -67,7 +67,7 @@ def check_model_dirs():
     """Check if AI models are downloaded."""
     base = Path(__file__).parent
     qwen_tts_dir = base / "Qwen3-TTS-12Hz-1.7B-VoiceDesign"
-
+    
     if qwen_tts_dir.exists():
         print(f"\n✅ Qwen3-TTS model found: {qwen_tts_dir}")
         print("   (LLM will be downloaded on first use)")
@@ -83,13 +83,13 @@ def main():
     print("=" * 60)
     print("  Radio TEDU AI Host Setup")
     print("=" * 60)
-
+    
     check_python_version()
-
+    
     if install_dependencies():
         enable_ai_in_database()
         check_model_dirs()
-
+        
         print("\n" + "=" * 60)
         print("  ✅ AI Host setup complete!")
         print("=" * 60)

@@ -1,7 +1,9 @@
+import sqlite3
+
 from fastapi import HTTPException, Request
 
 from app.auth.jwt_handler import decode_token
-from app.db import get_connection, init_db
+from app.db import get_read_connection
 from app.repositories.rbac_repo import RbacRepository
 from app.repositories.user_repo import UserRepository
 
@@ -76,6 +78,16 @@ _ROUTE_ROLE_RULES: list[tuple[str, set[str], set[str]]] = [
 ]
 
 
+def raise_auth_storage_busy(exc: sqlite3.OperationalError) -> None:
+    """Return a retryable response when auth storage is briefly write-locked."""
+    if any(token in str(exc).casefold() for token in ("locked", "busy")):
+        raise HTTPException(
+            status_code=503,
+            detail="auth_storage_busy",
+            headers={"Retry-After": "1"},
+        ) from exc
+
+
 def _normalize_api_path(path: str) -> str:
     normalized = str(path or "").strip()
     if normalized.endswith("/") and normalized != "/":
@@ -126,8 +138,7 @@ def build_auth_user_payload(user: dict, conn=None) -> dict:
 
     close_conn = False
     if conn is None:
-        init_db()
-        conn = get_connection()
+        conn = get_read_connection(timeout_seconds=3.0)
         close_conn = True
 
     try:
@@ -257,15 +268,19 @@ def _load_user_from_access_token(token: str):
     if str(payload.get("type") or "") != "access":
         raise HTTPException(status_code=401, detail="Invalid token")
 
-    init_db()
-    conn = get_connection()
+    conn = None
     try:
+        conn = get_read_connection(timeout_seconds=3.0)
         user = UserRepository(conn).get_user_by_id(int(payload["sub"]))
         if user is None or int(user["is_active"]) != 1:
             raise HTTPException(status_code=401, detail="Invalid token")
         return build_auth_user_payload(user, conn=conn)
+    except sqlite3.OperationalError as exc:
+        raise_auth_storage_busy(exc)
+        raise
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 async def get_optional_user(request: Request):

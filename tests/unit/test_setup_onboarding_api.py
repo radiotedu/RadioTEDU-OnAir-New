@@ -99,7 +99,7 @@ def test_setup_output_payload_preserves_station_tls_transport_setting(client):
     conn.close()
 
 
-def _configure_setup_via_api(client, *, ai_enabled=True, profile="opus_192"):
+def _configure_setup_via_api(client, *, ai_enabled=True, profile="opus_96"):
     res = client.post(
         "/api/setup/configure",
         json={
@@ -344,7 +344,7 @@ def test_setup_configure_parses_operator_icecast_url(client, monkeypatch):
             "icecast_mount": "",
             "icecast_user": "source",
             "icecast_password": "",
-            "stream_codec_profile": "aac_low_192",
+            "stream_codec_profile": "opus_192",
             "ai_enabled": False,
             "ai_warmth": "warm",
         },
@@ -397,8 +397,8 @@ def test_setup_allows_system_default_monitor_without_device_enumeration(client, 
             icecast_mount="/live",
             icecast_user="source",
             icecast_password="hackme",
-            stream_codec_profile="aac_low_192",
-            stream_bitrate_kbps=192,
+            stream_codec_profile="opus_96",
+            stream_bitrate_kbps=96,
         )
     finally:
         conn.close()
@@ -439,16 +439,16 @@ def test_setup_configure_resolves_invalid_station_to_active_station(client, monk
     assert payload["station_id"] == 1
     assert payload["station"]["name"] == "Upgrade Safe Station"
     assert payload["config"]["icecast_mount"] == "/live"
-    assert payload["config"]["stream_codec_profile"] == "aac_low_192"
+    assert payload["config"]["stream_codec_profile"] == "opus_96"
 
 
-def test_setup_exposes_only_the_approved_aac_quality_presets():
+def test_setup_exposes_only_the_approved_opus_quality_presets():
     assert [
         (item["id"], item["bitrate_kbps"])
         for item in CODEC_PRESETS
-    ] == [("aac_low_192", 192), ("aac_he_v2_64", 64)]
-    assert _normalize_stream_profile("opus_128", 128) == ("aac_low_192", 192)
-    assert _normalize_stream_profile("mp3_128", 128) == ("aac_low_192", 192)
+    ] == [("opus_64", 64), ("opus_96", 96), ("opus_192", 192)]
+    assert _normalize_stream_profile("opus_128", 128) == ("opus_96", 96)
+    assert _normalize_stream_profile("mp3_128", 128) == ("opus_96", 96)
 
 
 def test_setup_complete_issues_deployment_certificate(client, monkeypatch):

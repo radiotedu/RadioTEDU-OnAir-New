@@ -67,3 +67,37 @@ def test_init_db_is_safe_to_reenter_while_another_writer_holds_lock(tmp_path, mo
     finally:
         lock_conn.rollback()
         lock_conn.close()
+
+
+def test_init_db_does_not_reopen_verified_database_on_each_request(tmp_path, monkeypatch):
+    import app.db as db
+
+    monkeypatch.setenv("CLEANROOM_DB_PATH", str(tmp_path / "verified.db"))
+    db.init_db()
+
+    def unexpected_connection(**_kwargs):
+        raise AssertionError("verified database should not reopen SQLite for init_db")
+
+    monkeypatch.setattr(db, "get_connection", unexpected_connection)
+    db.init_db()
+
+
+def test_get_connection_does_not_reassert_wal_for_existing_database(tmp_path, monkeypatch):
+    import app.db as db
+
+    monkeypatch.setenv("CLEANROOM_DB_PATH", str(tmp_path / "wal.db"))
+    db.init_db()
+    statements = []
+    real_connect = sqlite3.connect
+
+    def traced_connect(*args, **kwargs):
+        conn = real_connect(*args, **kwargs)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(db.sqlite3, "connect", traced_connect)
+    conn = db.get_connection()
+    conn.close()
+
+    assert "PRAGMA journal_mode" in statements
+    assert "PRAGMA journal_mode=WAL" not in statements

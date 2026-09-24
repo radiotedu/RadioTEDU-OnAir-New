@@ -21,9 +21,17 @@ LOCAL_MONITOR_CATCHUP_RATE = 2.0
 # R128 supplies the operational broadcast target used with it.
 ITU_PROGRAM_LOUDNESS_LUFS = -23.0
 ITU_TRUE_PEAK_DBTP = -1.0
-# BS.1770/R128 does not mandate an LRA target.  FFmpeg's loudnorm filter
-# requires one, so use its maximum to avoid imposing unrequested compression.
-ITU_LOUDNESS_RANGE_LU = 50
+# BS.1770/R128 does not mandate an LRA target. FFmpeg's live ``loudnorm`` does,
+# and its maximum (50 LU) allowed arbitrary 75-second music windows to sit more
+# than 2 LU above the -23 LUFS reference. Seven LU is FFmpeg's broadcast-safe
+# default: it keeps a continuous music service close to the live-programme
+# tolerance without adding a separate genre EQ or changing the delivery codec.
+ITU_LOUDNESS_RANGE_LU = 7
+# FFmpeg's one-pass live controller is restarted at programme transitions. A
+# live 75-second calibration across the primary mounts measured a stable
+# positive bias. Keep the EBU reference at -23 LUFS and compensate controller
+# gain conservatively without touching delivery codec or bitrate.
+LIVE_LOUDNORM_CALIBRATION_OFFSET_LU = -1.5
 ITU_TRUE_PEAK_LINEAR = 0.891251
 _TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 _log = logging.getLogger(__name__)
@@ -83,7 +91,7 @@ def _pcm_output_args() -> list[str]:
 
 
 def _broadcast_processing_filters(cfg: StationPipelineConfig) -> list[str]:
-    """Return one standards-based processing chain for every station.
+    """Return the locked standards-based processing chain for every station.
 
     ITU-R BS.1770 is programme-neutral: it specifies K-weighted, gated
     loudness and true-peak measurement, not genre EQ or compressor ratios.
@@ -92,16 +100,18 @@ def _broadcast_processing_filters(cfg: StationPipelineConfig) -> list[str]:
     standard and must not alter measurement policy.
     """
 
-    loudness_target = getattr(cfg, "loudness_target_lufs", None)
-    target = (
-        ITU_PROGRAM_LOUDNESS_LUFS
-        if loudness_target is None
-        else max(-24.0, min(-9.0, float(loudness_target)))
-    )
+    # The public stream contract is intentionally not operator-adjustable per
+    # station.  A stale database override previously kept several live outputs
+    # at -16 LUFS even after the system default changed to EBU R128.  Ignore
+    # compatibility fields here so every encoder restart converges on the same
+    # measured programme target.
+    del cfg
+    target = ITU_PROGRAM_LOUDNESS_LUFS
     return [
         (
             f"loudnorm=I={target:.1f}:TP={ITU_TRUE_PEAK_DBTP:.1f}:"
-            f"LRA={ITU_LOUDNESS_RANGE_LU}"
+            f"LRA={ITU_LOUDNESS_RANGE_LU}:"
+            f"offset={LIVE_LOUDNORM_CALIBRATION_OFFSET_LU:.1f}"
         ),
         (
             f"alimiter=limit={ITU_TRUE_PEAK_LINEAR:.6f}:attack=5:release=80:"
@@ -121,7 +131,13 @@ def _icecast_filter_chain(cfg: StationPipelineConfig) -> list[str]:
             if profile_filter.startswith("aresample="):
                 final_resample_filters.append(profile_filter)
             else:
-                filters.append(profile_filter)
+                # Codec profiles may declare resampling requirements, but they
+                # must not inject genre EQ, compression, or an alternative
+                # loudness target into the common ITU/EBU programme chain.
+                _log.warning(
+                    "ignoring non-standard codec-profile audio filter: %s",
+                    profile_filter,
+                )
     processing_filters = _broadcast_processing_filters(cfg)
     limiter_filters = [
         item for item in processing_filters if item.startswith("alimiter=")
@@ -129,13 +145,30 @@ def _icecast_filter_chain(cfg: StationPipelineConfig) -> list[str]:
     filters.extend(
         item for item in processing_filters if not item.startswith("alimiter=")
     )
-    if abs(float(cfg.output_gain_db or 0.0)) > 0.001:
-        filters.append(f"volume={float(cfg.output_gain_db):.2f}dB")
-    # Station gain must feed the safety limiter, never follow it.  A final
-    # explicit resample returns loudnorm's internal rate to the encoder rate.
+    # Per-output gain after loudness normalization would move the delivered
+    # programme away from -23 LUFS.  Keep the database field for compatibility
+    # and local-monitor use, but never apply it to the public Icecast branch.
+    # A final explicit resample returns loudnorm's internal rate to the encoder
+    # rate.
     filters.extend(limiter_filters)
     filters.extend(final_resample_filters or [f"aresample={LOCAL_PCM_SAMPLE_RATE}"])
     return filters
+
+
+def _programme_filter_chain(cfg: StationPipelineConfig) -> list[str]:
+    """Process programme PCM once before it is fanned out to all encoders.
+
+    ``loudnorm`` runs internally at 192 kHz in live/dynamic mode. Running that
+    same filter independently in every AAC/FLAC quality branch multiplied CPU
+    use and let sibling output queues fall behind. A station programme has one
+    loudness reference, so normalize once and let every codec encode identical
+    48 kHz processed PCM.
+    """
+
+    return [
+        *_broadcast_processing_filters(cfg),
+        f"aresample={LOCAL_PCM_SAMPLE_RATE}",
+    ]
 
 
 def _icecast_output_args(
@@ -518,10 +551,7 @@ def build_ffmpeg_icecast_cmd(cfg: StationPipelineConfig, ffmpeg_bin: str) -> lis
         "error",
         *_build_input_args(cfg.input_uri, realtime=True),
         "-vn",
-        # Content-Type is sent by IcecastSourceTransport's HTTP headers. FFmpeg
-        # is writing to a pipe here, where -content_type is not a supported
-        # output option.
-        *_icecast_output_args(cfg, include_content_type=False),
+        *_icecast_output_args(cfg),
         *_icecast_protocol_args(cfg),
     ]
     _append_track_metadata(cmd, cfg)
@@ -545,7 +575,7 @@ def build_ffmpeg_icecast_sink_cmd(cfg: StationPipelineConfig, ffmpeg_bin: str) -
         "-i",
         "pipe:0",
         "-vn",
-        *_icecast_output_args(cfg),
+        *_icecast_output_args(cfg, include_audio_filters=False),
         *_icecast_protocol_args(cfg),
         out_url,
     ]
@@ -555,10 +585,12 @@ def build_ffmpeg_encoded_sink_cmd(
     cfg: StationPipelineConfig,
     ffmpeg_bin: str,
 ) -> list[str]:
-    """Encode interleaved PCM to stdout for a protocol adapter.
+    """Encode already-processed programme PCM for a protocol adapter.
 
     Credentials and destination details deliberately stay out of this command.
-    The transport adapter owns authentication and bounded socket I/O.
+    The transport adapter owns authentication and bounded socket I/O. Loudness
+    processing belongs to the shared programme producer and must not be repeated
+    once per delivery codec.
     """
 
     return [
@@ -575,9 +607,7 @@ def build_ffmpeg_encoded_sink_cmd(
         "-i",
         "pipe:0",
         "-vn",
-        # IcecastSourceTransport adds Content-Type to the HTTP source request.
-        # FFmpeg writes encoded bytes to stdout, where -content_type is invalid.
-        *_icecast_output_args(cfg, include_content_type=False),
+        *_icecast_output_args(cfg, include_audio_filters=False, include_content_type=False),
         "pipe:1",
     ]
 
@@ -606,6 +636,8 @@ def build_ffmpeg_pcm_producer_cmd(
                 start_offset_seconds=start_offset_seconds,
             ),
             "-vn",
+            "-af",
+            ",".join(_programme_filter_chain(cfg)),
             *_pcm_output_args(),
             "pipe:1",
         ]
@@ -639,6 +671,7 @@ def _build_ffmpeg_crossfade_base_cmd(
     catchup_rate: float | None = None,
 ) -> list[str]:
     seconds = _format_seconds(next_cfg.crossfade_seconds)
+    programme_chain = ",".join(_programme_filter_chain(next_cfg))
     filter_graph = (
         f"[0:a]atrim=0:{seconds},asetpts=PTS-STARTPTS,"
         f"afade=t=out:st=0:d={seconds}:curve=qsin[current_xf];"
@@ -647,7 +680,8 @@ def _build_ffmpeg_crossfade_base_cmd(
         f"afade=t=in:st=0:d={seconds}:curve=qsin[next_xf];"
         "[current_xf][next_xf]amix=inputs=2:duration=longest:normalize=0[mixed];"
         f"[next_tail]atrim=start={seconds},asetpts=PTS-STARTPTS[tail];"
-        "[mixed][tail]concat=n=2:v=0:a=1[outa]"
+        "[mixed][tail]concat=n=2:v=0:a=1[programme];"
+        f"[programme]{programme_chain}[outa]"
     )
     cmd = [
         ffmpeg_bin,
@@ -698,16 +732,12 @@ def build_ffmpeg_crossfade_cmd(
     local_map = "[outa]"
     if next_cfg.icecast_enabled:
         filter_index = cmd.index("-filter_complex") + 1
-        filter_chain = ",".join(_icecast_filter_chain(next_cfg)) or "anull"
         if include_local_pipe:
             cmd[filter_index] += (
-                ";[outa]asplit=2[icecast_input][local_out];"
-                f"[icecast_input]{filter_chain}[icecast_out]"
+                ";[outa]asplit=2[icecast_out][local_out]"
             )
             local_map = "[local_out]"
-        else:
-            cmd[filter_index] += f";[outa]{filter_chain}[icecast_out]"
-        icecast_map = "[icecast_out]"
+            icecast_map = "[icecast_out]"
     if next_cfg.icecast_enabled:
         cmd.extend(
             [

@@ -1,21 +1,8 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
-from app.services.audio_watchdog import AudioWatchdogService, _same_windows_path
-
-
-WATCHDOG_SCRIPT = (
-    Path(__file__).resolve().parents[2] / "tools" / "RadioTEDU-AudioWatchdog.ps1"
-)
-
-
-def test_windows_path_comparison_normalizes_duplicate_separators():
-    assert _same_windows_path(
-        r"H:\\RadioTEDU Songs\\Rock", r"H:\RadioTEDU Songs\Rock"
-    )
+from app.services.audio_watchdog import AudioWatchdogService
 
 
 def test_repair_restarts_only_selected_station(monkeypatch):
@@ -33,7 +20,6 @@ def test_repair_restarts_only_selected_station(monkeypatch):
     monkeypatch.setattr("app.api.runtime.operator_start_runtime_loop", _start)
     service = AudioWatchdogService()
     monkeypatch.setattr(service, "snapshot", lambda: {"managed_profiles_ok": True})
-    monkeypatch.setattr(service, "_runtime_snapshot", lambda _station_id: {"running": False})
 
     result = service.repair(station_ids=[8, 8], repair_managed_profiles=False)
 
@@ -42,43 +28,71 @@ def test_repair_restarts_only_selected_station(monkeypatch):
     assert [item["station_id"] for item in result["restarted"]] == [8]
 
 
-def test_repair_preserves_worker_when_public_probe_disagrees_with_healthy_source(
-    monkeypatch,
-):
-    calls = []
-    monkeypatch.setattr(
-        "app.api.runtime.operator_stop_runtime",
-        lambda station_id: calls.append(("stop", station_id)),
-    )
+def test_repair_rejects_unknown_station_id():
+    with pytest.raises(ValueError, match="invalid_watchdog_station_ids"):
+        AudioWatchdogService().repair(station_ids=[999], repair_managed_profiles=False)
+
+
+def test_repair_defers_healthy_station_without_force(monkeypatch):
     service = AudioWatchdogService()
-    monkeypatch.setattr(service, "snapshot", lambda: {"managed_profiles_ok": True})
     monkeypatch.setattr(
         service,
         "_runtime_snapshot",
-        lambda _station_id: {
+        lambda station_id: {
             "running": True,
             "worker_running": True,
             "program_running": True,
             "output_running": True,
             "mount_healthy": True,
+            "writer_failed": False,
+            "network_failed": False,
+            "last_write_age": 0.1,
         },
     )
+    monkeypatch.setattr(service, "snapshot", lambda: {"managed_profiles_ok": True})
 
-    result = service.repair(station_ids=[8], repair_managed_profiles=False)
+    result = service.repair(station_ids=[2], repair_managed_profiles=False)
 
-    assert calls == []
     assert result["restarted"] == []
-    assert result["deferred"] == [
-        {
-            "station_id": 8,
-            "reason": "public_probe_disagreed_with_healthy_source",
-        }
-    ]
+    assert result["deferred"][0]["station_id"] == 2
 
 
-def test_repair_rejects_unknown_station_id():
-    with pytest.raises(ValueError, match="invalid_watchdog_station_ids"):
-        AudioWatchdogService().repair(station_ids=[999], repair_managed_profiles=False)
+def test_repair_force_restarts_publicly_failed_healthy_station(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "app.api.runtime.operator_stop_runtime",
+        lambda station_id: calls.append(("stop", station_id)),
+    )
+    monkeypatch.setattr(
+        "app.api.runtime.operator_start_runtime_loop",
+        lambda station_id, payload: calls.append(("start", station_id))
+        or {"running": True, "worker_running": True},
+    )
+    service = AudioWatchdogService()
+    monkeypatch.setattr(
+        service,
+        "_runtime_snapshot",
+        lambda station_id: {
+            "running": True,
+            "worker_running": True,
+            "program_running": True,
+            "output_running": True,
+            "mount_healthy": True,
+            "writer_failed": False,
+            "network_failed": False,
+            "last_write_age": 0.1,
+        },
+    )
+    monkeypatch.setattr(service, "snapshot", lambda: {"managed_profiles_ok": True})
+
+    result = service.repair(
+        station_ids=[2],
+        force_station_ids=[2],
+        repair_managed_profiles=False,
+    )
+
+    assert calls == [("stop", 2), ("start", 2)]
+    assert result["forced_station_ids"] == [2]
 
 
 def test_report_is_bounded_and_persisted(tmp_path, monkeypatch):
@@ -131,23 +145,3 @@ def test_watchdog_report_accepts_only_watchdog_token(client, monkeypatch):
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
-
-
-def test_public_only_failure_preserves_healthy_source_worker():
-    script = WATCHDOG_SCRIPT.read_text(encoding="utf-8")
-
-    assert "$repairableFailed = @($locallyUnhealthyFailed)" in script
-    assert "healthy workers were preserved" in script
-    assert "$deferredCount -gt 0" in script
-    assert "recovered before repair; worker restart suppressed" in script
-    assert "forcing source re-registration" not in script
-
-
-def test_repair_cooldown_is_saved_only_after_final_verification():
-    script = WATCHDOG_SCRIPT.read_text(encoding="utf-8")
-
-    save_position = script.rindex("Save-RepairState")
-    final_failure_position = script.index(
-        'Send-Report "failed" "Repair completed but final verification still failed."'
-    )
-    assert save_position > final_failure_position

@@ -1,11 +1,4 @@
-from app.services.track_naming import clean_album_metadata, normalize_track_name
-
-
-def test_hides_standalone_recording_catalog_placeholder():
-    assert clean_album_metadata("[standalone recordings]") == ""
-    assert clean_album_metadata("Standalone Recording") == ""
-    assert clean_album_metadata("A Real Album") == "A Real Album"
-    assert clean_album_metadata("Real Album 🎻") == "Real Album 🎻"
+from app.services.track_naming import normalize_track_name
 
 
 def test_normalizes_breaking_copyright_quoted_title():

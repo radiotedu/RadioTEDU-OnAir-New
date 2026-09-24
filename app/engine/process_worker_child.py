@@ -318,6 +318,8 @@ def _process_runtime_command(
             result = runtime_supervisor.evaluate_station(station_id)
         elif method == "recover_station":
             result = runtime_registry.recover_station(station_id, **kwargs)
+        elif method == "recover_station_primary_output":
+            result = runtime_registry.recover_station_primary_output(station_id)
         elif method == "refresh_live_audio_settings":
             result = runtime_registry.refresh_live_audio_settings(station_id)
         elif method == "refresh_output_settings":

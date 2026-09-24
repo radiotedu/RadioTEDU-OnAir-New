@@ -1,7 +1,6 @@
 import csv
 import hashlib
 import json
-import math
 import logging
 import os
 import shutil
@@ -36,7 +35,7 @@ from app.audio.gst_pipeline import resolve_stream_profile
 from app.audio.bpm_analyzer import analyze_bpm
 from app.config import get_db_path
 from app.cover_art import public_track_cover_url
-from app.db import get_connection, init_db
+from app.db import get_connection, get_read_connection, init_db
 from app.engine.broadcast_queue_autofill import (
     ensure_broadcast_queue_filled,
     ensure_broadcast_queue_ready_for_playback,
@@ -50,6 +49,7 @@ from app.file_security import (
 )
 from app.media_paths import resolve_runtime_media_path
 from app.repositories.ad_campaign_repo import AdCampaignRepository
+from app.repositories.ad_break_repo import AdBreakRepository
 from app.repositories.log_repo import LogRepository
 from app.repositories.playlist_repo import PlaylistRepository
 from app.repositories.program_queue_repo import ProgramQueueRepository
@@ -1826,7 +1826,7 @@ def _runtime_start_track(conn, station_id: int, track_id: int) -> dict:
     track_type = str(row["track_type"] or "music").strip().lower() or "music"
     crossfade_seconds = max(
         0.0,
-        _parse_float(system_settings.get("default_crossfade_seconds"), 5.0),
+        _parse_float(system_settings.get("default_crossfade_seconds"), 0.0),
     )
     if track_type != "music":
         crossfade_seconds = 0.0
@@ -2141,40 +2141,20 @@ def set_speaker_monitor_station(
 def get_system_settings():
     init_db()
     conn = get_connection()
-    try:
-        settings = _system_settings_snapshot(conn)
-        return {"settings": settings, **settings}
-    finally:
-        conn.close()
+    settings = _system_settings_snapshot(conn)
+    return {"settings": settings, **settings}
 
 
 @router.put("/api/settings/system")
 def update_system_settings(payload: dict | None = Body(default=None)):
     init_db()
     conn = get_connection()
-    try:
-        repo = SettingsRepository(conn)
-        _system_settings_snapshot(conn)
-        values = _extract_update_values(payload)
-        if "default_crossfade_seconds" in values:
-            try:
-                crossfade = float(values["default_crossfade_seconds"])
-            except (TypeError, ValueError):
-                raise HTTPException(
-                    status_code=422,
-                    detail="default_crossfade_seconds_must_be_between_0_and_30",
-                )
-            if not math.isfinite(crossfade) or not 0.0 <= crossfade <= 30.0:
-                raise HTTPException(
-                    status_code=422,
-                    detail="default_crossfade_seconds_must_be_between_0_and_30",
-                )
-            values["default_crossfade_seconds"] = str(crossfade)
-        repo.upsert_system(values)
-        settings = _system_settings_snapshot(conn)
-        return {"ok": True, "settings": settings, **settings}
-    finally:
-        conn.close()
+    repo = SettingsRepository(conn)
+    _system_settings_snapshot(conn)
+    values = _extract_update_values(payload)
+    repo.upsert_system(values)
+    settings = _system_settings_snapshot(conn)
+    return {"ok": True, "settings": settings, **settings}
 
 
 @router.get("/api/settings/station")
@@ -2640,7 +2620,7 @@ def _list_legacy_queue_from_connection(conn, station_id: int):
     try:
         from app.repositories.settings_repo import SettingsRepository
         crossfade = float(
-            SettingsRepository(conn).get_system().get("default_crossfade_seconds", 5.0)
+            SettingsRepository(conn).get_system().get("default_crossfade_seconds", 0.0)
         )
     except Exception:
         pass
@@ -5326,130 +5306,7 @@ def _ad_campaign_row_to_dict(conn, row) -> dict:
     }
 
 
-@router.get("/api/ad-break-sets")
-def list_ad_break_sets(station_id: int):
-    init_db()
-    conn = get_connection()
-    repo = AdCampaignRepository(conn)
-    rows = [_ad_break_set_row_to_dict(conn, row) for row in repo.list_break_sets(station_id)]
-    return {"station_id": int(station_id), "break_sets": rows}
-
-
-@router.post("/api/ad-break-sets")
-def create_ad_break_set(payload: AdBreakSetPayload):
-    init_db()
-    conn = get_connection()
-    repo = AdCampaignRepository(conn)
-    active = _resolve_active_flag(payload.enabled, payload.is_active, default=True)
-    item_id = repo.create_break_set(
-        station_id=payload.station_id,
-        name=payload.name,
-        enabled=active,
-        payload=_ad_break_set_payload_from_request(payload, active),
-    )
-    return {"id": item_id, "break_set_id": item_id}
-
-
-@router.put("/api/ad-break-sets/{break_set_id}")
-def update_ad_break_set(break_set_id: int, payload: AdBreakSetPayload):
-    init_db()
-    conn = get_connection()
-    repo = AdCampaignRepository(conn)
-    owner_station_id = _station_owned_ad_entity(conn, "ad_break_sets", break_set_id)
-    if owner_station_id is None or int(owner_station_id) != int(payload.station_id):
-        raise HTTPException(status_code=404, detail="ad break set not found")
-    active = _resolve_active_flag(payload.enabled, payload.is_active, default=True)
-    ok = repo.update_break_set(
-        break_set_id=break_set_id,
-        name=payload.name,
-        enabled=active,
-        payload=_ad_break_set_payload_from_request(payload, active),
-    )
-    if not ok:
-        raise HTTPException(status_code=404, detail="ad break set not found")
-    return {"ok": True}
-
-
-@router.delete("/api/ad-break-sets/{break_set_id}")
-def delete_ad_break_set(break_set_id: int, station_id: int):
-    init_db()
-    conn = get_connection()
-    repo = AdCampaignRepository(conn)
-    owner_station_id = _station_owned_ad_entity(conn, "ad_break_sets", break_set_id)
-    if owner_station_id is None or int(owner_station_id) != int(station_id):
-        raise HTTPException(status_code=404, detail="ad break set not found")
-    ok = repo.delete_break_set(break_set_id=break_set_id)
-    if not ok:
-        raise HTTPException(status_code=404, detail="ad break set not found")
-    return {"ok": True}
-
-
-@router.get("/api/ad-campaigns")
-def list_ad_campaigns(station_id: int):
-    init_db()
-    conn = get_connection()
-    repo = AdCampaignRepository(conn)
-    rows = [_ad_campaign_row_to_dict(conn, row) for row in repo.list_campaigns(station_id)]
-    return {"station_id": int(station_id), "campaigns": rows}
-
-
-@router.post("/api/ad-campaigns")
-def create_ad_campaign(payload: AdCampaignPayload):
-    init_db()
-    conn = get_connection()
-    repo = AdCampaignRepository(conn)
-    active = _resolve_active_flag(payload.enabled, payload.is_active, default=True)
-    campaign_id = repo.create_campaign(
-        station_id=payload.station_id,
-        name=payload.name,
-        enabled=active,
-        payload=_ad_campaign_payload_from_request(payload, active),
-    )
-    return {"id": campaign_id, "campaign_id": campaign_id}
-
-
-@router.put("/api/ad-campaigns/{campaign_id}")
-def update_ad_campaign(campaign_id: int, payload: AdCampaignPayload):
-    init_db()
-    conn = get_connection()
-    repo = AdCampaignRepository(conn)
-    owner_station_id = _station_owned_ad_entity(conn, "ad_campaigns", campaign_id)
-    if owner_station_id is None or int(owner_station_id) != int(payload.station_id):
-        raise HTTPException(status_code=404, detail="ad campaign not found")
-    active = _resolve_active_flag(payload.enabled, payload.is_active, default=True)
-    ok = repo.update_campaign(
-        campaign_id=campaign_id,
-        name=payload.name,
-        enabled=active,
-        payload=_ad_campaign_payload_from_request(payload, active),
-    )
-    if not ok:
-        raise HTTPException(status_code=404, detail="ad campaign not found")
-    return {"ok": True}
-
-
-@router.delete("/api/ad-campaigns/{campaign_id}")
-def delete_ad_campaign(campaign_id: int, station_id: int):
-    init_db()
-    conn = get_connection()
-    repo = AdCampaignRepository(conn)
-    owner_station_id = _station_owned_ad_entity(conn, "ad_campaigns", campaign_id)
-    if owner_station_id is None or int(owner_station_id) != int(station_id):
-        raise HTTPException(status_code=404, detail="ad campaign not found")
-    ok = repo.delete_campaign(campaign_id=campaign_id)
-    if not ok:
-        raise HTTPException(status_code=404, detail="ad campaign not found")
-    return {"ok": True}
-
-
-@router.get("/api/ads/runtime")
-def ads_runtime(station_id: int):
-    init_db()
-    conn = get_connection()
-    repo = AdCampaignRepository(conn)
-    campaign_rows = [_ad_campaign_row_to_dict(conn, row) for row in repo.list_campaigns(station_id)]
-    break_rows = [_ad_break_set_row_to_dict(conn, row) for row in repo.list_break_sets(station_id)]
-
+def _ads_runtime_payload(station_id: int, campaign_rows: list[dict], break_rows: list[dict]) -> dict:
     active_campaigns = [row for row in campaign_rows if bool(row.get("is_active"))]
     campaign_labels = [
         {"id": int(row["id"]), "name": str(row["name"] or f"Campaign #{row['id']}")}
@@ -5507,6 +5364,203 @@ def ads_runtime(station_id: int):
         "next_slots": next_slots,
         "history": [],
     }
+
+
+@router.get("/api/ads/console")
+def ads_console(station_id: int, limit: int = 50):
+    """Return the advertising workspace in one station-scoped database read."""
+    # FastAPI lifespan initializes the schema before accepting requests. This
+    # endpoint only reads; using the general connection helper would reassert
+    # WAL mode on every refresh and can stall behind active playout writers.
+    safe_limit = max(1, min(int(limit), 200))
+    for attempt in range(3):
+        conn = None
+        try:
+            # A short bounded wait plus a few retries lets the console ride out
+            # brief SQLite writer/checkpoint contention without hanging the UI.
+            conn = get_read_connection(timeout_seconds=1.5)
+            item_rows = AdBreakRepository(conn).list_recent(station_id=station_id, limit=safe_limit)
+            items = [
+                {
+                    "id": int(row["id"]),
+                    "station_id": int(row["station_id"]),
+                    "track_id": int(row["track_id"]),
+                    "due_at": str(row["due_at"]),
+                    "status": str(row["status"]),
+                    "priority": int(row["priority"]),
+                    "title": str(row["title"]),
+                    "artist": str(row["artist"]),
+                }
+                for row in item_rows
+            ]
+            repo = AdCampaignRepository(conn)
+            break_rows = [_ad_break_set_row_to_dict(conn, row) for row in repo.list_break_sets(station_id)]
+            campaign_rows = [_ad_campaign_row_to_dict(conn, row) for row in repo.list_campaigns(station_id)]
+            return {
+                "station_id": int(station_id),
+                "items": {"station_id": int(station_id), "items": items},
+                "runtime": _ads_runtime_payload(station_id, campaign_rows, break_rows),
+                "break_sets": {"station_id": int(station_id), "break_sets": break_rows},
+                "campaigns": {"station_id": int(station_id), "campaigns": campaign_rows},
+            }
+        except sqlite3.OperationalError as exc:
+            if not any(token in str(exc).casefold() for token in ("locked", "busy")):
+                raise
+            if attempt == 2:
+                logging.getLogger(__name__).warning(
+                    "Advertising console read remained busy after %s attempts",
+                    attempt + 1,
+                )
+                raise HTTPException(
+                    status_code=503,
+                    detail="Advertising data is temporarily busy; retry shortly.",
+                    headers={"Retry-After": "1"},
+                ) from exc
+            time.sleep(0.15 * (attempt + 1))
+        finally:
+            if conn is not None:
+                conn.close()
+
+    raise HTTPException(
+        status_code=503,
+        detail="Advertising data is temporarily busy; retry shortly.",
+        headers={"Retry-After": "1"},
+    )
+
+
+@router.get("/api/ad-break-sets")
+def list_ad_break_sets(station_id: int):
+    init_db()
+    conn = get_connection()
+    try:
+        repo = AdCampaignRepository(conn)
+        rows = [_ad_break_set_row_to_dict(conn, row) for row in repo.list_break_sets(station_id)]
+        return {"station_id": int(station_id), "break_sets": rows}
+    finally:
+        conn.close()
+
+
+@router.post("/api/ad-break-sets")
+def create_ad_break_set(payload: AdBreakSetPayload):
+    init_db()
+    conn = get_connection()
+    repo = AdCampaignRepository(conn)
+    active = _resolve_active_flag(payload.enabled, payload.is_active, default=True)
+    item_id = repo.create_break_set(
+        station_id=payload.station_id,
+        name=payload.name,
+        enabled=active,
+        payload=_ad_break_set_payload_from_request(payload, active),
+    )
+    return {"id": item_id, "break_set_id": item_id}
+
+
+@router.put("/api/ad-break-sets/{break_set_id}")
+def update_ad_break_set(break_set_id: int, payload: AdBreakSetPayload):
+    init_db()
+    conn = get_connection()
+    repo = AdCampaignRepository(conn)
+    owner_station_id = _station_owned_ad_entity(conn, "ad_break_sets", break_set_id)
+    if owner_station_id is None or int(owner_station_id) != int(payload.station_id):
+        raise HTTPException(status_code=404, detail="ad break set not found")
+    active = _resolve_active_flag(payload.enabled, payload.is_active, default=True)
+    ok = repo.update_break_set(
+        break_set_id=break_set_id,
+        name=payload.name,
+        enabled=active,
+        payload=_ad_break_set_payload_from_request(payload, active),
+    )
+    if not ok:
+        raise HTTPException(status_code=404, detail="ad break set not found")
+    return {"ok": True}
+
+
+@router.delete("/api/ad-break-sets/{break_set_id}")
+def delete_ad_break_set(break_set_id: int, station_id: int):
+    init_db()
+    conn = get_connection()
+    repo = AdCampaignRepository(conn)
+    owner_station_id = _station_owned_ad_entity(conn, "ad_break_sets", break_set_id)
+    if owner_station_id is None or int(owner_station_id) != int(station_id):
+        raise HTTPException(status_code=404, detail="ad break set not found")
+    ok = repo.delete_break_set(break_set_id=break_set_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="ad break set not found")
+    return {"ok": True}
+
+
+@router.get("/api/ad-campaigns")
+def list_ad_campaigns(station_id: int):
+    init_db()
+    conn = get_connection()
+    try:
+        repo = AdCampaignRepository(conn)
+        rows = [_ad_campaign_row_to_dict(conn, row) for row in repo.list_campaigns(station_id)]
+        return {"station_id": int(station_id), "campaigns": rows}
+    finally:
+        conn.close()
+
+
+@router.post("/api/ad-campaigns")
+def create_ad_campaign(payload: AdCampaignPayload):
+    init_db()
+    conn = get_connection()
+    repo = AdCampaignRepository(conn)
+    active = _resolve_active_flag(payload.enabled, payload.is_active, default=True)
+    campaign_id = repo.create_campaign(
+        station_id=payload.station_id,
+        name=payload.name,
+        enabled=active,
+        payload=_ad_campaign_payload_from_request(payload, active),
+    )
+    return {"id": campaign_id, "campaign_id": campaign_id}
+
+
+@router.put("/api/ad-campaigns/{campaign_id}")
+def update_ad_campaign(campaign_id: int, payload: AdCampaignPayload):
+    init_db()
+    conn = get_connection()
+    repo = AdCampaignRepository(conn)
+    owner_station_id = _station_owned_ad_entity(conn, "ad_campaigns", campaign_id)
+    if owner_station_id is None or int(owner_station_id) != int(payload.station_id):
+        raise HTTPException(status_code=404, detail="ad campaign not found")
+    active = _resolve_active_flag(payload.enabled, payload.is_active, default=True)
+    ok = repo.update_campaign(
+        campaign_id=campaign_id,
+        name=payload.name,
+        enabled=active,
+        payload=_ad_campaign_payload_from_request(payload, active),
+    )
+    if not ok:
+        raise HTTPException(status_code=404, detail="ad campaign not found")
+    return {"ok": True}
+
+
+@router.delete("/api/ad-campaigns/{campaign_id}")
+def delete_ad_campaign(campaign_id: int, station_id: int):
+    init_db()
+    conn = get_connection()
+    repo = AdCampaignRepository(conn)
+    owner_station_id = _station_owned_ad_entity(conn, "ad_campaigns", campaign_id)
+    if owner_station_id is None or int(owner_station_id) != int(station_id):
+        raise HTTPException(status_code=404, detail="ad campaign not found")
+    ok = repo.delete_campaign(campaign_id=campaign_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="ad campaign not found")
+    return {"ok": True}
+
+
+@router.get("/api/ads/runtime")
+def ads_runtime(station_id: int):
+    init_db()
+    conn = get_connection()
+    try:
+        repo = AdCampaignRepository(conn)
+        campaign_rows = [_ad_campaign_row_to_dict(conn, row) for row in repo.list_campaigns(station_id)]
+        break_rows = [_ad_break_set_row_to_dict(conn, row) for row in repo.list_break_sets(station_id)]
+        return _ads_runtime_payload(station_id, campaign_rows, break_rows)
+    finally:
+        conn.close()
 
 
 def _decode_json_text(raw: str) -> dict:

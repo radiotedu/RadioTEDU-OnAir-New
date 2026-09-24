@@ -4,21 +4,9 @@ from app.db import get_connection, init_db
 from app.main import app
 
 
-def _seed_track(conn, track_id: int, station_id: int = 1) -> None:
-    conn.execute(
-        "INSERT INTO tracks (id, station_id, title, artist, file_path, track_type, is_active, duration) "
-        "VALUES (?, ?, ?, ?, ?, 'music', 1, 180)",
-        (int(track_id), int(station_id), f"Track {track_id}", "Test Artist", f"C:/music/{track_id}.mp3"),
-    )
-    conn.commit()
-
-
 def test_queue_push_writes_queue_and_outbox(tmp_path, monkeypatch):
     monkeypatch.setenv("CLEANROOM_DB_PATH", str(tmp_path / "cleanroom.db"))
     init_db()
-    conn = get_connection()
-    _seed_track(conn, 77)
-    conn.close()
     client = TestClient(app)
     res = client.post("/api/queue/push", json={"station_id": 1, "track_id": 77})
     assert res.status_code == 200
@@ -42,10 +30,6 @@ def test_queue_push_writes_queue_and_outbox(tmp_path, monkeypatch):
 def test_operator_queue_mutations_return_persisted_runtime_acknowledgement(tmp_path, monkeypatch):
     monkeypatch.setenv("CLEANROOM_DB_PATH", str(tmp_path / "cleanroom.db"))
     init_db()
-    conn = get_connection()
-    for track_id in (101, 102):
-        _seed_track(conn, track_id)
-    conn.close()
     client = TestClient(app)
 
     first = client.post("/api/queue/push", json={"station_id": 1, "track_id": 101})
@@ -95,10 +79,6 @@ def test_operator_queue_mutations_return_persisted_runtime_acknowledgement(tmp_p
 def test_queue_stale_snapshot_rejects_concurrent_mutation(tmp_path, monkeypatch):
     monkeypatch.setenv("CLEANROOM_DB_PATH", str(tmp_path / "cleanroom.db"))
     init_db()
-    conn = get_connection()
-    for track_id in (201, 202, 203):
-        _seed_track(conn, track_id)
-    conn.close()
     client = TestClient(app)
     client.post("/api/queue/push", json={"station_id": 1, "track_id": 201})
     client.post("/api/queue/push", json={"station_id": 1, "track_id": 202})
@@ -123,9 +103,6 @@ def test_queue_stale_snapshot_rejects_concurrent_mutation(tmp_path, monkeypatch)
 def test_queue_mutations_reject_current_playing_item(tmp_path, monkeypatch):
     monkeypatch.setenv("CLEANROOM_DB_PATH", str(tmp_path / "cleanroom.db"))
     init_db()
-    conn = get_connection()
-    _seed_track(conn, 301)
-    conn.close()
     client = TestClient(app)
     client.post("/api/queue/push", json={"station_id": 1, "track_id": 301})
     initial = client.get("/api/queue?station_id=1").json()

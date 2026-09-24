@@ -112,6 +112,7 @@ def main() -> int:
     parser.add_argument("--enable-autostart", action="store_true")
     parser.add_argument("--verify-only", action="store_true")
     parser.add_argument("--restart-runtime", action="store_true")
+    parser.add_argument("--stop-only", action="store_true")
     parser.add_argument("--timeout", type=float, default=60.0)
     parser.add_argument("--stable-seconds", type=float, default=5.0)
     parser.add_argument("--direct-output-check", action="store_true")
@@ -234,6 +235,28 @@ def main() -> int:
             )
         )
         return 0
+
+    if args.stop_only:
+        stopped = _request(
+            args.base_url,
+            "POST",
+            f"/api/runtime/{args.station_id}/operator-stop",
+            timeout=30.0,
+        )
+        print(
+            json.dumps(
+                {
+                    "ok": not bool(stopped.get("running")),
+                    "station_id": args.station_id,
+                    "running": bool(stopped.get("running")),
+                    "worker_running": bool(
+                        (stopped.get("worker_loop") or {}).get("running")
+                    ),
+                },
+                separators=(",", ":"),
+            )
+        )
+        return 0 if not bool(stopped.get("running")) else 1
 
     if args.enable_autostart and not args.verify_only:
         _request(

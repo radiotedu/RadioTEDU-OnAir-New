@@ -897,7 +897,6 @@ class PlayoutHardeningTests(unittest.TestCase):
             "test://song",
             "Song",
             "Artist",
-            "",
             "music",
         )
 
@@ -926,7 +925,6 @@ class PlayoutHardeningTests(unittest.TestCase):
             "test://song",
             "Song",
             "Artist",
-            "",
             "music",
         )
 
@@ -960,7 +958,6 @@ class PlayoutHardeningTests(unittest.TestCase):
             "test://radiotedu-jingle",
             "RadioTEDU Sweeper",
             "",
-            "",
             "jingle",
         )
         worker._complete_queue_item = lambda item: worker.queue_repo.mark_done(item["id"])
@@ -993,7 +990,6 @@ class PlayoutHardeningTests(unittest.TestCase):
             "test://radiotedu-jingle",
             "RadioTEDU Sweeper",
             "",
-            "",
             "jingle",
         )
         worker._complete_queue_item = lambda item: worker.queue_repo.mark_done(item["id"])
@@ -1025,7 +1021,6 @@ class PlayoutHardeningTests(unittest.TestCase):
             "test://radiotedu-jingle",
             "RadioTEDU Sweeper",
             "",
-            "",
             "jingle",
         )
 
@@ -1055,7 +1050,6 @@ class PlayoutHardeningTests(unittest.TestCase):
         worker._track_runtime_fields = lambda _track_id: (
             "test://radiotedu-jingle",
             "RadioTEDU Sweeper",
-            "",
             "",
             "jingle",
         )
@@ -1304,7 +1298,7 @@ class PlayoutHardeningTests(unittest.TestCase):
         self.assertIn("mount=%2Fmeta", calls[0]["url"])
         self.assertIn("song=Codex+Artist+-+Codex+Title", calls[0]["url"])
 
-    def test_station_settings_offer_only_the_approved_aac_profiles(self):
+    def test_station_settings_offer_he_aac_profiles_and_legacy_compatibility(self):
         index_html = source_file("app", "static", "onair", "index.html").read_text(
             encoding="utf-8"
         )
@@ -1313,14 +1307,12 @@ class PlayoutHardeningTests(unittest.TestCase):
             encoding="utf-8"
         )
 
-        self.assertNotIn('value="opus_64"', index_html)
-        self.assertNotIn('value="opus_96"', index_html)
-        self.assertNotIn('value="opus_192"', index_html)
+        self.assertIn('value="he_aac_96"', index_html)
+        self.assertIn('value="he_aac_192"', index_html)
+        self.assertIn('value="opus_192"', index_html)
         self.assertNotIn('value="opus_128"', index_html)
         self.assertNotIn('value="mp3_128"', index_html)
         self.assertNotIn('value="aac_lc_196"', index_html)
-        self.assertIn('value="aac_low_192"', index_html)
-        self.assertIn('value="aac_he_v2_64"', index_html)
         output_payload = self._extract_js_function(app_js, "currentOutputPayload")
         self.assertIn("currentIcecastProfile", output_payload)
         self.assertIn("stream_codec_profile: profile", output_payload)
@@ -1521,7 +1513,6 @@ class PlayoutHardeningTests(unittest.TestCase):
         worker._track_runtime_fields = lambda _track_id: (
             "test://ad",
             "Ad",
-            "",
             "",
             "ad",
         )
@@ -1995,7 +1986,7 @@ class PlayoutHardeningTests(unittest.TestCase):
             allow_success.set()
             sink.stop()
 
-    def test_icecast_sink_does_not_reconnect_only_for_listener_probe_failure(self):
+    def test_icecast_sink_does_not_reconnect_for_listener_probe_failure(self):
         import time
 
         spawned = []
@@ -2033,10 +2024,9 @@ class PlayoutHardeningTests(unittest.TestCase):
 
             second = sink.ensure_started(cfg)
 
+            self.assertIs(first, second)
             self.assertFalse(first.terminated)
-            self.assertIn(second, (None, first, *spawned))
-            self.assertGreaterEqual(len(spawned), 1)
-            self.assertTrue(sink._connector_thread.is_alive())
+            self.assertEqual(len(spawned), 1)
             self.assertGreaterEqual(
                 sink.health_snapshot()["consecutive_probe_failures"], 3
             )

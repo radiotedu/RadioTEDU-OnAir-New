@@ -1,4 +1,6 @@
 from fastapi.testclient import TestClient
+import inspect
+import httpx
 import pytest
 import re
 import shutil
@@ -7,6 +9,18 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from app.main import app
+
+# Starlette releases that still pass the removed ``app=`` kwarg are commonly
+# paired with newer httpx versions in operator workstations. The ASGI transport
+# is already supplied by TestClient, so drop only that obsolete compatibility
+# kwarg when this specific version mismatch is present.
+if "app" not in inspect.signature(httpx.Client.__init__).parameters:
+    _httpx_client_init = httpx.Client.__init__
+
+    def _httpx_client_init_compat(self, *args, app=None, **kwargs):
+        return _httpx_client_init(self, *args, **kwargs)
+
+    httpx.Client.__init__ = _httpx_client_init_compat
 
 _PUBLIC_API_PATHS = {
     "/api/health/live",

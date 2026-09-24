@@ -54,6 +54,37 @@ def test_product_catalog_settles_then_atomically_reflects_rename_and_delete(tmp_
     assert "folder" not in broadcast
 
 
+def test_product_catalog_lists_only_current_ads_generation_and_marks_changed_files_stale(tmp_path):
+    root = tmp_path / "RadioTEDU Media"
+    _prepare_product_folders(root)
+    media = root / "Ads" / "Campus.mp3"
+    media.write_bytes(b"stable ad")
+    service = ProductMediaCatalogService(root, minimum_quiet_seconds=0, required_stable_polls=2)
+    base = time.time() + 2
+
+    service.poll_once(now=base)
+    service.poll_once(now=base + 1)
+    catalog = service.list_items("ads")
+    assert catalog["generation"] == 1
+    assert catalog["items"] == [
+        {
+            "relative_path": "Campus.mp3",
+            "file_name": "Campus.mp3",
+            "title": "Campus",
+            "size_bytes": media.stat().st_size,
+            "modified_ns": media.stat().st_mtime_ns,
+            "generation": 1,
+            "stale": False,
+            "path": str(media.resolve()),
+        }
+    ]
+
+    media.write_bytes(b"changed ad file")
+    changed = service.list_items("ads")["items"][0]
+    assert changed["stale"] is True
+    assert changed["path"] == ""
+
+
 def test_product_catalog_requires_quiet_media_and_rescan_works_before_poll(tmp_path):
     root = tmp_path / "RadioTEDU Media"
     _prepare_product_folders(root)

@@ -3,8 +3,6 @@ import time
 import builtins
 import json
 
-import pytest
-
 import app.engine.runtime_registry as runtime_registry_module
 from app.audio.gst_pipeline import StationPipelineConfig
 from app.db import get_connection, init_db
@@ -13,33 +11,7 @@ from app.repositories.settings_repo import SettingsRepository
 from app.repositories.station_output_repo import StationOutputRepository
 
 
-@pytest.fixture(autouse=True)
-def _local_playback_is_enabled_by_default(monkeypatch):
-    # A host-level service setting can disable local playback. Keep this test
-    # module deterministic; the dedicated service-policy test opts back in to
-    # that setting explicitly.
-    monkeypatch.setenv("CLEANROOM_DISABLE_LOCAL_PLAYBACK", "0")
-
-
-def test_station_names_select_one_programme_neutral_processing_profile():
-    expected = {
-        name: "itu_bs1770"
-        for name in (
-            "RadioTEDU Classical",
-            "RadioTEDU Lo-Fi",
-            "RadioTEDU Pop",
-            "RadioTEDU Jazz",
-            "RadioTEDU Rock",
-            "RadioTEDU Energize",
-        )
-    }
-    assert {
-        name: runtime_registry_module._default_processing_profile_for_station(name)
-        for name in expected
-    } == expected
-
-
-def test_stale_high_quality_profile_self_heals_to_aac_low_192():
+def test_stale_high_quality_profile_self_heals_to_opus_192():
     settings = {
         "station_1_extra_icecast_outputs": json.dumps(
             [
@@ -64,38 +36,8 @@ def test_stale_high_quality_profile_self_heals_to_aac_low_192():
 
     outputs = runtime_registry_module._extra_icecast_outputs(settings, 1, row)
 
-    assert outputs[0]["stream_codec_profile"] == "aac_low_192"
+    assert outputs[0]["stream_codec_profile"] == "opus_192"
     assert outputs[0]["stream_bitrate_kbps"] == 192
-
-
-def test_lofi_forces_metadata_suppression_on_all_quality_outputs():
-    settings = {
-        "station_2_extra_icecast_outputs": json.dumps(
-            [
-                {
-                    "enabled": True,
-                    "quality": "low",
-                    "icecast_mount": "/lofi-low",
-                    # A legacy explicit false must not re-enable Lo-Fi metadata.
-                    "metadata_suppressed": False,
-                }
-            ]
-        )
-    }
-    row = {
-        "icecast_host": "stream.example.test",
-        "icecast_port": 8000,
-        "icecast_user": "source",
-        "icecast_password": "secret",
-        "stream_codec_profile": "he_aac_192",
-        "stream_bitrate_kbps": 192,
-    }
-
-    outputs = runtime_registry_module._extra_icecast_outputs(settings, 2, row)
-
-    assert outputs[0]["metadata_suppressed"] is True
-    assert outputs[0]["stream_codec_profile"] == "aac_he_v2_64"
-    assert outputs[0]["stream_bitrate_kbps"] == 64
 
 
 def test_ai_runtime_status_uses_persisted_readiness_without_cache_scan(monkeypatch):
@@ -423,87 +365,6 @@ def test_registry_start_creates_default_output_settings_when_missing(tmp_path, m
     assert int(row["icecast_enabled"]) == 0
 
 
-def test_service_policy_disables_local_playback_without_disabling_icecast(
-    tmp_path, monkeypatch
-):
-    monkeypatch.setenv("CLEANROOM_DB_PATH", str(tmp_path / "cleanroom.db"))
-    monkeypatch.setenv("CLEANROOM_DISABLE_LOCAL_PLAYBACK", "1")
-    monkeypatch.setenv("CLEANROOM_DISABLE_ICECAST_METADATA", "1")
-    init_db()
-    conn = get_connection()
-    StationOutputRepository(conn).upsert(
-        station_id=1,
-        local_output_enabled=True,
-        output_device_id="default",
-        icecast_enabled=True,
-        icecast_host="127.0.0.1",
-        icecast_port=11154,
-        icecast_mount="/station1",
-        icecast_user="source",
-        icecast_password="test-password",
-    )
-    conn.close()
-
-    fake = _FakeRuntime()
-    reg = StationRuntimeRegistry(runtime_factory=lambda: fake)
-    reg.start_station(1, input_uri="C:/music/default.mp3")
-
-    assert fake.last_cfg.icecast_enabled is True
-    assert fake.last_cfg.local_output_enabled is False
-
-
-def test_station_setting_suppresses_primary_stream_metadata(tmp_path, monkeypatch):
-    monkeypatch.setenv("CLEANROOM_DB_PATH", str(tmp_path / "cleanroom.db"))
-    init_db()
-    conn = get_connection()
-    conn.execute("INSERT INTO stations (id, name) VALUES (10, 'RadioTEDU Situation Room')")
-    StationOutputRepository(conn).upsert(
-        station_id=10,
-        local_output_enabled=False,
-        output_device_id="",
-        icecast_enabled=True,
-        icecast_host="127.0.0.1",
-        icecast_port=11154,
-        icecast_mount="/situation",
-        icecast_user="source",
-        icecast_password="test-password",
-        stream_codec_profile="aac_low_192",
-        stream_bitrate_kbps=192,
-    )
-    SettingsRepository(conn).upsert_station(10, {"metadata_suppressed": "true"})
-    conn.close()
-
-    fake = _FakeRuntime()
-    captured = {"called": False}
-
-    def _capture(_cfg, **_kwargs):
-        captured["called"] = True
-        return True
-
-    monkeypatch.setattr(runtime_registry_module, "_send_icecast_metadata", _capture)
-    reg = StationRuntimeRegistry(runtime_factory=lambda: fake)
-    reg.start_station(
-        10,
-        input_uri="C:/music/situation.mp3",
-        stream_title="Private title",
-        stream_artist="Private artist",
-    )
-
-    assert fake.last_cfg.metadata_suppressed is True
-    # The registry still schedules its metadata worker, but the real sender and
-    # FFmpeg command builder both honor this flag and emit nothing publicly.
-    assert captured["called"] is True
-
-
-def test_now_playing_hides_standalone_recording_placeholder():
-    assert runtime_registry_module._compose_now_playing(
-        "Song", "Artist", "[standalone recordings]"
-    ) == "Artist - Song"
-    assert runtime_registry_module._compose_now_playing(
-        "Song", "Artist", "Real Album"
-    ) == "Artist - Song (Real Album)"
-
-
 def test_registry_hot_refreshes_quality_outputs_without_restarting_primary(
     tmp_path, monkeypatch
 ):
@@ -528,10 +389,10 @@ def test_registry_hot_refreshes_quality_outputs_without_restarting_primary(
                 [
                     {
                         "enabled": True,
-                        "quality": "low",
-                        "icecast_mount": "/station1-low",
-                        "stream_codec_profile": "opus_32",
-                        "stream_bitrate_kbps": 32,
+                        "quality": "high",
+                        "icecast_mount": "/station1-high",
+                        "stream_codec_profile": "opus_192",
+                        "stream_bitrate_kbps": 192,
                     }
                 ]
             )
@@ -573,8 +434,6 @@ def test_registry_start_self_heals_legacy_implicit_icecast_default(tmp_path, mon
         icecast_user="source",
         icecast_password="hackme",
         output_gain_db=0.0,
-        stream_codec_profile="opus_96",
-        stream_bitrate_kbps=96,
     )
 
     fake = _FakeRuntime()

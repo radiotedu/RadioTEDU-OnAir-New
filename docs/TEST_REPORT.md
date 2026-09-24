@@ -1,9 +1,9 @@
 # RadioTEDU OnAir 1.0.2 Verification Report (separate RadioTEDU build)
 
 Date: 2026-08-10
-Platform: Windows 10 22H2 (10.0.19045), x64
-Python: 3.12
-.NET SDK: repo-local 8.0.415
+Platform: Windows 10 22H2 (10.0.19045), x64  
+Python: 3.12  
+.NET SDK: repo-local 8.0.415  
 Installer compiler: Inno Setup 6.7.3
 
 ## Automated verification

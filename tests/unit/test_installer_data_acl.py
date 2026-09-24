@@ -18,7 +18,7 @@ def test_data_acl_helper_removes_builtin_users_access_recursively(tmp_path):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"acl-test")
 
-    hardening = subprocess.run(
+    subprocess.run(
         [
             "icacls.exe",
             str(root),
@@ -27,11 +27,10 @@ def test_data_acl_helper_removes_builtin_users_access_recursively(tmp_path):
             "/T",
             "/C",
         ],
-        check=False,
+        check=True,
         capture_output=True,
         text=True,
     )
-    assert hardening.returncode == 0, hardening.stderr or hardening.stdout
 
     repository_root = Path(__file__).resolve().parents[2]
     helper = repository_root / "installer" / "HardenServiceHostAcl.ps1"
@@ -42,7 +41,7 @@ def test_data_acl_helper_removes_builtin_users_access_recursively(tmp_path):
         / "v1.0"
         / "powershell.exe"
     )
-    hardening = subprocess.run(
+    subprocess.run(
         [
             str(powershell),
             "-NoProfile",
@@ -54,15 +53,12 @@ def test_data_acl_helper_removes_builtin_users_access_recursively(tmp_path):
             "-OnAirRoot",
             str(root),
         ],
-        check=False,
+        check=True,
         capture_output=True,
         text=True,
     )
-    assert hardening.returncode == 0, hardening.stderr or hardening.stdout
 
     verification = r"""
-$securityModule = Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1'
-Import-Module -Name $securityModule -ErrorAction Stop
 $Root = $env:RADIOTEDU_ACL_TEST_ROOT
 $allowed = @(
   'S-1-5-18',

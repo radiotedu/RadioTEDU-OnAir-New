@@ -1,10 +1,11 @@
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel
 
 from app.auth.brute_force import BruteForceProtection
-from app.auth.dependencies import build_auth_user_payload
+from app.auth.dependencies import build_auth_user_payload, raise_auth_storage_busy
 from app.auth.jwt_handler import (
     ACCESS_TOKEN_EXPIRE_MINUTES,
     REFRESH_TOKEN_EXPIRE_DAYS,
@@ -14,7 +15,7 @@ from app.auth.jwt_handler import (
 )
 from app.auth.password import hash_password, verify_password
 from app.config import get_data_root
-from app.db import get_connection, init_db
+from app.db import get_connection, get_read_connection
 from app.repositories.user_repo import SessionRepository, UserRepository
 
 router = APIRouter()
@@ -69,6 +70,16 @@ def _extract_bearer_token(authorization: str | None) -> str:
     return token
 
 
+def _open_auth_connection(*, read_only: bool = False):
+    try:
+        if read_only:
+            return get_read_connection(timeout_seconds=3.0)
+        return get_connection(timeout_seconds=3.0)
+    except sqlite3.OperationalError as exc:
+        raise_auth_storage_busy(exc)
+        raise
+
+
 def _load_current_user(authorization: str | None):
     token = _extract_bearer_token(authorization)
     try:
@@ -78,16 +89,20 @@ def _load_current_user(authorization: str | None):
     if str(payload.get("type") or "") != "access":
         raise HTTPException(status_code=401, detail="Invalid token")
 
-    init_db()
-    conn = get_connection()
+    conn = None
     try:
+        conn = _open_auth_connection(read_only=True)
         repo = UserRepository(conn)
         user = repo.get_user_by_id(int(payload["sub"]))
         if user is None or int(user["is_active"]) != 1:
             raise HTTPException(status_code=401, detail="Invalid token")
         return build_auth_user_payload(user, conn=conn)
+    except sqlite3.OperationalError as exc:
+        raise_auth_storage_busy(exc)
+        raise
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 @router.post("/api/auth/login")
@@ -97,8 +112,7 @@ def login(payload: LoginPayload, request: Request):
     if not brute_force.check_allowed(username):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    init_db()
-    conn = get_connection()
+    conn = _open_auth_connection()
     try:
         users = UserRepository(conn)
         sessions = SessionRepository(conn)
@@ -131,6 +145,9 @@ def login(payload: LoginPayload, request: Request):
             "user": _serialize_auth_user(refreshed_user),
             "expires_in": ACCESS_TOKEN_EXPIRE_MINUTES * 60,
         }
+    except sqlite3.OperationalError as exc:
+        raise_auth_storage_busy(exc)
+        raise
     finally:
         conn.close()
 
@@ -144,8 +161,7 @@ def refresh(payload: RefreshPayload, request: Request):
     if str(token_payload.get("type") or "") != "refresh":
         raise HTTPException(status_code=401, detail="Invalid refresh token")
 
-    init_db()
-    conn = get_connection()
+    conn = _open_auth_connection()
     try:
         users = UserRepository(conn)
         sessions = SessionRepository(conn)
@@ -175,6 +191,9 @@ def refresh(payload: RefreshPayload, request: Request):
             "user": _serialize_auth_user(resolved_user),
             "expires_in": ACCESS_TOKEN_EXPIRE_MINUTES * 60,
         }
+    except sqlite3.OperationalError as exc:
+        raise_auth_storage_busy(exc)
+        raise
     finally:
         conn.close()
 
@@ -182,11 +201,13 @@ def refresh(payload: RefreshPayload, request: Request):
 @router.post("/api/auth/logout")
 def logout(authorization: str | None = Header(default=None)):
     user = _load_current_user(authorization)
-    init_db()
-    conn = get_connection()
+    conn = _open_auth_connection()
     try:
         SessionRepository(conn).revoke_all_user_sessions(int(user["id"]))
         return {"detail": "Logged out"}
+    except sqlite3.OperationalError as exc:
+        raise_auth_storage_busy(exc)
+        raise
     finally:
         conn.close()
 
@@ -208,8 +229,7 @@ def update_password(
     if not verify_password(payload.current_password, str(user["password_hash"])):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    init_db()
-    conn = get_connection()
+    conn = _open_auth_connection()
     try:
         updated = UserRepository(conn).update_user(
             int(user["id"]),
@@ -225,5 +245,8 @@ def update_password(
                 # turn that success into an authentication failure.
                 pass
         return {"detail": "Password updated"}
+    except sqlite3.OperationalError as exc:
+        raise_auth_storage_busy(exc)
+        raise
     finally:
         conn.close()

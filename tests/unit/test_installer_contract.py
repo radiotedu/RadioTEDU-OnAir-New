@@ -68,11 +68,20 @@ def test_audio_watchdog_installer_is_independent_and_fail_closed():
     assert "Test-RepairCooldown" in watchdog
     assert "Get-LocalTransportState" in watchdog
     assert "Get-RepairableStationIds" in watchdog
+    assert "Update-PublicFailureState" in watchdog
+    assert "PublicFailureEscalationRuns = 3" in watchdog
+    assert "force_station_ids = @($fallbackStationIds)" in watchdog
+    assert "Invoke-StationOutputRecovery" in watchdog
+    assert 'method = "recover_station"' in watchdog
+    assert "Remove-PublicAudioProbeListener" in watchdog
+    assert "RadioTEDU-AudioWatch/" in watchdog
+    assert "Start-Sleep -Seconds 45" in watchdog
+    assert 'Get-OptionalProperty $heartbeat "transport_healthy"' in watchdog
     assert "Test-OriginResponsive" in watchdog
     assert 'Send-Report "origin_unavailable"' in watchdog
     assert "local source and AI restarts suppressed" in watchdog
-    assert 'Send-Report "transient"' in watchdog
-    assert "healthy workers were preserved" in watchdog
+    assert '"upstream_degraded"' in watchdog
+    assert "healthy local sources were not restarted" in watchdog
     assert "duplicate launch refused" in watchdog
     assert "station_ids = @($repairableFailed)" in watchdog
     assert "volumedetect" in watchdog
@@ -81,10 +90,6 @@ def test_audio_watchdog_installer_is_independent_and_fail_closed():
     assert '"-re", "-stats_period", "8"' in watchdog
     assert "$mediaSeconds -ge 7.5" in watchdog
     assert 'Url = "$listenerRoot/rock"' in watchdog
-    assert "MaxConcurrentAudioProbes = 4" in watchdog
-    assert "Invoke-PublicAudioProbeBatches" in watchdog
-    assert "TransportFreshnessSeconds = 5.0" in watchdog
-    assert "pending_items -le 0" not in watchdog
 
 
 def test_one_shot_installer_preserves_watchdog_boot_recovery():

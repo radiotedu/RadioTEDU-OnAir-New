@@ -50,7 +50,7 @@ $env:AI_HOST_ENABLED = "true"
 
 Or enable it in the database:
 ```sql
-INSERT INTO station_settings (station_id, key, value)
+INSERT INTO station_settings (station_id, key, value) 
 VALUES (1, 'ai_host_enabled', 'true')
 ON CONFLICT(station_id, key) DO UPDATE SET value='true';
 ```
@@ -101,7 +101,7 @@ The AI can reference "This Day in Music History" events. The database auto-seeds
 
 To temporarily disable without deleting models:
 ```sql
-UPDATE station_settings SET value='false'
+UPDATE station_settings SET value='false' 
 WHERE station_id=1 AND key='ai_host_enabled';
 ```
 

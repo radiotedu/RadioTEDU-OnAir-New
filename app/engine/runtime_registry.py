@@ -1233,7 +1233,7 @@ class StationRuntimeRegistry:
         if crossfade_seconds is None:
             raw_crossfade_seconds = station_settings.get(
                 "default_crossfade_seconds",
-                settings.get("default_crossfade_seconds", 5.0),
+                settings.get("default_crossfade_seconds", 0.0),
             )
         else:
             raw_crossfade_seconds = crossfade_seconds
@@ -1473,6 +1473,16 @@ class StationRuntimeRegistry:
     def recover_station(self, station_id: int, *, force: bool = False) -> dict:
         with self._operation_lock(station_id):
             return self._recover_station_unlocked(station_id, force=force)
+
+    def recover_station_primary_output(self, station_id: int) -> dict:
+        """Run the long stale-source cleanup for one station's primary mount."""
+        sid = int(station_id)
+        with self._operation_lock(sid):
+            runtime = self._runtimes.get(sid)
+            if runtime is None:
+                return self.status(sid)
+            runtime.recover_primary_output()
+            return self.status(sid)
 
     def _recover_station_unlocked(
         self, station_id: int, *, force: bool = False

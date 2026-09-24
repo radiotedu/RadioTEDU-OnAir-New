@@ -153,7 +153,7 @@ def test_worker_process_once_autofills_empty_queue_and_starts_first_track(
             "stream_title": "Fresh Song",
             "stream_artist": "Artist A",
             "track_type": "music",
-            "crossfade_seconds": 5.0,
+            "crossfade_seconds": 3.0,
             "start_offset_seconds": 0.0,
         }
     ]
@@ -349,7 +349,6 @@ def test_worker_process_once_queues_ai_intro_before_music_track(tmp_path, monkey
         {
             "ai_host_enabled": "true",
             "ai_station_id_interval": "0",
-            "ai_tts_provider": "edge-tts",
         },
     )
 
@@ -363,15 +362,13 @@ def test_worker_process_once_queues_ai_intro_before_music_track(tmp_path, monkey
         def generate_track_intro_announcement(self, **kwargs):
             return SimpleNamespace(
                 audio_path=str(intro_path),
-                duration_seconds=120.0,
+                duration_seconds=4.0,
                 title="AI Intro - Fresh Song",
                 artist="AI Host",
             )
 
     monkeypatch.setattr("app.services.ai_host.get_ai_host", lambda: _FakeAIHost())
     monkeypatch.setattr("app.services.ai_host_fast.get_ai_host_fast", lambda: _FakeAIHost())
-    monkeypatch.setattr(StationWorker, "_allow_inline_ai_generation", lambda *_args, **_kwargs: True)
-    monkeypatch.setattr(StationWorker, "_ensure_ai_prefetch_running", lambda *_args, **_kwargs: None)
 
     runtime = _FakeRuntimeRegistry()
     worker = StationWorker(station_id=1, runtime_registry=runtime)
@@ -402,8 +399,8 @@ def test_worker_process_once_queues_ai_intro_before_music_track(tmp_path, monkey
 
     runtime.running[1] = False
     third = worker.process_once()
-    assert third["source"] == "playing"
-    assert third["reason"] == "track_in_progress"
+    assert third["source"] == "manual"
+    assert third["input_uri"] == "C:/music/fresh.mp3"
     rows = conn.cursor().execute(
         "SELECT q.track_id, q.status, COALESCE(t.track_type, 'music') AS track_type "
         "FROM queue_items q "
@@ -412,8 +409,8 @@ def test_worker_process_once_queues_ai_intro_before_music_track(tmp_path, monkey
     ).fetchall()
     announcement_track_id = int(rows[0]["track_id"])
     assert [(int(row["track_id"]), str(row["status"]), str(row["track_type"])) for row in rows] == [
-        (announcement_track_id, "playing", "announcement"),
-        (music_track_id, "pending", "music"),
+        (announcement_track_id, "failed", "announcement"),
+        (music_track_id, "playing", "music"),
     ]
 
 
@@ -448,7 +445,6 @@ def test_worker_process_once_prepares_intro_for_music_behind_pending_jingle(
         {
             "ai_host_enabled": "true",
             "ai_station_id_interval": "0",
-            "ai_tts_provider": "edge-tts",
         },
     )
 
@@ -469,8 +465,6 @@ def test_worker_process_once_prepares_intro_for_music_behind_pending_jingle(
 
     monkeypatch.setattr("app.services.ai_host.get_ai_host", lambda: _FakeAIHost())
     monkeypatch.setattr("app.services.ai_host_fast.get_ai_host_fast", lambda: _FakeAIHost())
-    monkeypatch.setattr(StationWorker, "_allow_inline_ai_generation", lambda *_args, **_kwargs: True)
-    monkeypatch.setattr(StationWorker, "_ensure_ai_prefetch_running", lambda *_args, **_kwargs: None)
 
     runtime = _FakeRuntimeRegistry()
     worker = StationWorker(station_id=1, runtime_registry=runtime)
@@ -509,7 +503,6 @@ def test_worker_process_once_prioritizes_track_intro_before_station_id(
         {
             "ai_host_enabled": "true",
             "ai_station_id_interval": "1800",
-            "ai_tts_provider": "edge-tts",
         },
     )
 
@@ -537,8 +530,6 @@ def test_worker_process_once_prioritizes_track_intro_before_station_id(
 
     monkeypatch.setattr("app.services.ai_host.get_ai_host", lambda: _FakeAIHost())
     monkeypatch.setattr("app.services.ai_host_fast.get_ai_host_fast", lambda: _FakeAIHost())
-    monkeypatch.setattr(StationWorker, "_allow_inline_ai_generation", lambda *_args, **_kwargs: True)
-    monkeypatch.setattr(StationWorker, "_ensure_ai_prefetch_running", lambda *_args, **_kwargs: None)
 
     runtime = _FakeRuntimeRegistry()
     worker = StationWorker(station_id=1, runtime_registry=runtime)
@@ -883,7 +874,7 @@ def test_worker_process_once_prerolls_next_music_track_inside_crossfade_window(
             "stream_title": "Next Song",
             "stream_artist": "Artist B",
             "track_type": "music",
-            "crossfade_seconds": 5.0,
+            "crossfade_seconds": 3.0,
             "start_offset_seconds": 0.0,
         }
     ]

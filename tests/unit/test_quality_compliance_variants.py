@@ -41,18 +41,19 @@ class QualityComplianceVariantsTests(unittest.TestCase):
     def tearDown(self):
         self.conn.close()
 
-    def test_approved_deliveries_are_one_broadcast_with_a_verified_variant_snapshot(self):
+    def test_four_deliveries_are_one_broadcast_with_a_verified_variant_snapshot(self):
         variants = [
             {
-                "mount": mount,
+                "mount": f"/lofi-{quality}",
                 "quality": quality,
                 "codec_profile": profile,
                 "bitrate_kbps": bitrate,
             }
-            for mount, quality, profile, bitrate in (
-                ("/classic", "normal", "opus_192", 192),
-                ("/classic-low", "low", "opus_32", 32),
-                ("/classic-flac", "flac", "ogg_flac_lossless", 0),
+            for quality, profile, bitrate in (
+                ("low", "opus_64", 64),
+                ("normal", "opus_96", 96),
+                ("high", "opus_192", 192),
+                ("flac", "ogg_flac_lossless", 0),
             )
         ]
         service = MusicUsageService(self.conn)
@@ -75,7 +76,7 @@ class QualityComplianceVariantsTests(unittest.TestCase):
         delivered = json.loads(first["delivered_variants_json"])
         snapshot = json.loads(first["metadata_snapshot_json"])
         self.assertEqual(first["publication_count"], 1)
-        self.assertEqual(len(delivered), 3)
+        self.assertEqual(len(delivered), 4)
         self.assertEqual(snapshot["delivered_variants"], delivered)
         self.assertEqual(duplicate["id"], first["id"])
         self.assertEqual(

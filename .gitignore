@@ -7,7 +7,6 @@ cache/
 logs/
 *.log
 *.lock
-!requirements.lock
 *.db
 *.db-*
 *.sqlite
@@ -67,7 +66,6 @@ desktop/**/TestResults/
 *.spec
 data/
 media/
-RadioTEDU Situation Room/
 test-results/
 last_build_path.txt
 .test-full-unit.exit
@@ -75,10 +73,7 @@ last_build_path.txt
 # Liquidsoap transient files
 .cache/
 log/
-run/*
-!run/new-program/
-run/new-program/*
-!run/new-program/start-new-program.ps1
+run/
 camomile/
 libs/
 test.liq

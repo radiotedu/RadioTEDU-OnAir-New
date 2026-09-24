@@ -96,6 +96,8 @@ def test_maintenance_reload_requires_loopback_and_fresh_supervisor(monkeypatch):
     with pytest.raises(HTTPException) as exc_info:
         maintenance.request_supervised_backend_reload(local, _user={"role": "admin"})
     assert exc_info.value.status_code == 409
+    assert "RadioTEDU.OnAir.Supervisor" in str(exc_info.value.detail)
+    assert "RadioTEDU.BroadcastSupervisor" not in str(exc_info.value.detail)
 
 
 def test_maintenance_reload_preserves_before_writing_request(monkeypatch):
@@ -225,7 +227,11 @@ def test_registered_reload_route_accepts_authenticated_loopback_admin(monkeypatc
     )
     monkeypatch.setattr(maintenance, "write_reload_request", lambda *a, **k: {})
 
-    client = TestClient(app, client=("127.0.0.1", 50000))
+    # Older Starlette TestClient versions do not support the `client` option.
+    # Loopback enforcement is covered by the direct request test above; keep
+    # this integration test focused on authentication and the successful route.
+    monkeypatch.setattr(maintenance, "_is_loopback_request", lambda _request: True)
+    client = TestClient(app)
     response = client.post(
         "/api/maintenance/backend/reload",
         headers={"Authorization": f"Bearer {token}"},

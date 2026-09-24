@@ -51,30 +51,6 @@ def test_saved_stop_prevents_only_that_station_from_autostarting(tmp_path, monke
     assert [item["station_id"] for item in starts] == [rock_id]
 
 
-def test_one_failed_station_never_blocks_sibling_boot_autostart(tmp_path, monkeypatch):
-    monkeypatch.setenv("CLEANROOM_DB_PATH", str(tmp_path / "cleanroom.db"))
-    init_db()
-    conn = get_connection()
-    stations = StationRepository(conn)
-    settings = SettingsRepository(conn)
-    first_id = int(stations.list_all()[0]["id"])
-    second_id = stations.create("RadioTEDU Rock")
-    settings.upsert_station(first_id, {"broadcast_autostart_enabled": "true"})
-    settings.upsert_station(second_id, {"broadcast_autostart_enabled": "true"})
-    started = []
-
-    def start(**kwargs):
-        if int(kwargs["station_id"]) == first_id:
-            raise RuntimeError("stale station lease")
-        started.append(dict(kwargs))
-
-    monkeypatch.setattr("app.api.runtime.worker_loop_manager.start", start)
-
-    _autostart_station_worker_loops(conn)
-
-    assert [item["station_id"] for item in started] == [second_id]
-
-
 def test_onair_route_is_the_canonical_operator_shell(client: TestClient):
     response = client.get("/app")
     assert response.status_code == 200

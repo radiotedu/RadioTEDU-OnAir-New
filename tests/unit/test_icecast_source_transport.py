@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import base64
+import socket
 
 import pytest
 
 from app.audio.gst_pipeline import StationPipelineConfig
 from app.audio.icecast_source_transport import (
+    DEFAULT_SOURCE_WRITE_TIMEOUT_SECONDS,
     IcecastSourceProtocolError,
     IcecastSourceTransport,
 )
@@ -35,22 +37,23 @@ class FakeSocket:
         self.closed = True
 
 
-def _config(
-    profile: str = "aac_low_192",
-    bitrate_kbps: int = 192,
-    mount: str = "/lofi",
-):
+class DelayedHandshakeSocket(FakeSocket):
+    def recv(self, _size):
+        raise socket.timeout("origin waits for source body")
+
+
+def _config():
     return StationPipelineConfig(
         input_uri="virtual:silence",
         icecast_host="127.0.0.1",
         icecast_port=11154,
-        icecast_mount=mount,
+        icecast_mount="/lofi",
         icecast_user="source",
         icecast_password="private-source-secret",
         local_output_enabled=False,
         output_device_id="",
-        stream_codec_profile=profile,
-        stream_bitrate_kbps=bitrate_kbps,
+        stream_codec_profile="aac_lc_128",
+        stream_bitrate_kbps=128,
         icecast_stream_name="RadioTEDU Lo-Fi\r\nInjected: no",
         icecast_description="RadioTEDU",
         icecast_genre="Lo-Fi",
@@ -63,14 +66,15 @@ def test_source_authentication_stays_in_socket_header_not_process_command():
         _config(), socket_factory=lambda *_args, **_kwargs: source_socket
     )
     try:
-        assert source_socket.timeout is None
+        assert source_socket.timeout == DEFAULT_SOURCE_WRITE_TIMEOUT_SECONDS
         handshake = source_socket.sent[0]
         expected = base64.b64encode(
             b"source:private-source-secret"
         )
         assert handshake.startswith(b"PUT /lofi HTTP/1.1\r\n")
         assert b"Authorization: Basic " + expected in handshake
-        assert b"Connection: keep-alive\r\n" in handshake
+        assert b"Expect: 100-continue\r\n" in handshake
+        assert b"Connection: close\r\n" in handshake
         assert b"\r\nInjected:" not in handshake
         transport.send(b"encoded-audio")
         assert source_socket.sent[-1] == b"encoded-audio"
@@ -88,54 +92,44 @@ def test_source_rejection_has_no_credential_echo():
     assert "private-source-secret" not in str(exc.value)
 
 
-@pytest.mark.parametrize(
-    ("profile", "bitrate_kbps"),
-    (("aac_low_192", 192), ("aac_he_v2_64", 64)),
-)
-def test_lossy_aac_source_advertises_real_icecast_bitrate(profile, bitrate_kbps):
-    source_socket = FakeSocket()
-    transport = IcecastSourceTransport(
-        _config(profile, bitrate_kbps),
-        socket_factory=lambda *_args, **_kwargs: source_socket,
-    )
-    try:
-        handshake = source_socket.sent[0]
-        assert f"Ice-Bitrate: {bitrate_kbps}\r\n".encode() in handshake
-        assert (
-            f"Ice-Audio-Info: ice-bitrate={bitrate_kbps};"
-            "ice-samplerate=48000;ice-channels=2\r\n"
-        ).encode() in handshake
-    finally:
-        transport.close()
-
-
-def test_flac_source_handshake_is_unchanged_by_bitrate_metadata_policy():
-    source_socket = FakeSocket()
-    transport = IcecastSourceTransport(
-        _config("ogg_flac_lossless", 0, "/classic-flac"),
-        socket_factory=lambda *_args, **_kwargs: source_socket,
-    )
-    try:
-        handshake = source_socket.sent[0]
-        assert b"Ice-Bitrate:" not in handshake
-        assert b"Ice-Audio-Info:" not in handshake
-    finally:
-        transport.close()
-
-
-def test_established_source_does_not_timeout_during_origin_backpressure():
-    class BackpressuredSocket(FakeSocket):
-        def sendall(self, payload):
-            if self.sent and self.timeout is not None:
-                raise socket.timeout("temporary origin backpressure")
-            super().sendall(payload)
-
-    source_socket = BackpressuredSocket()
+def test_source_can_start_when_origin_defers_200_until_first_body_bytes():
+    source_socket = DelayedHandshakeSocket()
     transport = IcecastSourceTransport(
         _config(), socket_factory=lambda *_args, **_kwargs: source_socket
     )
     try:
-        assert source_socket.timeout is None
+        transport.send(b"encoded-audio")
+        assert source_socket.sent[-1] == b"encoded-audio"
+        assert source_socket.timeout == DEFAULT_SOURCE_WRITE_TIMEOUT_SECONDS
+    finally:
+        transport.close()
+
+
+def test_source_can_start_after_http_100_continue():
+    source_socket = FakeSocket(b"HTTP/1.1 100 Continue\r\n\r\n")
+    transport = IcecastSourceTransport(
+        _config(), socket_factory=lambda *_args, **_kwargs: source_socket
+    )
+    try:
+        transport.send(b"encoded-audio")
+        assert source_socket.sent[-1] == b"encoded-audio"
+    finally:
+        transport.close()
+
+
+def test_established_source_write_deadline_survives_brief_origin_backpressure():
+    # A bounded deadline stops a dead TinyIce reader from wedging sendall
+    # forever, but it stays long enough that short origin pauses still land
+    # on the same established source connection.
+    assert DEFAULT_SOURCE_WRITE_TIMEOUT_SECONDS is not None
+    assert DEFAULT_SOURCE_WRITE_TIMEOUT_SECONDS >= 30.0
+
+    source_socket = FakeSocket()
+    transport = IcecastSourceTransport(
+        _config(), socket_factory=lambda *_args, **_kwargs: source_socket
+    )
+    try:
+        assert source_socket.timeout == DEFAULT_SOURCE_WRITE_TIMEOUT_SECONDS
         transport.send(b"programme-before-pause")
         transport.send(b"programme-after-pause")
         assert source_socket.sent[-1] == b"programme-after-pause"

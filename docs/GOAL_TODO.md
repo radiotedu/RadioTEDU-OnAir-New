@@ -8,14 +8,14 @@ App boundary: `RadioTEDU-OnAir-Radio` only; the older `RadioTEDU-OnAir` tree is 
 - [x] Inventory repository, services, startup tasks, processes, database, media roots, secrets references, origin, logs, voting, juke-local, AI, tests, and prior applications.
 - [x] Preserve station data and secrets; migrate source credentials to machine-scope DPAPI without printing or duplicating plaintext.
 - [x] Confirm authoritative station mapping: `/classic`, `/lofi`, `/radio`, `/cazz`, `/rock`, `/energize`; stale station ID 7 is not autostarted.
-- [x] Confirm the approved inventory: six normal music mounts, six `-low` mounts, FLAC only for Classical/Cazz, and externally owned `/en` plus `/fr`.
+- [x] Confirm TinyIce credential inventory: all eight legacy mounts and 24 music quality mounts exist; `/en-*` and `/fr-*` do not exist.
 
 ## 2. Implement provisioned quality mounts
 
-- [x] Implement the approved synchronized output set: suffix-free Opus 192 normal, Opus 32 `-low` for all six music stations, and FLAC only for Classical/Cazz.
+- [x] Implement 24 additional synchronized outputs for six music stations: Opus 64/96/192 and Ogg/FLAC.
 - [x] Preserve all unsuffixed legacy mounts without aliasing, redirecting, renaming, or re-encoding.
 - [x] Suppress public title/artist metadata; keep one internal compliance play with delivered variants instead of counting four broadcasts.
-- [x] Enable all 8 approved quality variants so all 14 local sources keep encoding and retrying while TinyIce is disconnected; retain the two external mounts in the 16-mount system plan.
+- [x] Enable all 24 quality variants by explicit operator instruction so all 30 local sources keep encoding and retrying while TinyIce is disconnected; retain the two external mounts in the 32-mount system plan.
 
 ## 3. Finish operator-controlled functions
 
@@ -29,7 +29,7 @@ App boundary: `RadioTEDU-OnAir-Radio` only; the older `RadioTEDU-OnAir` tree is 
 
 ## 4. Harden continuity and recovery
 
-- [x] Install the OnAir LocalSystem supervisor as immediate automatic with bounded recovery; auxiliary agents may remain delayed-auto.
+- [x] Install delayed-auto LocalSystem supervisors with bounded recovery for OnAir and AI.
 - [x] Add paced source writes, bounded quality queues, stale-audio drop/resync, last-valid AI playlist startup, and station isolation.
 - [x] Use immutable content-addressed AI playlists, BOM-tolerant config reads, concurrent atomic status writes with bounded Windows sharing retries, and background catalog refresh.
 - [x] Index the mature AI announcement cache off the one-second station scheduler; prevent the 6,945-file metadata scan from blocking track advance/recovery and verify bounded scheduler/PCM ages on all six installed timelines.
@@ -42,7 +42,7 @@ App boundary: `RadioTEDU-OnAir-Radio` only; the older `RadioTEDU-OnAir` tree is 
 ## 5. One-shot repair/install/start
 
 - [x] Create idempotent `tools/Install-RadioTEDU-OneShot.ps1` with backup, DPAPI migration, ACLs, service definitions, recovery, watchdog, and old-startup removal.
-- [x] Require at least 16 source slots and recommend 20 for the 16-mount plan; keep every enabled source retrying independently.
+- [x] Configure 40 source slots for the 32-mount plan and keep every enabled source retrying independently; origin delivery health is evidence and must not disable a source.
 - [x] Run one-shot locally in protected legacy-only mode.
 - [x] Require real OnAir readiness and an AI supervisor child, not only a running Windows service wrapper; write generated JSON without a BOM.
 
@@ -60,7 +60,7 @@ App boundary: `RadioTEDU-OnAir-Radio` only; the older `RadioTEDU-OnAir` tree is 
 ## 8. Verify every stream and function
 
 - [ ] Probe all eight legacy mounts for connection, continuous decode, audibility, and metadata suppression.
-- [ ] When TinyIce recovers, verify all 8 additional music mounts for codec, bitrate/lossless profile, continuity, sync, and independent failure recovery.
+- [ ] Canary-enable then verify every one of the 24 music quality mounts for codec, bitrate/lossless profile, continuity, sync, and independent failure recovery.
 - [ ] Verify AI, voting, juke-local, mobile fallback, compliance exports, settings, and watchdog through production paths.
 
 ## 9. Monitored soak and fault injection

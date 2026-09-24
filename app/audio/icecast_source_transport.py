@@ -11,7 +11,11 @@ from app.audio.gst_pipeline import StationPipelineConfig, resolve_stream_profile
 
 # Once authenticated, transient origin backpressure must not disconnect listeners.
 # Connect and handshake deadlines remain bounded; peer/network errors still retry.
-DEFAULT_SOURCE_WRITE_TIMEOUT_SECONDS = None
+# A permanently stalled TinyIce mount used to block sendall forever and freeze the
+# whole station behind a full PCM queue. Keep a long write deadline so brief
+# origin pauses still succeed, while a dead reader forces reconnect/retry.
+DEFAULT_SOURCE_WRITE_TIMEOUT_SECONDS = 45.0
+SOURCE_HANDSHAKE_RESPONSE_GRACE_SECONDS = 2.0
 
 
 class IcecastSourceProtocolError(RuntimeError):
@@ -71,7 +75,20 @@ class IcecastSourceTransport:
                 source_socket = ssl.create_default_context().wrap_socket(
                     source_socket, server_hostname=host
                 )
-            source_socket.settimeout(max(0.1, float(handshake_timeout_sec)))
+            # Some Icecast-compatible origins register a PUT mount immediately
+            # but do not flush the 200 response until the first encoded body
+            # bytes arrive. Waiting for that response before starting the
+            # encoder creates a deadlock: the client times out, the empty mount
+            # disappears, and listeners hear a reconnect every few seconds.
+            # Give conventional origins a short confirmation window, then
+            # optimistically start the body. Authentication/duplicate-source
+            # failures still surface on the first bounded send.
+            source_socket.settimeout(
+                min(
+                    max(0.1, float(handshake_timeout_sec)),
+                    SOURCE_HANDSHAKE_RESPONSE_GRACE_SECONDS,
+                )
+            )
             profile = resolve_stream_profile(
                 cfg.stream_codec_profile, cfg.stream_bitrate_kbps
             )
@@ -104,29 +121,42 @@ class IcecastSourceTransport:
                 f"Ice-URL: {_header(getattr(cfg, 'icecast_url', ''))}\r\n"
                 f"Ice-Public: {1 if bool(getattr(cfg, 'icecast_public', True)) else 0}\r\n"
                 f"{bitrate_headers}"
-                # A source PUT is the long-lived stream itself. Advertising
-                # close lets small Icecast-compatible origins retire a mount
-                # while the client still has buffered socket writes.
-                "Connection: keep-alive\r\n\r\n"
+                # Match FFmpeg's proven Icecast HTTP client. ``close`` means
+                # the connection ends when the unbounded request body ends; it
+                # does not shorten the live source. ``100-continue`` lets the
+                # origin authorize/register the mount before body bytes flow.
+                "Accept: */*\r\n"
+                "Expect: 100-continue\r\n"
+                "Connection: close\r\n"
+                "Icy-MetaData: 1\r\n\r\n"
             ).encode("utf-8")
             source_socket.sendall(request)
             response = bytearray()
-            while b"\r\n\r\n" not in response and len(response) < 16_384:
-                chunk = source_socket.recv(2048)
-                if not chunk:
-                    break
-                response.extend(chunk)
-            if b"\r\n\r\n" not in response:
+            optimistic_handshake = False
+            try:
+                while b"\r\n\r\n" not in response and len(response) < 16_384:
+                    chunk = source_socket.recv(2048)
+                    if not chunk:
+                        break
+                    response.extend(chunk)
+            except socket.timeout:
+                optimistic_handshake = not response
+            if b"\r\n\r\n" not in response and not optimistic_handshake:
                 raise IcecastSourceProtocolError(
                     "Icecast source handshake returned no complete HTTP response"
                 )
-            status = bytes(response).split(b"\r\n", 1)[0].decode(
-                "ascii", errors="replace"
-            )
-            if " 200 " not in f" {status} ":
-                raise IcecastSourceProtocolError(
-                    f"Icecast rejected source: {status[:120]}"
+            if not optimistic_handshake:
+                status = bytes(response).split(b"\r\n", 1)[0].decode(
+                    "ascii", errors="replace"
                 )
+                if " 100 " in f" {status} ":
+                    # The final 200 is emitted after the first request-body
+                    # bytes on origins that implement Expect/Continue exactly.
+                    optimistic_handshake = True
+                elif " 200 " not in f" {status} ":
+                    raise IcecastSourceProtocolError(
+                        f"Icecast rejected source: {status[:120]}"
+                    )
             source_socket.settimeout(
                 None
                 if write_timeout_sec is None

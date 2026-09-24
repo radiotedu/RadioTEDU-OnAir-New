@@ -13,6 +13,10 @@ from app.auth.permissions import GLOBAL_PERMISSION_KEYS, SHOW_PERMISSION_KEYS
 
 _SCHEMA_VERSION = 24
 _INIT_LOCK = threading.Lock()
+# API and auth handlers call init_db() defensively on many requests. Cache the
+# successful schema probe per database file so those paths do not reopen SQLite
+# and contend with the live playout writers on every request.
+_INITIALIZED_DATABASES: set[tuple[str, int, int, str]] = set()
 _HEALTH_LOCK = threading.Lock()
 _HEALTH_CACHE: dict[str, object] = {"checked_at": 0.0, "path": "", "value": {}}
 _SCHEMA_BOOTSTRAP_KEY = "__schema_bootstrapped__"
@@ -1171,15 +1175,21 @@ def get_connection(*, timeout_seconds: float = 30.0):
     conn.row_factory = sqlite3.Row
     conn.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
     try:
-        journal_attempts = 6 if safe_timeout >= 5.0 else 1
-        for attempt in range(journal_attempts):
-            try:
-                conn.execute("PRAGMA journal_mode=WAL")
-                break
-            except sqlite3.OperationalError as exc:
-                if "locked" not in str(exc).lower() or attempt >= journal_attempts - 1:
-                    raise
-                time.sleep(0.1 * (attempt + 1))
+        # WAL mode persists in the database. Reasserting it on every connection
+        # can contend with playout writers, even when this connection only reads.
+        # Inspect first and change the mode only for a fresh/restored database.
+        journal_row = conn.execute("PRAGMA journal_mode").fetchone()
+        journal_mode = str(journal_row[0] if journal_row else "").strip().lower()
+        if journal_mode != "wal":
+            journal_attempts = 6 if safe_timeout >= 5.0 else 1
+            for attempt in range(journal_attempts):
+                try:
+                    conn.execute("PRAGMA journal_mode=WAL")
+                    break
+                except sqlite3.OperationalError as exc:
+                    if "locked" not in str(exc).lower() or attempt >= journal_attempts - 1:
+                        raise
+                    time.sleep(0.1 * (attempt + 1))
         synchronous = str(
             os.getenv("RADIOTEDU_SQLITE_SYNCHRONOUS", "FULL") or "FULL"
         ).strip().upper()
@@ -1189,6 +1199,33 @@ def get_connection(*, timeout_seconds: float = 30.0):
         conn.execute("PRAGMA wal_autocheckpoint=1000")
         conn.execute("PRAGMA journal_size_limit=67108864")
         conn.execute("PRAGMA foreign_keys=ON")
+        return conn
+    except Exception:
+        conn.close()
+        raise
+
+
+def get_read_connection(*, timeout_seconds: float = 3.0):
+    """Open a bounded read-only connection without changing database journal settings.
+
+    Read endpoints run alongside playout workers that write to SQLite. Reissuing
+    ``PRAGMA journal_mode=WAL`` for every read can wait on a writer even though
+    a WAL reader itself would not need to. The database is initialized and put
+    into WAL mode during application startup; ordinary reads should not try to
+    reconfigure it.
+    """
+    db_path = get_db_path()
+    safe_timeout = max(0.05, float(timeout_seconds))
+    conn = sqlite3.connect(
+        str(db_path),
+        check_same_thread=False,
+        timeout=safe_timeout,
+    )
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute(f"PRAGMA busy_timeout={max(50, int(safe_timeout * 1000.0))}")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA query_only=ON")
         return conn
     except Exception:
         conn.close()
@@ -1946,6 +1983,18 @@ def init_db(*, product_mode: str | None = None):
     with _INIT_LOCK:
         db_path = get_db_path()
         existing_database = db_path.is_file() and db_path.stat().st_size > 0
+        try:
+            stat = db_path.stat()
+            initialized_key = (
+                str(db_path.resolve()),
+                int(stat.st_dev),
+                int(stat.st_ino),
+                str(product_mode or ""),
+            )
+        except OSError:
+            initialized_key = None
+        if initialized_key is not None and initialized_key in _INITIALIZED_DATABASES:
+            return
         conn = get_connection()
         try:
             cur = conn.cursor()
@@ -1960,6 +2009,8 @@ def init_db(*, product_mode: str | None = None):
                 and not _legacy_rbac_needs_sync(cur)
                 and not _post_version_repairs_needed(cur)
             ):
+                if initialized_key is not None:
+                    _INITIALIZED_DATABASES.add(initialized_key)
                 return
 
             if existing_database:
@@ -1980,5 +2031,19 @@ def init_db(*, product_mode: str | None = None):
             _mark_schema_bootstrap_applied(cur)
             cur.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
             conn.commit()
+            # Initializing a new database creates the file after the first stat.
+            # Cache the resulting file identity only after every write succeeded.
+            try:
+                stat = db_path.stat()
+                _INITIALIZED_DATABASES.add(
+                    (
+                        str(db_path.resolve()),
+                        int(stat.st_dev),
+                        int(stat.st_ino),
+                        str(product_mode or ""),
+                    )
+                )
+            except OSError:
+                pass
         finally:
             conn.close()

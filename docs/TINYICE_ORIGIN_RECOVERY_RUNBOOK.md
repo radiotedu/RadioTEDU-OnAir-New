@@ -1,6 +1,6 @@
 # TinyIce origin recovery runbook
 
-Status: required before RadioTEDU public listeners or the 8 approved music-quality mounts can be commissioned.
+Status: required before RadioTEDU public listeners or the 24 additional music-quality mounts can be commissioned.
 
 ## Why this is required
 
@@ -26,8 +26,8 @@ The OnAir watchdog intentionally refuses to restart healthy local sources during
 - OnAir and AI source transports reconnect with bounded backoff; do not manually restart all RadioTEDU services.
 - Wait for the next `RadioTEDU OnAir - Audio Watchdog` run or run it once from Task Scheduler.
 - Confirm the eight unsuffixed legacy listeners first.
-- Keep all 8 approved quality mounts enabled and retrying. Do not auto-disable them during an origin outage; use diagnostics to verify at least 16 source slots and eventual decoded delivery for all 14 locally owned mounts.
-- Canary-enable Lo-Fi low alongside its suffix-free normal stream, verify continuous listener bytes and codec/bitrate, then stage the remaining outputs one station at a time.
+- Keep all 24 quality mounts enabled and retrying. Do not auto-disable them during an origin outage; use the in-app diagnostics to verify the configured 40 source slots and eventual decoded delivery for all 32 mounts.
+- Canary-enable Lo-Fi low/normal first, verify continuous listener bytes and codec/bitrate, then stage the remaining qualities one station at a time.
 
 ## Rollback and safety
 

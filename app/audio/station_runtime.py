@@ -43,6 +43,9 @@ _SILENCE_FLOOR_CHUNK_BYTES = 4096
 _ICECAST_PIPE_TARGET_RESERVE_BYTES = 6 * _PCM_BYTES_PER_SECOND
 _ICECAST_PIPE_LOW_WATER_BYTES = 5 * _PCM_BYTES_PER_SECOND
 _ICECAST_PIPE_HIGH_WATER_BYTES = 8 * _PCM_BYTES_PER_SECOND
+# One blocked source must not starve sibling mounts. After this long above the
+# high-water mark, resume fan-out so healthy FLAC/low branches keep programme PCM.
+_ICECAST_PIPE_HIGH_WATER_MAX_STALL_SECONDS = 10.0
 _ICECAST_PIPE_SERVO_MAX_CORRECTION = 0.04
 _SILENCE_FLOOR_INTERVAL_SECONDS = (
     _SILENCE_FLOOR_CHUNK_BYTES / _PCM_BYTES_PER_SECOND
@@ -55,6 +58,13 @@ _SILENCE_FLOOR_AFTER_SECONDS = _SILENCE_FLOOR_INTERVAL_SECONDS * 2.0
 _SILENCE_FLOOR_STARTUP_GRACE_SECONDS = 1.0
 _PROGRAM_PCM_STALL_SECONDS = 5.0
 _DIRECT_ICECAST_STARTUP_GRACE_SECONDS = 2.0
+# RTSAS registers a replacement source before the previous ingest task's
+# ``finally`` block has necessarily observed the TCP FIN. If the new source is
+# opened immediately, that old task can mark the fresh session disconnected.
+# The origin keeps a 64 KiB listener burst buffer, so this bounded release
+# interval clears the old owner without creating listener-side dead air.
+_ORIGIN_SOURCE_RELEASE_SECONDS = 3.0
+_ORIGIN_STALE_SOURCE_RELEASE_SECONDS = 12.0
 _DEFAULT_LIVE_AUDIO_SETTINGS = {
     "program_music_mode": "normal",
     "mic_gain": 1.0,
@@ -443,7 +453,7 @@ class StationRuntime:
                     value.get(
                         "icecast_legacy_source_enabled",
                     ),
-                    cfg.icecast_legacy_source_enabled,
+                    False,
                 ),
                 source_protocol=str(
                     value.get("source_protocol") or cfg.source_protocol
@@ -732,13 +742,11 @@ class StationRuntime:
             crossfade_seconds = max(0.0, float(next_cfg.crossfade_seconds or 0.0))
         except (TypeError, ValueError):
             crossfade_seconds = 0.0
-        current_type = _normalize_track_type(current_cfg.track_type)
-        next_type = _normalize_track_type(next_cfg.track_type)
         return (
             self.is_running()
             and crossfade_seconds > 0.0
-            and current_type == "music"
-            and next_type == "music"
+            and _normalize_track_type(current_cfg.track_type) in {"music", "jingle"}
+            and _normalize_track_type(next_cfg.track_type) in {"music", "jingle"}
         )
 
     @staticmethod
@@ -746,13 +754,17 @@ class StationRuntime:
         current_cfg: StationPipelineConfig,
         next_cfg: StationPipelineConfig,
     ) -> StationPipelineConfig:
-        """Let songs overlap; start jingles and other inserts at item boundaries."""
+        """Cap station-ID overlap while keeping the configured music blend."""
 
         current_type = _normalize_track_type(current_cfg.track_type)
         next_type = _normalize_track_type(next_cfg.track_type)
-        if current_type == "music" and next_type == "music":
+        if "jingle" not in {current_type, next_type}:
             return next_cfg
-        return replace(next_cfg, crossfade_seconds=0.0)
+        try:
+            seconds = max(0.0, float(next_cfg.crossfade_seconds or 0.0))
+        except (TypeError, ValueError):
+            seconds = 0.0
+        return replace(next_cfg, crossfade_seconds=min(0.25, seconds))
 
     def _terminate_process(self, proc) -> None:
         if not proc:
@@ -1284,11 +1296,27 @@ class StationRuntime:
                 # queue before it can reach the destructive full condition.
                 # FFmpeg remains blocked on its pipe and catches up after the
                 # sink has consumed the preserved programme reserve.
+                # Escape after a bounded stall so a single wedged origin write
+                # cannot freeze programme delivery to every other mount.
                 reserve_bytes = observed_queue_bytes()
+                high_water_since = (
+                    time.monotonic()
+                    if pcm_clock_started
+                    and reserve_bytes is not None
+                    and reserve_bytes > _ICECAST_PIPE_HIGH_WATER_BYTES
+                    else None
+                )
                 while (
                     pcm_clock_started
                     and reserve_bytes is not None
                     and reserve_bytes > _ICECAST_PIPE_HIGH_WATER_BYTES
+                    and (
+                        high_water_since is None
+                        or (
+                            time.monotonic() - high_water_since
+                            < _ICECAST_PIPE_HIGH_WATER_MAX_STALL_SECONDS
+                        )
+                    )
                 ):
                     if self._icecast_pipe_stop.wait(0.05):
                         return
@@ -1758,11 +1786,19 @@ class StationRuntime:
         cfg: StationPipelineConfig,
         *,
         start_offset_seconds: float = 0.0,
+        rebuild_sinks: bool = False,
     ) -> None:
         target_signature = self._signature(cfg)
         self._last_transition_mode = "restart"
         self._stop_producers()
-        self._release_disabled_sinks(cfg)
+        if rebuild_sinks:
+            # A running encoder is not proof that Icecast still owns the
+            # source mount.  Output recovery must close and recreate every
+            # sink so a stale source session is genuinely re-registered.
+            self._stop_sinks()
+            time.sleep(_ORIGIN_SOURCE_RELEASE_SECONDS)
+        else:
+            self._release_disabled_sinks(cfg)
         if self._should_use_live_mix():
             self._launch_live_mix_state(
                 cfg,
@@ -2001,12 +2037,71 @@ class StationRuntime:
         )
 
     def recover_outputs(self) -> dict:
-        """Rebuild failed output branches while keeping the current track position."""
+        """Reconnect output branches without restarting the programme producer."""
         cfg = self._active_cfg
         if cfg is None:
             raise RuntimeError("no active playout request")
-        offset_seconds = self._current_offset_seconds()
-        self._restart_with(cfg, start_offset_seconds=offset_seconds)
+
+        # Keep the decoded programme clock and current crossfade alive.  RTSAS
+        # needs a brief source-free window before a replacement source owns the
+        # mount; reconnect branches sequentially so one mount's late cleanup
+        # cannot interfere with another mount or restart the current song.
+        if cfg.icecast_enabled:
+            sink = self._icecast_sink
+            self._icecast_sink = None
+            self._router.set_branch_health("icecast", False)
+            if sink is not None:
+                sink.stop()
+            time.sleep(_ORIGIN_SOURCE_RELEASE_SECONDS)
+            if sink is not None:
+                self._icecast_sink = sink
+            self._ensure_icecast_sink(cfg)
+
+        desired = self._extra_output_configs(cfg)
+        for branch, output_cfg in desired.items():
+            with self._extra_icecast_lock:
+                sink = self._extra_icecast_sinks.pop(branch, None)
+            self._router.set_branch_health(branch, False)
+            if sink is not None:
+                sink.stop()
+            time.sleep(_ORIGIN_SOURCE_RELEASE_SECONDS)
+            if sink is None:
+                continue
+            try:
+                sink.ensure_started(output_cfg)
+                healthy = bool(sink.is_running())
+            except Exception as exc:
+                healthy = False
+                _log.warning(
+                    "Additional output recovery failed station=%s mount=%s: %s",
+                    self._live_station_id(),
+                    output_cfg.icecast_mount,
+                    exc,
+                )
+            with self._extra_icecast_lock:
+                self._extra_icecast_sinks[branch] = sink
+            self._router.set_branch_health(branch, healthy)
+
+        self._release_disabled_sinks(cfg)
+        return self.status()
+
+    def recover_primary_output(self) -> dict:
+        """Clear a confirmed stale primary mount without touching other outputs."""
+        cfg = self._active_cfg
+        if cfg is None:
+            raise RuntimeError("no active playout request")
+        if not cfg.icecast_enabled:
+            return self.status()
+
+        sink = self._icecast_sink
+        self._icecast_sink = None
+        self._router.set_branch_health("icecast", False)
+        if sink is not None:
+            sink.stop()
+        time.sleep(_ORIGIN_STALE_SOURCE_RELEASE_SECONDS)
+        if sink is not None:
+            self._icecast_sink = sink
+        self._ensure_icecast_sink(cfg)
         return self.status()
 
     def stop(self) -> None:

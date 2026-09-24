@@ -171,11 +171,11 @@ $env:HF_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 ### Database Settings:
 ```sql
 -- Enable AI for station 1
-UPDATE station_settings SET value='true'
+UPDATE station_settings SET value='true' 
 WHERE station_id=1 AND key='ai_host_enabled';
 
 -- Disable AI
-UPDATE station_settings SET value='false'
+UPDATE station_settings SET value='false' 
 WHERE station_id=1 AND key='ai_host_enabled';
 ```
 

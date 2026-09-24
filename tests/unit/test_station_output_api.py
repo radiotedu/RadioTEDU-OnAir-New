@@ -64,8 +64,8 @@ def test_station_output_read_defaults_to_speaker_mode_when_missing():
     assert data["local_output_enabled"] is True
     assert data["icecast_enabled"] is False
     assert data["output_device_id"] == ""
-    assert data["stream_codec_profile"] == "aac_low_192"
-    assert data["stream_bitrate_kbps"] == 192
+    assert data["stream_codec_profile"] == "opus_96"
+    assert data["stream_bitrate_kbps"] == 96
 
 
 def test_station_output_allows_windows_default_device_when_local_output_is_enabled():

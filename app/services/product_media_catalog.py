@@ -20,7 +20,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from app.file_security import audio_upload_extensions
@@ -525,6 +525,85 @@ class ProductMediaCatalogService:
                 state.status = "queued"
         self._wake_event.set()
         return len(selected)
+
+    def list_items(self, product: str, *, limit: int = 500) -> dict[str, Any]:
+        """Return the last committed generation and revalidate each catalog path."""
+        key = str(product or "").strip().casefold()
+        if key not in PRODUCT_DIRECTORIES:
+            raise ProductCatalogError("catalog_product_not_supported")
+        safe_limit = max(1, min(int(limit), 1000))
+        with self._product_locks[key]:
+            database = self._database(key)
+            self._assert_catalog_path(database)
+            if not self._exists(database):
+                return {"product": key, "generation": 0, "items": []}
+            connection: sqlite3.Connection | None = None
+            try:
+                connection = sqlite3.connect(
+                    database.resolve(strict=True).as_uri() + "?mode=ro",
+                    uri=True,
+                    timeout=1.0,
+                )
+                connection.row_factory = sqlite3.Row
+                connection.execute("PRAGMA query_only=ON")
+                meta = connection.execute(
+                    "SELECT generation FROM catalog_meta WHERE id=1"
+                ).fetchone()
+                generation = int(meta["generation"]) if meta else 0
+                rows = connection.execute(
+                    "SELECT relative_path, size, modified_ns, generation "
+                    "FROM catalog_items WHERE generation=? "
+                    "ORDER BY relative_path COLLATE NOCASE LIMIT ?",
+                    (generation, safe_limit),
+                ).fetchall() if generation else []
+                folder = self._folder(key).resolve(strict=False)
+                items: list[dict[str, Any]] = []
+                for row in rows:
+                    relative = PurePosixPath(
+                        str(row["relative_path"] or "").replace("\\", "/")
+                    )
+                    if (
+                        relative.is_absolute()
+                        or not relative.parts
+                        or any(part in {"", ".", ".."} for part in relative.parts)
+                    ):
+                        raise ProductCatalogError("catalog_path_unsafe")
+                    candidate = folder.joinpath(*relative.parts)
+                    self._assert_catalog_path(candidate)
+                    if self._reparse_or_symlink(self._io_path(candidate)):
+                        raise ProductCatalogError("catalog_path_unsafe")
+                    try:
+                        resolved = candidate.resolve(strict=True)
+                        resolved.relative_to(folder)
+                        file_stat = os.stat(self._io_path(resolved))
+                    except (OSError, ValueError) as exc:
+                        raise ProductCatalogError("catalog_item_not_accessible") from exc
+                    current = (
+                        stat.S_ISREG(file_stat.st_mode)
+                        and int(file_stat.st_size) == int(row["size"])
+                        and int(file_stat.st_mtime_ns) == int(row["modified_ns"])
+                    )
+                    items.append(
+                        {
+                            "relative_path": relative.as_posix(),
+                            "file_name": relative.name,
+                            "title": Path(relative.name).stem,
+                            "size_bytes": int(row["size"]),
+                            "modified_ns": int(row["modified_ns"]),
+                            "generation": int(row["generation"]),
+                            "stale": not current,
+                            # Internal consumers use this only after `stale` is checked.
+                            "path": str(resolved) if current else "",
+                        }
+                    )
+                return {"product": key, "generation": generation, "items": items}
+            except ProductCatalogError:
+                raise
+            except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
+                raise ProductCatalogError("catalog_read_failed") from exc
+            finally:
+                if connection is not None:
+                    connection.close()
 
     def snapshot(self) -> dict[str, Any]:
         with self._state_lock:

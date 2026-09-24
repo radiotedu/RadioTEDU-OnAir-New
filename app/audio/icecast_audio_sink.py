@@ -22,13 +22,13 @@ _log = logging.getLogger(__name__)
 # on saturation it discarded the whole queue, producing audible multi-second
 # jumps.  1024 chunks is ~21.8 s and about 4 MiB per active sink. The cache
 # prefetch path prevents cold-volume stalls from filling this reserve.
-# Keep roughly 22 seconds of per-mount PCM reserve. This absorbs Windows
+# Keep roughly 44 seconds of per-mount PCM reserve. This absorbs Windows
 # encoder/TCP startup stalls without deleting the already scheduled song.
 _PCM_QUEUE_MAX_CHUNKS = 1024
-# A FLAC branch can spend longer draining Ogg pages during origin backpressure.
-# Keep about 175 seconds (32 MiB) of its PCM so a temporary stall does not
-# trigger the lossy three-second resync used by live lossy-codec outputs.
-_PCM_FLAC_QUEUE_MAX_CHUNKS = 8192
+# FLAC is lossless and its Ogg pages can briefly need more write-side reserve
+# on a busy origin. Keep the larger reserve only on the two FLAC branches so
+# AAC and local programme timing remain unchanged.
+_PCM_FLAC_QUEUE_MAX_CHUNKS = 2048
 _PCM_INITIAL_PROGRAMME_GRACE_SECONDS = 0.25
 _PCM_PROGRAMME_START_RESERVE_BYTES = 48 * 1024
 _PCM_PROGRAMME_START_MAX_WAIT_SECONDS = 0.25
@@ -64,23 +64,15 @@ _ENCODER_ERROR_TOKENS = (
 def current_codec_fallback(
     cfg: StationPipelineConfig,
 ) -> StationPipelineConfig | None:
-    """Use native AAC-LC when the selected FFmpeg build lacks FDK-AAC."""
+    """Use native AAC-LC at the same bitrate when FFmpeg lacks FDK-AAC."""
 
     token = str(cfg.stream_codec_profile or "").strip().lower().replace("-", "_")
     if token.startswith("aac_low"):
+        bitrate = int(cfg.stream_bitrate_kbps or 192)
         return replace(
             cfg,
-            # Keep the configured AAC bitrate and transport profile. The native
-            # FFmpeg AAC encoder supports LC without the FDK-only afterburner
-            # option, so this fallback works on ordinary FFmpeg distributions.
-            stream_codec_profile="aac_lc_192",
-            stream_bitrate_kbps=192,
-        )
-    if token.startswith(("aac_he_v2", "he_aac_v2")):
-        return replace(
-            cfg,
-            stream_codec_profile="he_aac_96",
-            stream_bitrate_kbps=96,
+            stream_codec_profile=f"aac_lc_{bitrate}",
+            stream_bitrate_kbps=bitrate,
         )
     return None
 
@@ -210,9 +202,9 @@ class IcecastAudioSink:
         self._initial_connect_spread_sec = max(
             0.0, float(initial_connect_spread_sec)
         )
-        # Lossy live outputs may resync to the current programme under sustained
-        # backpressure. FLAC outputs override this and retain queued PCM in order.
-        self._configured_drop_on_backpressure = bool(drop_on_backpressure)
+        # Legacy/unit callers can retain the bounded live-resync policy. The
+        # real station runtime disables destructive drops so an encoder stall
+        # pauses the producer instead of jumping to a later PCM timestamp.
         self._drop_on_backpressure = bool(drop_on_backpressure)
         self._source = None
         self._connector_thread = None
@@ -281,6 +273,12 @@ class IcecastAudioSink:
         encoder exit and PCM-writer failure remain the restart authorities.
         """
 
+        # A live connector thread cannot recover a dead PCM writer by itself:
+        # the encoder stdin has already failed and its queue will only grow.
+        # Report the sink stopped so ensure_started() recreates the complete
+        # encoder/writer/connector trio after an origin outage.
+        if self._writer_failed:
+            return False
         return bool(
             (self._process and self._process.poll() is None)
             or (
@@ -329,8 +327,8 @@ class IcecastAudioSink:
                             self._writer_backpressure_started_monotonic = time.monotonic()
                         self._writer_dropped_chunks += 1
                     # Keep the already scheduled programme reserve intact.
-                    # Reject only this newest frame while this bounded branch
-                    # has no room; do not discard older queued programme audio.
+                    # The caller will retry on the next PCM frame after the
+                    # encoder writer makes room.
                     return False
             # This mount is already far behind. Resync only this failed branch
             # to a byte-measured three-second live window; chunk counts vary by
@@ -793,11 +791,10 @@ class IcecastAudioSink:
                     if self._writer_stop.is_set():
                         source.close()
                         return
-                    # Lossy live streams discard stale PCM on reconnect. FLAC
-                    # keeps the queued programme in order to avoid skipping
-                    # already-scheduled audio after an origin stall.
-                    if self._drop_on_backpressure:
-                        self._trim_pcm_queue_to_latest_bytes(_PCM_LIVE_RESYNC_BYTES)
+                    # A reconnect creates a fresh public stream clock. Keep
+                    # only the newest live reserve so the mount returns near
+                    # the current programme instead of staying far behind.
+                    self._trim_pcm_queue_to_latest_bytes(_PCM_LIVE_RESYNC_BYTES)
                     command = build_ffmpeg_encoded_sink_cmd(
                         effective_cfg, self.ffmpeg_bin
                     )
@@ -928,16 +925,10 @@ class IcecastAudioSink:
             return self._process
         self.stop(preserve_probe_state=False)
         profile = str(cfg.stream_codec_profile or "").strip().lower()
-        flac_output = profile.startswith(("ogg_flac", "flac_ogg"))
         queue_capacity = (
             _PCM_FLAC_QUEUE_MAX_CHUNKS
-            if flac_output
+            if profile.startswith(("ogg_flac", "flac_ogg"))
             else _PCM_QUEUE_MAX_CHUNKS
-        )
-        # Preserve the FLAC branch's queued audio across origin stalls. Lossy
-        # streams keep the existing bounded live-resync behavior.
-        self._drop_on_backpressure = (
-            self._configured_drop_on_backpressure and not flac_output
         )
         if queue_capacity != self._pcm_queue_capacity_chunks:
             self._pcm_queue_capacity_chunks = queue_capacity

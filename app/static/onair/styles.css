@@ -178,13 +178,6 @@ input:focus, select:focus, textarea:focus { border-color: var(--blue); box-shado
 .danger-zone { margin-top: 14px; padding-top: 13px; border-top: 1px solid rgba(255,77,95,.24); }
 .jingle-folder-form { margin-top: 16px; }
 
-/* Keyboard and touch controls remain usable across the dense operator panels. */
-:where(button, a, input, select, textarea, [tabindex]):focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
-.button { min-height: 44px; }
-.icon-button { min-width: 44px; height: 44px; }
-@media (max-width: 520px) { input, select, textarea { font-size: 16px; } }
-@media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition-duration: .01ms !important; } }
-
 .emergency-panel { border-color: rgba(255,77,95,.38); background: linear-gradient(155deg, rgba(51,24,33,.95), rgba(15,21,29,.98)); }
 .emergency-eyebrow { color: var(--red); }
 .emergency-panel .card-copy { min-height: auto; margin-bottom: 14px; }

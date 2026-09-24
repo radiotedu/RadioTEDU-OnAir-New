@@ -217,12 +217,17 @@ class AudioWatchdogService:
         self,
         *,
         station_ids: list[int],
+        force_station_ids: list[int] | None = None,
         repair_managed_profiles: bool,
     ) -> dict[str, Any]:
         selected = sorted({int(item) for item in station_ids})
+        forced = sorted({int(item) for item in (force_station_ids or [])})
         invalid = sorted(set(selected) - set(WATCHDOG_STATIONS))
         if invalid:
             raise ValueError("invalid_watchdog_station_ids")
+        invalid_forced = sorted(set(forced) - set(selected))
+        if invalid_forced:
+            raise ValueError("forced_watchdog_station_ids_must_be_selected")
         profile_results = []
         if repair_managed_profiles:
             conn = get_connection()
@@ -256,6 +261,8 @@ class AudioWatchdogService:
                     and (last_write_age is None or float(last_write_age) <= 10.0)
                 )
                 if (
+                    station_id not in forced
+                    and
                     runtime.get("running")
                     and runtime.get("worker_running")
                     and runtime.get("program_running")
@@ -287,6 +294,7 @@ class AudioWatchdogService:
             "ok": not errors,
             "restarted": restarted,
             "deferred": deferred,
+            "forced_station_ids": forced,
             "managed_profile_repairs": profile_results,
             "errors": errors,
             "snapshot": self.snapshot(),

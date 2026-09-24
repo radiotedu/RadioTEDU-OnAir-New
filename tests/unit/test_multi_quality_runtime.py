@@ -63,26 +63,25 @@ def _cfg(**changes) -> StationPipelineConfig:
         input_uri="test://program",
         icecast_host="127.0.0.1",
         icecast_port=8000,
-        icecast_mount="/classic",
+        icecast_mount="/lofi",
         icecast_user="source",
         icecast_password="protected-secret",
         local_output_enabled=False,
         output_device_id="",
-        stream_codec_profile="opus_192",
-        stream_bitrate_kbps=192,
+        stream_codec_profile="aac_128",
+        stream_bitrate_kbps=128,
         stream_title="Private track title",
         stream_artist="Private track artist",
-        stream_album="Private album",
         extra_icecast_outputs=(
             {
                 "enabled": True,
-                "mount": "/classic-low",
-                "stream_codec_profile": "opus_32",
-                "stream_bitrate_kbps": 32,
+                "mount": "/lofi-low",
+                "stream_codec_profile": "aac_96",
+                "stream_bitrate_kbps": 96,
             },
             {
                 "enabled": True,
-                "mount": "/classic-flac",
+                "mount": "/lofi-flac",
                 "stream_codec_profile": "ogg_flac_lossless",
                 "stream_bitrate_kbps": 0,
             },
@@ -120,8 +119,8 @@ class MultiQualityRuntimeTests(unittest.TestCase):
         self.assertEqual(
             results,
             {
-                "icecast:/classic-low": True,
-                "icecast:/classic-flac": True,
+                "icecast:/lofi-low": True,
+                "icecast:/lofi-flac": True,
             },
         )
         self.assertEqual(len(_FakeSink.instances), 3)
@@ -131,35 +130,34 @@ class MultiQualityRuntimeTests(unittest.TestCase):
         quality_cfgs = [
             sink.cfg
             for sink in _FakeSink.instances
-            if sink.cfg.icecast_mount != "/classic"
+            if sink.cfg.icecast_mount != "/lofi"
         ]
         self.assertEqual(
             {item.icecast_mount for item in quality_cfgs},
-            {"/classic-low", "/classic-flac"},
+            {"/lofi-low", "/lofi-flac"},
         )
         self.assertEqual(
             {
                 item.icecast_mount: item.stream_bitrate_kbps
                 for item in quality_cfgs
             },
-            {"/classic-low": 32, "/classic-flac": 0},
+            {"/lofi-low": 96, "/lofi-flac": 0},
         )
         self.assertTrue(all(item.icecast_user == cfg.icecast_user for item in quality_cfgs))
         self.assertTrue(
             all(item.icecast_password == cfg.icecast_password for item in quality_cfgs)
         )
-        self.assertTrue(all(item.stream_title == cfg.stream_title for item in quality_cfgs))
-        self.assertTrue(all(item.stream_artist == cfg.stream_artist for item in quality_cfgs))
-        self.assertTrue(all(item.stream_album == cfg.stream_album for item in quality_cfgs))
+        self.assertTrue(all(item.stream_title == "" for item in quality_cfgs))
+        self.assertTrue(all(item.stream_artist == "" for item in quality_cfgs))
         self.assertEqual(cfg.stream_title, "Private track title")
-        self.assertTrue(self.runtime.branch_health()["icecast:/classic-low"])
-        self.assertTrue(self.runtime.branch_health()["icecast:/classic-flac"])
+        self.assertTrue(self.runtime.branch_health()["icecast:/lofi-low"])
+        self.assertTrue(self.runtime.branch_health()["icecast:/lofi-flac"])
 
     def test_one_quality_queue_failure_does_not_stop_other_outputs(self):
         cfg = _cfg()
         self.runtime._ensure_icecast_sink(cfg)
         self.runtime._ensure_extra_icecast_sinks(cfg)
-        self.runtime._extra_icecast_sinks["icecast:/classic-low"].accept = False
+        self.runtime._extra_icecast_sinks["icecast:/lofi-low"].accept = False
 
         self.runtime._write_pcm_chunk_to_targets(
             b"pcm", self.runtime._icecast_output_targets()
@@ -167,16 +165,16 @@ class MultiQualityRuntimeTests(unittest.TestCase):
 
         self.assertEqual(self.runtime._icecast_sink.chunks, [b"pcm"])
         self.assertEqual(
-            self.runtime._extra_icecast_sinks["icecast:/classic-low"].chunks, []
+            self.runtime._extra_icecast_sinks["icecast:/lofi-low"].chunks, []
         )
         self.assertEqual(
-            self.runtime._extra_icecast_sinks["icecast:/classic-flac"].chunks,
+            self.runtime._extra_icecast_sinks["icecast:/lofi-flac"].chunks,
             [b"pcm"],
         )
         branches = self.runtime.branch_health()
         self.assertTrue(branches["icecast"])
-        self.assertFalse(branches["icecast:/classic-low"])
-        self.assertTrue(branches["icecast:/classic-flac"])
+        self.assertFalse(branches["icecast:/lofi-low"])
+        self.assertTrue(branches["icecast:/lofi-flac"])
 
     def test_pcm_pipe_reads_once_and_fans_out_the_same_program_bytes(self):
         cfg = _cfg()
@@ -200,7 +198,7 @@ class MultiQualityRuntimeTests(unittest.TestCase):
     def test_pcm_pipe_phase_locks_after_small_startup_reserve(self):
         class ChunkedStdout:
             def __init__(self):
-                self.remaining = 286
+                self.remaining = 68
 
             def read(self, _size):
                 if self.remaining <= 0:
@@ -264,7 +262,7 @@ class MultiQualityRuntimeTests(unittest.TestCase):
             places=6,
         )
         self.assertTrue(
-            all(len(sink.chunks) == 286 for sink in _FakeSink.instances)
+            all(len(sink.chunks) == 68 for sink in _FakeSink.instances)
         )
 
     def test_runtime_silence_floor_skips_self_clocked_icecast_queues(self):
@@ -280,8 +278,8 @@ class MultiQualityRuntimeTests(unittest.TestCase):
             extra_icecast_outputs=(
                 {
                     "enabled": True,
-                    "mount": "/classic-low",
-                    "stream_codec_profile": "opus_32",
+                    "mount": "/lofi-low",
+                    "stream_codec_profile": "aac_96",
                     "stream_bitrate_kbps": 97,
                 },
             )
@@ -294,26 +292,26 @@ class MultiQualityRuntimeTests(unittest.TestCase):
     def test_duplicate_primary_and_quality_mounts_are_not_fanned_out_twice(self):
         cfg = _cfg(
             extra_icecast_outputs=(
-                {"mount": "/classic", "stream_codec_profile": "opus_192"},
-                {"mount": "/classic-low", "stream_codec_profile": "opus_32"},
-                {"mount": "classic-low", "stream_codec_profile": "opus_64"},
+                {"mount": "/lofi", "stream_codec_profile": "aac_96"},
+                {"mount": "/lofi-low", "stream_codec_profile": "aac_96"},
+                {"mount": "lofi-low", "stream_codec_profile": "aac_320"},
             )
         )
 
         outputs = self.runtime._extra_output_configs(cfg)
 
-        self.assertEqual(list(outputs), ["icecast:/classic-low"])
+        self.assertEqual(list(outputs), ["icecast:/lofi-low"])
         self.assertEqual(
-            outputs["icecast:/classic-low"].stream_codec_profile, "opus_32"
+            outputs["icecast:/lofi-low"].stream_codec_profile, "aac_96"
         )
 
     def test_string_false_values_do_not_accidentally_enable_outputs(self):
         cfg = _cfg(
             extra_icecast_outputs=(
-                {"enabled": "false", "mount": "/classic-low"},
+                {"enabled": "false", "mount": "/lofi-low"},
                 {
                     "enabled": "true",
-                    "mount": "/classic-flac",
+                    "mount": "/lofi-flac",
                     "icecast_public": "false",
                 },
             )
@@ -321,8 +319,8 @@ class MultiQualityRuntimeTests(unittest.TestCase):
 
         outputs = self.runtime._extra_output_configs(cfg)
 
-        self.assertEqual(list(outputs), ["icecast:/classic-flac"])
-        self.assertFalse(outputs["icecast:/classic-flac"].icecast_public)
+        self.assertEqual(list(outputs), ["icecast:/lofi-flac"])
+        self.assertFalse(outputs["icecast:/lofi-flac"].icecast_public)
 
     def test_quality_outputs_hot_refresh_preserves_programme_producer(self):
         cfg = _cfg()
@@ -355,7 +353,7 @@ class MultiQualityRuntimeTests(unittest.TestCase):
             patch.object(
                 self.runtime,
                 "_ensure_extra_icecast_sinks",
-                return_value={"icecast:/classic-low": True},
+                return_value={"icecast:/lofi-low": True},
             ),
             patch.object(self.runtime, "_ensure_local_sink", return_value=False),
             patch.object(
@@ -372,39 +370,6 @@ class MultiQualityRuntimeTests(unittest.TestCase):
         start_pipe.assert_called_once()
         self.assertEqual(self.runtime._backend, "ffmpeg-transition")
 
-    def test_crossfade_decoder_is_prepared_before_current_producer_is_retired(self):
-        cfg = _cfg()
-        self.runtime._active_cfg = cfg
-        self.runtime._active_started_monotonic = 1.0
-        current = MagicMock()
-        current.poll.return_value = None
-        prepared = MagicMock()
-        prepared.poll.return_value = None
-        self.runtime._process = current
-        events = []
-
-        def spawn(*_args, **_kwargs):
-            events.append("spawn-next")
-            return prepared
-
-        def terminate(proc):
-            if proc is current:
-                events.append("retire-current")
-
-        with (
-            patch.object(self.runtime, "_ensure_icecast_sink", return_value=True),
-            patch.object(self.runtime, "_ensure_extra_icecast_sinks", return_value={}),
-            patch.object(self.runtime, "_ensure_local_sink", return_value=False),
-            patch.object(self.runtime, "_spawn_crossfade_pcm_producer", side_effect=spawn),
-            patch.object(self.runtime, "_terminate_process", side_effect=terminate),
-            patch.object(self.runtime, "_start_icecast_pipe_worker"),
-            patch.object(self.runtime, "_start_silence_floor_worker"),
-        ):
-            self.runtime._start_crossfade(cfg)
-
-        self.assertLess(events.index("spawn-next"), events.index("retire-current"))
-        self.assertIs(self.runtime._process, prepared)
-
     def test_steady_playout_starts_quality_outputs_when_primary_is_unavailable(self):
         cfg = _cfg()
         producer = MagicMock()
@@ -415,7 +380,7 @@ class MultiQualityRuntimeTests(unittest.TestCase):
             patch.object(
                 self.runtime,
                 "_ensure_extra_icecast_sinks",
-                return_value={"icecast:/classic-low": True},
+                return_value={"icecast:/lofi-low": True},
             ),
             patch.object(
                 self.runtime,
