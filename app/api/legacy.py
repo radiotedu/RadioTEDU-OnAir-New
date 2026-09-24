@@ -4237,6 +4237,11 @@ def _sync_station_library_folder_with_connection(
         candidates_by_path.setdefault(_canonical_library_path(resolved), resolved)
 
     candidates = [candidates_by_path[key] for key in sorted(candidates_by_path)]
+    if not candidates and kind == "ad" and mode == "replace":
+        # An empty Ads folder can be a valid directory that points to the wrong
+        # drive or a stale media view. Do not let an automatic replacement
+        # silently deactivate every approved ad for a station.
+        raise HTTPException(status_code=409, detail="empty_ad_library_replace_blocked")
     if not candidates and not (bool(payload.allow_empty) and mode == "replace"):
         raise HTTPException(status_code=400, detail=f"No supported audio files found in {base}")
     if len(candidates) > _MANAGED_SYNC_MAX_FILES:

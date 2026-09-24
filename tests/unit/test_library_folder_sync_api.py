@@ -129,6 +129,42 @@ def test_replace_sync_is_exact_idempotent_and_cleans_pending_queue(
     assert second_result["deactivated"] == 0
 
 
+def test_empty_replace_cannot_deactivate_ads(client, tmp_path):
+    managed = tmp_path / "empty-ads"
+    managed.mkdir()
+    init_db()
+    conn = get_connection()
+    conn.execute(
+        "INSERT INTO tracks "
+        "(station_id, title, artist, track_type, file_path, is_active, duration) "
+        "VALUES (1, 'Approved ad', 'RadioTEDU', 'ad', ?, 1, 30)",
+        (str(tmp_path / "approved-ad.mp3"),),
+    )
+    conn.commit()
+    conn.close()
+
+    response = client.post(
+        "/api/library/folder/sync",
+        json={
+            "station_id": 1,
+            "folder": str(managed),
+            "track_type": "ad",
+            "mode": "replace",
+            "allow_empty": True,
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "empty_ad_library_replace_blocked"
+    conn = get_connection()
+    active_ads = conn.execute(
+        "SELECT COUNT(*) AS c FROM tracks "
+        "WHERE station_id=1 AND track_type='ad' AND is_active=1"
+    ).fetchone()["c"]
+    conn.close()
+    assert active_ads == 1
+
+
 def test_managed_folders_are_isolated_per_station(client, tmp_path, monkeypatch):
     monkeypatch.setattr("app.api.legacy._get_audio_metadata", _fake_metadata)
     pop_folder = tmp_path / "pop"
