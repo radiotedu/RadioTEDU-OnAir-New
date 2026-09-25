@@ -191,6 +191,12 @@ def _post_version_repairs_needed(cur) -> bool:
     }
     if "delivered_variants_json" not in columns:
         return True
+    index_names = {
+        str(row[1])
+        for row in cur.execute("PRAGMA index_list(music_usage_log)").fetchall()
+    }
+    if "idx_music_usage_broadcast_time" not in index_names:
+        return True
     return False
 
 
@@ -1489,6 +1495,13 @@ def _bootstrap_schema(cur) -> None:
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_music_usage_track_time "
         "ON music_usage_log(track_id, broadcast_at DESC, id DESC)"
+    )
+    # Global daily exports and all-time CSVs filter/order by broadcast time.
+    # Without this index each scheduled refresh scans and sorts the whole
+    # append-only ledger, pinning a WAL snapshot and delaying playout writes.
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_music_usage_broadcast_time "
+        "ON music_usage_log(broadcast_at ASC, id ASC)"
     )
     cur.execute(
         "CREATE TRIGGER IF NOT EXISTS trg_music_usage_log_no_update "
