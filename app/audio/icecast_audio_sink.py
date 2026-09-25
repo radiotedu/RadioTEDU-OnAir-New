@@ -810,22 +810,23 @@ class IcecastAudioSink:
                             self._last_network_write_monotonic = time.monotonic()
                             self._last_network_error = ""
                 except Exception as exc:
-                    safe = self._sanitize_encoder_line(exc, effective_cfg)
-                    with self._writer_lock:
-                        self._network_failed = True
-                        self._last_network_error = safe
-                        self._network_error_count += 1
-                    if (
-                        not delivered_this_connection
-                        and fallback_cfg is not None
-                        and effective_cfg is cfg
-                    ):
-                        effective_cfg = fallback_cfg
-                        delay_index = 0
-                        self._profile_fallback_active = True
-                        self._effective_stream_codec_profile = str(
-                            effective_cfg.stream_codec_profile or ""
-                        )
+                    if not self._writer_stop.is_set():
+                        safe = self._sanitize_encoder_line(exc, effective_cfg)
+                        with self._writer_lock:
+                            self._network_failed = True
+                            self._last_network_error = safe
+                            self._network_error_count += 1
+                        if (
+                            not delivered_this_connection
+                            and fallback_cfg is not None
+                            and effective_cfg is cfg
+                        ):
+                            effective_cfg = fallback_cfg
+                            delay_index = 0
+                            self._profile_fallback_active = True
+                            self._effective_stream_codec_profile = str(
+                                effective_cfg.stream_codec_profile or ""
+                            )
                 finally:
                     if connected_at is not None and time.monotonic() - connected_at >= 30.0:
                         delay_index = 0

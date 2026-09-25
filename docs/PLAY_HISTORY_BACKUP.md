@@ -16,9 +16,9 @@ Varsayılan klasör:
 ```text
 RadioTEDU-play-history-daily.csv       # geçerli UTC gününün parçaları
 RadioTEDU-play-counts-daily.csv        # geçerli gün, parça başına sayım
-RadioTEDU-play-history-total.csv       # bütün radyoların tüm geçmişi
-RadioTEDU-play-counts-total.csv        # tamamlanan olay ve toplam oynatma
-RadioTEDU-play-history-manifest.json   # checksum + hash doğrulaması
+RadioTEDU-play-history-total.csv       # gece yedeğinde yenilenen tüm geçmiş
+RadioTEDU-play-counts-total.csv        # gece yedeğinde yenilenen toplam oynatma
+RadioTEDU-play-history-manifest.json   # gece yedeğinde checksum + hash doğrulaması
 daily\YYYY-MM-DD-*.csv                # gün arşivi
 legacy\                                # önceki ProgramData raporları
 ```
@@ -29,9 +29,10 @@ dosyaları `legacy` altında korunur; ledger satırları yeniden yazılmaz.
 
 ## Otomatik görevler
 
-- `RadioTEDU-OnAir-PlayHistory-Export`: beş dakikada bir CSV'leri yeniler.
+- `RadioTEDU-OnAir-PlayHistory-Export`: beş dakikada bir günlük CSV'leri yeniler.
+  Yayın veritabanını rahat tutmak için tüm geçmişi ve hash zincirini taramaz.
 - `RadioTEDU-OnAir-PlayHistory-GitHub`: her gece exporter'ı çalıştırır, yerel
-  Git mirror'ında commit oluşturur ve özel
+  tüm geçmiş CSV'lerini/hash zincirini yeniler, Git mirror'ında commit oluşturur ve özel
   [`radiotedu/RadioTEDU-OnAir-Play-History`](https://github.com/radiotedu/RadioTEDU-OnAir-Play-History)
   deposuna push eder.
 
@@ -46,7 +47,8 @@ Manuel yenileme ve yedek:
 
 ```powershell
 py -3 .\scripts\export_play_history.py `
-  --db-path 'C:\ProgramData\RadioTEDU\OnAir\cleanroom.db'
+  --db-path 'C:\ProgramData\RadioTEDU\OnAir\cleanroom.db' `
+  --include-all-time
 powershell -ExecutionPolicy Bypass -File .\scripts\backup_play_history_to_github.ps1
 ```
 

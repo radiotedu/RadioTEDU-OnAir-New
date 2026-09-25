@@ -1,9 +1,8 @@
 """Refresh the operator Desktop play-history CSV mirror.
 
-This small standard-library entry point is intentionally independent from the
-running OnAir process.  Windows Task Scheduler can run it every few minutes
-and the nightly GitHub backup can call it immediately before committing.  The
-SQLite music_usage_log remains append-only and authoritative.
+Frequent runs refresh only recent daily reports. The nightly backup opts into
+the full all-time mirror and hash-chain verification. The SQLite
+music_usage_log remains append-only and authoritative.
 """
 
 from __future__ import annotations
@@ -23,6 +22,11 @@ def _parse_args() -> argparse.Namespace:
         default="",
         help="Desktop RadioTEDU Play History directory",
     )
+    parser.add_argument(
+        "--include-all-time",
+        action="store_true",
+        help="Refresh the full ledger mirror and verify its hash chain",
+    )
     return parser.parse_args()
 
 
@@ -41,15 +45,19 @@ def main() -> int:
 
     # Imports happen after environment selection because app.config resolves
     # the database path at import time.
-    from app.db import get_connection
-    from app.services.music_usage import MusicUsageService
+    from app.services.music_usage import (
+        MusicUsageService,
+        open_music_usage_export_connection,
+    )
 
     # This is a read/export job, not an application bootstrap. Running schema
     # initialization here races station workers and managed-folder writers on
     # the live SQLite file; the database is initialized by the service itself.
-    conn = get_connection()
+    conn = open_music_usage_export_connection()
     try:
-        result = MusicUsageService(conn).ensure_daily_exports()
+        result = MusicUsageService(conn).ensure_daily_exports(
+            include_all_time=bool(args.include_all_time)
+        )
     finally:
         conn.close()
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))

@@ -30,7 +30,7 @@ if (-not (Test-Path -LiteralPath $exportScript -PathType Leaf)) {
 
 # Refresh the CSVs immediately before the commit.  The app also runs this
 # exporter in-process; this second pass makes the nightly job self-contained.
-& py -3 $exportScript --db-path $DatabasePath --history-root $HistoryRoot | Out-Host
+& py -3 $exportScript --db-path $DatabasePath --history-root $HistoryRoot --include-all-time | Out-Host
 if ($LASTEXITCODE -ne 0) { throw "Play-history export failed with exit code $LASTEXITCODE" }
 if (-not (Test-Path -LiteralPath $HistoryRoot -PathType Container)) {
     throw "Play-history directory does not exist: $HistoryRoot"

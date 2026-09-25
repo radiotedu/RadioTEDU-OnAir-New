@@ -172,7 +172,12 @@ class IcecastSourceTransport:
 
     def send(self, payload: bytes) -> None:
         if payload:
-            self._socket.sendall(payload)
+            source_socket = getattr(self, "_socket", None)
+            if source_socket is None:
+                raise IcecastSourceProtocolError(
+                    "Icecast source connection is closed"
+                )
+            source_socket.sendall(payload)
 
     def peer_closed(self) -> bool:
         """Detect a graceful/half-open peer close without consuming protocol data."""

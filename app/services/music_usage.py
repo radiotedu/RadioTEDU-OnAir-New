@@ -144,6 +144,20 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def open_music_usage_export_connection():
+    """Use read-only SQLite access for frequent CSV refreshes.
+
+    The monthly close inserts one closure row on the first UTC day of each
+    month. All other scheduled export passes only read the ledger and should
+    not reconfigure SQLite's writable connection or compete with playout.
+    """
+    from app.db import get_connection, get_read_connection
+
+    if _utc_now().day == 1:
+        return get_connection()
+    return get_read_connection(timeout_seconds=3.0)
+
+
 def _sqlite_timestamp(value) -> str:
     if value in (None, ""):
         return _utc_now().strftime("%Y-%m-%d %H:%M:%S")
@@ -708,8 +722,9 @@ class MusicUsageService:
         *,
         destination: str | Path | None = None,
         now: date | None = None,
+        include_all_time: bool = True,
     ) -> dict:
-        """Refresh daily and all-time CSVs in one Desktop folder.
+        """Refresh daily CSVs and optionally the expensive all-time mirror.
 
         Existing protected exports are copied into ``legacy`` once, so a
         previous installation's reports remain available alongside the new
@@ -788,26 +803,52 @@ class MusicUsageService:
                 }
             )
 
-        all_entries = self.list_entries(limit=None)
-        total_events = self._atomic_write_text(
-            root / "RadioTEDU-play-history-total.csv",
-            self.play_history_csv_text(all_entries),
-        )
-        all_counts = self.list_play_counts()
-        total_counts = self._atomic_write_text(
-            root / "RadioTEDU-play-counts-total.csv",
-            self.play_count_csv_text(all_counts),
-        )
-        all_rights_counts = self.list_play_counts(music_only=True)
-        total_rights = self._atomic_write_text(
-            licensor_root / "RadioTEDU-rights-report-total.csv",
-            self.play_count_csv_text(all_rights_counts),
-        )
-        total_mesam = self._export_mesam_station_forms(
-            destination=mesam_root,
-            label="all-time",
-            entries=all_rights_counts,
-        )
+        all_time_manifest: dict = {
+            "all_time_refresh": {
+                "status": "not_requested",
+                "files": [
+                    "RadioTEDU-play-history-total.csv",
+                    "RadioTEDU-play-counts-total.csv",
+                    "licensor/RadioTEDU-rights-report-total.csv",
+                    "licensor/MESAM/all-time-station-*-radio-form.csv",
+                ],
+            }
+        }
+        if include_all_time:
+            all_entries = self.list_entries(limit=None)
+            total_events = self._atomic_write_text(
+                root / "RadioTEDU-play-history-total.csv",
+                self.play_history_csv_text(all_entries),
+            )
+            all_counts = self.list_play_counts()
+            total_counts = self._atomic_write_text(
+                root / "RadioTEDU-play-counts-total.csv",
+                self.play_count_csv_text(all_counts),
+            )
+            all_rights_counts = self.list_play_counts(music_only=True)
+            total_rights = self._atomic_write_text(
+                licensor_root / "RadioTEDU-rights-report-total.csv",
+                self.play_count_csv_text(all_rights_counts),
+            )
+            total_mesam = self._export_mesam_station_forms(
+                destination=mesam_root,
+                label="all-time",
+                entries=all_rights_counts,
+            )
+            all_time_manifest = {
+                "total": {**total_events, "record_count": len(all_entries)},
+                "total_play_counts": {
+                    **total_counts,
+                    "record_count": len(all_counts),
+                },
+                "total_rights_report": {
+                    **total_rights,
+                    "record_count": len(all_rights_counts),
+                },
+                "total_mesam_station_forms": total_mesam,
+                "integrity": self.verify_hash_chain(),
+                "all_time_refresh": {"status": "complete"},
+            }
 
         # Stable aliases make it easy for operators and backup jobs to consume
         # the current day without having to calculate a date in a shell.
@@ -847,14 +888,7 @@ class MusicUsageService:
                 **daily_rights_alias,
                 "record_count": len(today_rights_counts),
             },
-            "total": {**total_events, "record_count": len(all_entries)},
-            "total_play_counts": {**total_counts, "record_count": len(all_counts)},
-            "total_rights_report": {
-                **total_rights,
-                "record_count": len(all_rights_counts),
-            },
-            "total_mesam_station_forms": total_mesam,
-            "integrity": self.verify_hash_chain(),
+            **all_time_manifest,
             "legacy_exports_preserved_at": str(legacy_root),
         }
         manifest_export = self._atomic_write_text(
@@ -966,7 +1000,12 @@ class MusicUsageService:
         self.conn.commit()
         return dict(self.conn.execute("SELECT * FROM music_usage_month_closures WHERE period_key=?", (period_key,)).fetchone())
 
-    def ensure_daily_exports(self, *, now: date | None = None) -> dict:
+    def ensure_daily_exports(
+        self,
+        *,
+        now: date | None = None,
+        include_all_time: bool = False,
+    ) -> dict:
         today = now or _utc_now().date()
         previous = today - timedelta(days=1)
         destination = get_data_dir() / "Exports" / "MusicUsage" / f"{previous.isoformat()}.csv"
@@ -975,14 +1014,17 @@ class MusicUsageService:
         if today.day == 1:
             month = previous.month
             closed = self.close_month(year=previous.year, month=month)
-        desktop = self.export_desktop_bundle(now=today)
+        desktop = self.export_desktop_bundle(
+            now=today,
+            include_all_time=include_all_time,
+        )
         return {"daily": daily, "monthly_close": closed, "desktop": desktop}
 
 
 class MusicUsageExportScheduler:
     """Refresh CSV mirrors without ever blocking a station audio worker."""
 
-    def __init__(self, interval_seconds: float = 300.0, minimum_export_gap: float = 15.0):
+    def __init__(self, interval_seconds: float = 300.0, minimum_export_gap: float = 300.0):
         self.interval_seconds = max(30.0, float(interval_seconds))
         self.minimum_export_gap = max(1.0, float(minimum_export_gap))
         self._stop = threading.Event()
@@ -1010,11 +1052,11 @@ class MusicUsageExportScheduler:
     def run_once(self) -> dict | None:
         """Run one export pass; useful to the standalone backup task/tests."""
         try:
-            from app.db import get_connection
-
-            conn = get_connection()
+            conn = open_music_usage_export_connection()
             try:
-                return MusicUsageService(conn).ensure_daily_exports()
+                return MusicUsageService(conn).ensure_daily_exports(
+                    include_all_time=False
+                )
             finally:
                 conn.close()
         except Exception:
