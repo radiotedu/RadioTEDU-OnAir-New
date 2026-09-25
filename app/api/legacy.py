@@ -2139,10 +2139,15 @@ def set_speaker_monitor_station(
 
 @router.get("/api/settings/system")
 def get_system_settings():
-    init_db()
-    conn = get_connection()
-    settings = _system_settings_snapshot(conn)
-    return {"settings": settings, **settings}
+    # Defaults are inserted by the application bootstrap. Keep this read path
+    # query-only so refreshing global settings never waits for playout writers
+    # just to reinsert rows that already exist.
+    conn = get_read_connection(timeout_seconds=3.0)
+    try:
+        settings = _typed_settings(SettingsRepository(conn).get_system())
+        return {"settings": settings, **settings}
+    finally:
+        conn.close()
 
 
 @router.put("/api/settings/system")
