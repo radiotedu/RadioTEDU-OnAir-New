@@ -66,8 +66,8 @@ def test_source_authentication_stays_in_socket_header_not_process_command():
         _config(), socket_factory=lambda *_args, **_kwargs: source_socket
     )
     try:
-        assert DEFAULT_SOURCE_WRITE_TIMEOUT_SECONDS is None
-        assert source_socket.timeout is None
+        assert DEFAULT_SOURCE_WRITE_TIMEOUT_SECONDS == 10.0
+        assert source_socket.timeout == 10.0
         handshake = source_socket.sent[0]
         expected = base64.b64encode(
             b"source:private-source-secret"
@@ -101,7 +101,7 @@ def test_source_can_start_when_origin_defers_200_until_first_body_bytes():
     try:
         transport.send(b"encoded-audio")
         assert source_socket.sent[-1] == b"encoded-audio"
-        assert source_socket.timeout is None
+        assert source_socket.timeout == 10.0
     finally:
         transport.close()
 
@@ -118,17 +118,16 @@ def test_source_can_start_after_http_100_continue():
         transport.close()
 
 
-def test_established_source_has_no_application_write_deadline():
-    # Keep an authenticated source connection established through TinyIce
-    # backpressure; the peer/network owns closure and reconnection.
-    assert DEFAULT_SOURCE_WRITE_TIMEOUT_SECONDS is None
+def test_established_source_has_a_bounded_write_deadline():
+    # Allow temporary TinyIce backpressure while bounding a stuck sendall.
+    assert DEFAULT_SOURCE_WRITE_TIMEOUT_SECONDS == 10.0
 
     source_socket = FakeSocket()
     transport = IcecastSourceTransport(
         _config(), socket_factory=lambda *_args, **_kwargs: source_socket
     )
     try:
-        assert source_socket.timeout is None
+        assert source_socket.timeout == 10.0
         transport.send(b"programme-before-pause")
         transport.send(b"programme-after-pause")
         assert source_socket.sent[-1] == b"programme-after-pause"

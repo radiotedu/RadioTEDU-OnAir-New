@@ -29,6 +29,7 @@ _ICECAST_METADATA_REFRESH_SECONDS = 20.0
 _ICECAST_METADATA_BACKOFF_MAX_SECONDS = 300.0
 _OUTPUT_RECOVERY_DELAYS_SECONDS = (1.0, 2.0, 4.0, 8.0, 15.0, 30.0)
 _OUTPUT_MONITOR_RECHECK_SECONDS = 15.0
+_PRIMARY_OUTPUT_MONITOR_RECHECK_SECONDS = 60.0
 _DEFAULT_LIVE_AUDIO_SETTINGS = {
     "program_music_mode": "normal",
     "mic_gain": 1.0,
@@ -1475,13 +1476,83 @@ class StationRuntimeRegistry:
             return self._recover_station_unlocked(station_id, force=force)
 
     def recover_station_primary_output(self, station_id: int) -> dict:
-        """Run the long stale-source cleanup for one station's primary mount."""
+        """Reconnect one station's primary mount without interrupting its programme."""
         sid = int(station_id)
         with self._operation_lock(sid):
             runtime = self._runtimes.get(sid)
             if runtime is None:
                 return self.status(sid)
-            runtime.recover_primary_output()
+
+            now = time.monotonic()
+            with self._recovery_lock:
+                previous = dict(self._recovery_state.get(sid) or {})
+                if now < float(previous.get("next_attempt_monotonic") or 0.0):
+                    return self.status(sid)
+
+            if self._unverified_icecast_transport_is_flowing(sid, runtime):
+                with self._recovery_lock:
+                    self._recovery_state[sid] = {
+                        "state": "monitoring",
+                        "attempt_count": int(previous.get("attempt_count") or 0),
+                        "next_attempt_monotonic": (
+                            time.monotonic() + _PRIMARY_OUTPUT_MONITOR_RECHECK_SECONDS
+                        ),
+                        "error_code": "output_unverified",
+                        "message": (
+                            "Primary source writes are flowing; waiting for listener "
+                            "verification without reconnecting healthy output."
+                        ),
+                    }
+                return self.status(sid)
+
+            attempt_count = int(previous.get("attempt_count") or 0) + 1
+            with self._recovery_lock:
+                self._recovery_state[sid] = {
+                    "state": "recovering",
+                    "attempt_count": attempt_count,
+                    "next_attempt_monotonic": 0.0,
+                    "error_code": "",
+                    "message": "Reconnecting the stalled primary stream output.",
+                }
+
+            try:
+                runtime.recover_primary_output()
+            except Exception as exc:
+                delay = _OUTPUT_RECOVERY_DELAYS_SECONDS[
+                    min(attempt_count - 1, len(_OUTPUT_RECOVERY_DELAYS_SECONDS) - 1)
+                ]
+                error_code = self._recovery_error_code(exc)
+                with self._recovery_lock:
+                    self._recovery_state[sid] = {
+                        "state": "retry_wait",
+                        "attempt_count": attempt_count,
+                        "next_attempt_monotonic": time.monotonic() + delay,
+                        "error_code": error_code,
+                        "message": (
+                            "Primary output recovery is waiting to retry. "
+                            "Programme playout remains active."
+                        ),
+                    }
+                _log.warning(
+                    "Primary output recovery failed station_id=%s attempt=%s "
+                    "code=%s retry_seconds=%.1f",
+                    sid,
+                    attempt_count,
+                    error_code,
+                    delay,
+                )
+                return self.status(sid)
+
+            with self._recovery_lock:
+                self._recovery_state[sid] = {
+                    "state": "monitoring",
+                    "attempt_count": attempt_count,
+                    "next_attempt_monotonic": (
+                        time.monotonic() + _PRIMARY_OUTPUT_MONITOR_RECHECK_SECONDS
+                    ),
+                    "error_code": "",
+                    "message": "Primary source restarted; checking that audio reaches Icecast.",
+                }
             return self.status(sid)
 
     def _recover_station_unlocked(

@@ -9,9 +9,10 @@ class RuntimeSupervisor:
         status = self.runtime_registry.status(station_id)
         running = bool(status.get("running", False))
         branches = status.get("branch_health", {}) or {}
+        delivery = status.get("delivery_health", branches) or branches
         required = status.get("required_outputs", {}) or {}
-        icecast_ok = bool(branches.get("icecast", False))
-        local_ok = bool(branches.get("local", False))
+        icecast_ok = bool(delivery.get("icecast", branches.get("icecast", False)))
+        local_ok = bool(delivery.get("local", branches.get("local", False)))
         icecast_required = bool(required.get("icecast", True))
         local_required = bool(required.get("local", True))
 
@@ -25,6 +26,12 @@ class RuntimeSupervisor:
             return {"station_id": station_id, "action": action}
 
         if icecast_required and not icecast_ok:
+            recover_primary = getattr(
+                self.runtime_registry, "recover_station_primary_output", None
+            )
+            if callable(recover_primary):
+                recover_primary(station_id)
+                return {"station_id": station_id, "action": "recover_primary_output"}
             action = decide_recovery_action(component_error=True, recoverable=True)
             recover = getattr(self.runtime_registry, "recover_station", None)
             if callable(recover):

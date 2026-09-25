@@ -9,10 +9,11 @@ from typing import Callable
 from app.audio.gst_pipeline import StationPipelineConfig, resolve_stream_profile
 
 
-# Once authenticated, preserve the source connection through TinyIce
-# backpressure. Connect and handshake deadlines remain bounded; reconnect only
-# after the peer or network closes the established source socket.
-DEFAULT_SOURCE_WRITE_TIMEOUT_SECONDS = None
+# Preserve the authenticated source connection through brief TinyIce
+# backpressure, but bound a blocked sendall so a half-open TCP connection cannot
+# strand a mount indefinitely. The sink keeps accepted PCM queued and reconnects
+# the source after this deadline.
+DEFAULT_SOURCE_WRITE_TIMEOUT_SECONDS = 10.0
 SOURCE_HANDSHAKE_RESPONSE_GRACE_SECONDS = 2.0
 
 

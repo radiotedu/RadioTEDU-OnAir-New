@@ -39,10 +39,12 @@ the campaign's managed roots use the same `H:\RadioTEDU Songs` folders.
 
 ## Official play reports
 
-Windows Scheduled Task `RadioTEDU Official Music Usage Export` runs as SYSTEM at
-startup (two-minute delay) and every five minutes. It ignores overlapping runs,
-starts missed runs when the machine returns, and retries three times after a
-task failure.
+Windows Scheduled Task `RadioTEDU Official Music Usage Export` runs once daily
+at 00:45 local time. It verifies the complete hash chain and refreshes the
+all-time official reports, so it stays out of the frequent playout and database
+refresh path. Daily CSV mirrors continue to refresh during normal operation.
+The task ignores overlapping runs, starts missed runs when the machine returns,
+and retries three times after a task failure.
 
 Reports are stored in `H:\RadioTEDU Official Reports\Music Usage`:
 
