@@ -12,7 +12,6 @@ from logging.handlers import RotatingFileHandler
 from multiprocessing.connection import Client
 from pathlib import Path
 
-from app.db import init_db
 from app.engine.process_audio_bridge import ProcessAudioBridgeClient
 from app.engine.runtime_registry import StationRuntimeRegistry
 from app.engine.runtime_supervisor import RuntimeSupervisor
@@ -410,7 +409,9 @@ def run_station_worker_process() -> int:
             repeat=True,
         )
 
-    init_db()
+    # The backend initializes and migrates the database before it starts
+    # isolated workers. Re-running schema bootstrap in every station process
+    # makes worker startup contend with live playout writes.
     remote = None
     autonomous = os.getenv(
         "RADIOTEDU_STATION_WORKER_AUTONOMOUS", ""

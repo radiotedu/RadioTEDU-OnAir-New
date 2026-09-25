@@ -4376,6 +4376,86 @@ def _sync_station_library_folder_with_connection(
     target_track_ids: list[int] = []
     default_genre = str(payload.default_genre or "").strip()
     default_language = str(payload.default_language or "").strip()
+    prefix = "library" if kind == "music" else f"{kind}_library"
+    profile_values = {
+        "music_library_folder" if kind == "music" else f"{kind}_library_folder": str(base),
+        f"{prefix}_management_mode": mode,
+        f"{prefix}_recursive": "true" if bool(payload.recursive) else "false",
+        f"{prefix}_profile_label": str(payload.profile_label or "").strip(),
+        f"{prefix}_default_genre": default_genre,
+        f"{prefix}_default_language": default_language,
+        f"{prefix}_skip_unplayable": (
+            "true" if bool(payload.skip_unplayable) else "false"
+        ),
+    }
+
+    # Background profiles rescan on a timer even when their inventory is
+    # unchanged. Avoid taking BEGIN IMMEDIATE and rewriting every track in that
+    # common case; those needless writes were starving the station schedulers.
+    if bool(payload.incremental) and not probe_candidates:
+        expected_paths = set(candidates_by_path)
+        active_paths = {
+            _canonical_library_path(str(row["file_path"] or ""))
+            for row in existing_rows
+            if bool(row["is_active"]) and str(row["file_path"] or "").strip()
+        }
+        all_candidates_active = all(
+            len(existing_by_path.get(path_key) or ()) == 1
+            and bool((existing_by_path[path_key] or [])[0]["is_active"])
+            for path_key in expected_paths
+        )
+        inventory_matches = (
+            active_paths == expected_paths
+            if mode == "replace"
+            else expected_paths.issubset(active_paths)
+        )
+        current_settings = {
+            str(row["key"]): str(row["value"] or "")
+            for row in conn.execute(
+                "SELECT key, value FROM station_settings WHERE station_id=?",
+                (sid,),
+            ).fetchall()
+        }
+        profile_matches = all(
+            current_settings.get(key) == value
+            for key, value in profile_values.items()
+        )
+        status_values = {f"{prefix}_active_files": str(len(active_paths))}
+        if kind == "jingle" and str(
+            current_settings.get("sweeper_folder_autofollow", "")
+        ).strip().lower() in {"1", "true", "yes", "on"}:
+            status_values["sweeper_enabled"] = "true" if active_paths else "false"
+        status_matches = all(
+            current_settings.get(key) == value
+            for key, value in status_values.items()
+        )
+        if all_candidates_active and inventory_matches and profile_matches and status_matches:
+            return {
+                "ok": True,
+                "verified": True,
+                "no_op": True,
+                "station_id": sid,
+                "station_name": str(station["name"] or f"Station {sid}"),
+                "folder": str(base),
+                "mode": mode,
+                "track_type": kind,
+                "profile_label": str(payload.profile_label or "").strip(),
+                "expected_files": len(expected_paths),
+                "active_files": len(active_paths),
+                "added": 0,
+                "reactivated": 0,
+                "retained": len(expected_paths),
+                "deactivated": 0,
+                "duplicate_rows_deactivated": 0,
+                "metadata_fallbacks": 0,
+                "metadata_reused": len(metadata_by_path),
+                "metadata_probed": 0,
+                "invalid_files_skipped": 0,
+                "invalid_files": [],
+                "pending_queue_items_removed": 0,
+                "program_queue_items_removed": 0,
+                "pending_schedules_removed": 0,
+            }
 
     try:
         # A watcher profile can become stale while a large folder is being
@@ -4509,18 +4589,6 @@ def _sync_station_library_folder_with_connection(
                     schedules_removed = int(cursor.rowcount or 0)
                     _reindex_pending_queue(conn, sid)
 
-        prefix = "library" if kind == "music" else f"{kind}_library"
-        profile_values = {
-            "music_library_folder" if kind == "music" else f"{kind}_library_folder": str(base),
-            f"{prefix}_management_mode": mode,
-            f"{prefix}_recursive": "true" if bool(payload.recursive) else "false",
-            f"{prefix}_profile_label": str(payload.profile_label or "").strip(),
-            f"{prefix}_default_genre": default_genre,
-            f"{prefix}_default_language": default_language,
-            f"{prefix}_skip_unplayable": (
-                "true" if bool(payload.skip_unplayable) else "false"
-            ),
-        }
         for key, value in profile_values.items():
             conn.execute(
                 "INSERT INTO station_settings (station_id, key, value, updated_at) "
@@ -5435,7 +5503,6 @@ def ads_console(station_id: int, limit: int = 50):
 
 @router.get("/api/ad-break-sets")
 def list_ad_break_sets(station_id: int):
-    init_db()
     conn = get_connection()
     try:
         repo = AdCampaignRepository(conn)

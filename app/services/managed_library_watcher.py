@@ -155,6 +155,10 @@ def _default_sync_callback(profile: ManagedLibraryProfile) -> dict:
             allow_empty=True,
         )
     )
+    if bool(result.get("no_op")):
+        # An unchanged rescan did no DB writes, so the existing sweeper queue
+        # already represents the same inventory and does not need rewriting.
+        return {**result, "queue_reconciled": True}
     # Replace-managed folders are authoritative. A deletion must disappear
     # from future playout immediately, and changed jingle/ad inventories must
     # be re-spaced against the current three-song cadence.

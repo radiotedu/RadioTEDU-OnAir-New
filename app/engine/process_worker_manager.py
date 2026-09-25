@@ -15,7 +15,7 @@ from multiprocessing.connection import Listener
 from pathlib import Path
 
 from app.config import get_data_root, get_db_path, get_user_config_root
-from app.db import get_connection, init_db
+from app.db import get_connection
 from app.engine.continuity import resolve_station_fallback_uri
 from app.engine.process_audio_bridge import ProcessAudioBridgeHost
 from app.engine.worker_loop import _failure_backoff_seconds
@@ -703,7 +703,8 @@ class ProcessIsolatedStationWorkerManager:
     ) -> dict:
         station_id = int(station_id)
         safe_interval = max(0.1, float(interval_sec))
-        init_db()
+        # Application startup owns database schema initialization. A station
+        # start only reads its fallback settings and must not run migrations.
         conn = get_connection()
         try:
             resolved_fallback_uri = resolve_station_fallback_uri(

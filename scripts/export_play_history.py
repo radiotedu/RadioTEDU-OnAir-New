@@ -41,10 +41,12 @@ def main() -> int:
 
     # Imports happen after environment selection because app.config resolves
     # the database path at import time.
-    from app.db import get_connection, init_db
+    from app.db import get_connection
     from app.services.music_usage import MusicUsageService
 
-    init_db()
+    # This is a read/export job, not an application bootstrap. Running schema
+    # initialization here races station workers and managed-folder writers on
+    # the live SQLite file; the database is initialized by the service itself.
     conn = get_connection()
     try:
         result = MusicUsageService(conn).ensure_daily_exports()
