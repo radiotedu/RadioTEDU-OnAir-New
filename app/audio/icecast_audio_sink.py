@@ -183,7 +183,7 @@ class IcecastAudioSink:
         reconnect_failure_threshold: int = 12,
         source_factory: Callable[[StationPipelineConfig], object] = IcecastSourceTransport,
         initial_connect_spread_sec: float = 0.0,
-        drop_on_backpressure: bool = True,
+        drop_on_backpressure: bool = False,
     ) -> None:
         self.ffmpeg_bin = ffmpeg_bin
         self._spawn_process = spawn_process
@@ -202,10 +202,11 @@ class IcecastAudioSink:
         self._initial_connect_spread_sec = max(
             0.0, float(initial_connect_spread_sec)
         )
-        # Legacy/unit callers can retain the bounded live-resync policy. The
-        # real station runtime disables destructive drops so an encoder stall
-        # pauses the producer instead of jumping to a later PCM timestamp.
-        self._drop_on_backpressure = bool(drop_on_backpressure)
+        # Keep the keyword for compatibility with older callers, but never
+        # discard programme PCM. A full bounded queue applies backpressure to
+        # the producer until the source writer catches up or this sink stops.
+        del drop_on_backpressure
+        self._drop_on_backpressure = False
         self._source = None
         self._connector_thread = None
         self._network_failed = False
@@ -308,54 +309,31 @@ class IcecastAudioSink:
         )
 
     def write_pcm(self, chunk: bytes) -> bool:
-        """Queue PCM without allowing a blocked network encoder to stall playout."""
+        """Queue PCM losslessly, waiting for bounded space during backpressure."""
 
-        if not chunk or not self.accepts_input():
+        if not chunk:
             return False
         payload = bytes(chunk)
-        try:
-            self._pcm_queue.put_nowait(payload)
-        except queue.Full:
-            if not self._drop_on_backpressure:
-                try:
-                    self._pcm_queue.put(payload, timeout=0.05)
-                    return True
-                except queue.Full:
-                    with self._writer_lock:
-                        self._writer_backpressured = True
-                        if self._writer_backpressure_started_monotonic is None:
-                            self._writer_backpressure_started_monotonic = time.monotonic()
-                        self._writer_dropped_chunks += 1
-                    # Keep the already scheduled programme reserve intact.
-                    # The caller will retry on the next PCM frame after the
-                    # encoder writer makes room.
-                    return False
-            # This mount is already far behind. Resync only this failed branch
-            # to a byte-measured three-second live window; chunk counts vary by
-            # 4x on Windows and previously caused unpredictable song cuts.
-            dropped = 0
-            queued_bytes = self._queued_pcm_bytes()
-            while (
-                queued_bytes > _PCM_LIVE_RESYNC_BYTES
-                or self._pcm_queue.full()
-            ):
-                try:
-                    stale = self._pcm_queue.get_nowait()
-                    queued_bytes -= len(stale)
-                    dropped += 1
-                except queue.Empty:
-                    break
+        while not self._writer_stop.is_set():
+            if not self.accepts_input():
+                # The connector owns source retries. Hold the current frame
+                # while it reconnects instead of advancing to a later song.
+                self._writer_stop.wait(0.01)
+                continue
+            if self._pcm_queue.full():
+                with self._writer_lock:
+                    self._writer_backpressured = True
+                    if self._writer_backpressure_started_monotonic is None:
+                        self._writer_backpressure_started_monotonic = time.monotonic()
             try:
-                self._pcm_queue.put_nowait(payload)
+                self._pcm_queue.put(payload, timeout=0.05)
+                return True
             except queue.Full:
-                dropped += 1
-            with self._writer_lock:
-                self._writer_backpressured = True
-                if self._writer_backpressure_started_monotonic is None:
-                    self._writer_backpressure_started_monotonic = time.monotonic()
-                self._writer_dropped_chunks += max(1, dropped)
-            return False
-        return True
+                with self._writer_lock:
+                    self._writer_backpressured = True
+                    if self._writer_backpressure_started_monotonic is None:
+                        self._writer_backpressure_started_monotonic = time.monotonic()
+        return False
 
     def health_snapshot(self) -> dict:
         queued_pcm_bytes = self._queued_pcm_bytes()
@@ -696,13 +674,14 @@ class IcecastAudioSink:
                     with self._writer_lock:
                         self._writer_failed = False
                         self._last_write_monotonic = time.monotonic()
-                        clear_threshold = (
-                            _PCM_LIVE_RESYNC_CHUNKS
-                            if self._drop_on_backpressure
-                            else max(
-                                _PCM_LIVE_RESYNC_CHUNKS,
-                                self._pcm_queue_capacity_chunks // 2,
-                            )
+                        # The normal playout reserve stays several seconds
+                        # deep. Clear a previous pressure warning once the
+                        # queue is below half capacity, not only when it drains
+                        # below two seconds (which it may never do in steady
+                        # state).
+                        clear_threshold = max(
+                            _PCM_LIVE_RESYNC_CHUNKS,
+                            self._pcm_queue_capacity_chunks // 2,
                         )
                         if not silence and self._pcm_queue.qsize() < clear_threshold:
                             self._writer_backpressured = False
@@ -791,10 +770,9 @@ class IcecastAudioSink:
                     if self._writer_stop.is_set():
                         source.close()
                         return
-                    # A reconnect creates a fresh public stream clock. Keep
-                    # only the newest live reserve so the mount returns near
-                    # the current programme instead of staying far behind.
-                    self._trim_pcm_queue_to_latest_bytes(_PCM_LIVE_RESYNC_BYTES)
+                    # Preserve every already-accepted PCM frame across source
+                    # reconnects. The bounded queue backpressures the producer
+                    # if the origin remains unavailable for an extended time.
                     command = build_ffmpeg_encoded_sink_cmd(
                         effective_cfg, self.ffmpeg_bin
                     )

@@ -930,7 +930,7 @@ class StationRuntime:
                     # The connector retries actual source/encoder failures.
                     mount_probe=None,
                     initial_connect_spread_sec=30.0,
-                    drop_on_backpressure=True,
+                    drop_on_backpressure=False,
                 )
         try:
             self._icecast_sink.ensure_started(cfg)
@@ -990,7 +990,7 @@ class StationRuntime:
                             self.ffmpeg_bin,
                             self._spawn_process,
                             initial_connect_spread_sec=30.0,
-                            drop_on_backpressure=True,
+                            drop_on_backpressure=False,
                         )
                     self._extra_icecast_sinks[branch] = sink
                 try:

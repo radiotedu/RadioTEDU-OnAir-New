@@ -67,29 +67,26 @@ def test_audio_watchdog_installer_is_independent_and_fail_closed():
     assert "Start-Sleep -Seconds 30" in watchdog
     assert "Test-RepairCooldown" in watchdog
     assert "Get-LocalTransportState" in watchdog
-    assert "Get-RepairableStationIds" in watchdog
-    assert "Update-PublicFailureState" in watchdog
-    assert "PublicFailureEscalationRuns = 3" in watchdog
     assert "force_station_ids = @($fallbackStationIds)" in watchdog
     assert "Invoke-StationOutputRecovery" in watchdog
-    assert 'method = "recover_station"' in watchdog
-    assert "Remove-PublicAudioProbeListener" in watchdog
-    assert "RadioTEDU-AudioWatch/" in watchdog
+    assert '"recover_station"' in watchdog
+    assert '"recover_station_primary_output"' in watchdog
     assert "Start-Sleep -Seconds 45" in watchdog
-    assert 'Get-OptionalProperty $heartbeat "transport_healthy"' in watchdog
-    assert "Test-OriginResponsive" in watchdog
-    assert 'Send-Report "origin_unavailable"' in watchdog
-    assert "local source and AI restarts suppressed" in watchdog
-    assert '"upstream_degraded"' in watchdog
-    assert "healthy local sources were not restarted" in watchdog
+    assert 'Get-OptionalProperty $mount "network_failed"' in watchdog
+    assert 'Get-OptionalProperty $mount "last_network_write_age_seconds"' in watchdog
     assert "duplicate launch refused" in watchdog
-    assert "station_ids = @($repairableFailed)" in watchdog
-    assert "volumedetect" in watchdog
-    assert watchdog.index('"-i",') < watchdog.index('"-t", "8"')
-    assert 'ListenerBase = "http://stream.radiotedu.com:11154"' in watchdog
-    assert '"-re", "-stats_period", "8"' in watchdog
-    assert "$mediaSeconds -ge 7.5" in watchdog
-    assert 'Url = "$listenerRoot/rock"' in watchdog
+    assert "station_ids = @($fallbackStationIds)" in watchdog
+    flow_start = watchdog.index("try {\n    Invoke-PendingBackendSourceReload")
+    flow_end = watchdog.index("\ncatch {\n", flow_start)
+    active_flow = watchdog[flow_start:flow_end]
+    assert 'Invoke-WatchdogApi -Method GET -Path "/api/watchdog/status"' in active_flow
+    assert "Get-LocalTransportState" in active_flow
+    assert "Local source writers" in active_flow
+    assert "Test-OriginResponsive" not in active_flow
+    assert "Test-SelectedStreams" not in active_flow
+    assert "Test-SelectedAuxiliaryStreams" not in active_flow
+    assert "Start-PublicAudioProbe" not in active_flow
+    assert "volumedetect" not in active_flow
 
 
 def test_one_shot_installer_preserves_watchdog_boot_recovery():

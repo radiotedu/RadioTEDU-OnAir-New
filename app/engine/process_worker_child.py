@@ -253,9 +253,35 @@ def _transport_is_healthy(runtime_status: dict | None) -> bool:
             not bool(mount.get("process_running"))
             or not bool(mount.get("writer_running"))
             or bool(mount.get("writer_failed"))
-            or bool(mount.get("writer_backpressured"))
             or write_age > 5.0
         ):
+            return False
+        if bool(mount.get("network_failed")):
+            return False
+        network_write_age = mount.get("last_network_write_age_seconds")
+        if network_write_age is not None:
+            try:
+                if float(network_write_age) > 5.0:
+                    return False
+            except (TypeError, ValueError):
+                return False
+        # Backpressure can remain latched while a healthy writer keeps its
+        # normal several-second reserve. Treat it as a fault only when the
+        # bounded queue is actually saturated for a sustained interval.
+        try:
+            queue_age = float(mount.get("writer_backpressure_age_seconds") or 0.0)
+            queue_seconds = float(mount.get("queued_pcm_seconds") or 0.0)
+            queue_capacity = float(mount.get("pcm_queue_capacity_chunks") or 0.0)
+        except (TypeError, ValueError):
+            return False
+        queue_capacity_seconds = queue_capacity * 4096.0 / (48000.0 * 2.0 * 2.0)
+        sustained_saturation = bool(
+            mount.get("writer_backpressured")
+            and queue_age >= 30.0
+            and queue_capacity_seconds > 0.0
+            and queue_seconds >= queue_capacity_seconds * 0.9
+        )
+        if sustained_saturation:
             return False
     if bool(required.get("local")) and not bool(status.get("local_sink_running")):
         return False

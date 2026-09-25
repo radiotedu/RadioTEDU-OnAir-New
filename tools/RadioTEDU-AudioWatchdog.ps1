@@ -46,9 +46,6 @@ $mounts = @(
 # streaming PC intentionally owns and monitors the 15 configured public mounts.
 $auxiliaryMounts = @()
 
-if (-not (Test-Path -LiteralPath $FFmpegPath -PathType Leaf)) {
-    throw "Bundled FFmpeg is missing: $FFmpegPath"
-}
 try {
     New-Item -ItemType Directory -Force -Path $LogRoot | Out-Null
 }
@@ -789,135 +786,68 @@ try {
     Invoke-PendingBackendSourceReload
     Start-BackendIfNeeded
     $script:WatchdogToken = Get-WatchdogToken
-    if (-not (Test-OriginResponsive)) {
-        Write-WatchdogLog "TinyIce origin did not return HTTP; waiting 30 seconds for confirmation."
-        Start-Sleep -Seconds 30
-        if (-not (Test-OriginResponsive)) {
-            Send-Report "origin_unavailable" (
-                "TinyIce accepted no HTTP response; all local source restarts were suppressed."
-            ) @() $true
-            Write-WatchdogLog (
-                "Origin unavailable after two checks; local source and AI restarts suppressed."
-            )
-            exit 20
-        }
-    }
     $firstSnapshot = Invoke-WatchdogApi -Method GET -Path "/api/watchdog/status"
     $firstProfilesHealthy = Test-ManagedProfilesHealthy $firstSnapshot
-    $firstAudio = Test-SelectedStreams @()
-    $firstAuxiliaryAudio = Test-SelectedAuxiliaryStreams @()
-    $firstFailed = @($firstAudio | Where-Object { -not ($_.decoded -and $_.audible) } | ForEach-Object { [int]$_.station_id } | Sort-Object -Unique)
-    $firstAuxiliaryFailed = @($firstAuxiliaryAudio | Where-Object { -not ($_.decoded -and $_.audible) } | ForEach-Object { [int]$_.station_id })
-    if ($firstFailed.Count -eq 0 -and $firstAuxiliaryFailed.Count -eq 0 -and $firstProfilesHealthy) {
-        Update-PublicFailureState @() | Out-Null
-        Send-Report "ok" "All public mounts decoded as audible and managed profiles were healthy." @() $true
-        Write-WatchdogLog "OK: public mounts audible; managed profiles healthy."
+    $stationIds = @(
+        $firstSnapshot.stations |
+            ForEach-Object { [int](Get-OptionalProperty $_ "station_id" 0) } |
+            Where-Object { $_ -gt 0 } |
+            Sort-Object -Unique
+    )
+    if ($stationIds.Count -eq 0) {
+        throw "Watchdog status did not include any station runtimes."
+    }
+    $firstFailed = @(
+        $stationIds | Where-Object {
+            -not [bool](Get-LocalTransportState ([int]$_)).healthy
+        }
+    )
+    if ($firstFailed.Count -eq 0 -and $firstProfilesHealthy) {
+        Clear-PublicFailureState @($mounts | ForEach-Object { [int]$_.StationId } | Sort-Object -Unique)
+        Send-Report "ok" "Local source writers and managed profiles are healthy; no listener probes were run." @() $true
+        Write-WatchdogLog "OK: local source writers and managed profiles healthy; public listener probes skipped."
         exit 0
     }
 
     Write-WatchdogLog (
-        "First check failed stations={0} auxiliary={1} managed_profiles_ok={2}; waiting 30 seconds for confirmation." -f
-        ($firstFailed -join ","), ($firstAuxiliaryFailed -join ","), $firstProfilesHealthy
+        "First local check failed stations={0} managed_profiles_ok={1}; waiting 30 seconds for confirmation." -f
+        ($firstFailed -join ","), $firstProfilesHealthy
     )
     Start-Sleep -Seconds 30
     $secondSnapshot = Invoke-WatchdogApi -Method GET -Path "/api/watchdog/status"
     $secondProfilesHealthy = Test-ManagedProfilesHealthy $secondSnapshot
-    $secondAudio = Test-SelectedStreams $firstFailed
-    $secondAuxiliaryAudio = Test-SelectedAuxiliaryStreams $firstAuxiliaryFailed
-    $secondFailed = @($secondAudio | Where-Object { -not ($_.decoded -and $_.audible) } | ForEach-Object { [int]$_.station_id } | Sort-Object -Unique)
-    $escalatedPublicFailures = @(Update-PublicFailureState $secondFailed)
-    $secondAuxiliaryFailed = @($secondAuxiliaryAudio | Where-Object { -not ($_.decoded -and $_.audible) } | ForEach-Object { [int]$_.station_id })
-    $auxiliaryRecovery = Repair-AuxiliaryStreams $secondAuxiliaryFailed
-    $remainingAuxiliaryFailed = @($auxiliaryRecovery.failed_ids)
+    $stationIds = @(
+        $secondSnapshot.stations |
+            ForEach-Object { [int](Get-OptionalProperty $_ "station_id" 0) } |
+            Where-Object { $_ -gt 0 } |
+            Sort-Object -Unique
+    )
+    if ($stationIds.Count -eq 0) {
+        throw "Second watchdog status did not include any station runtimes."
+    }
+    $secondFailed = @(
+        $stationIds | Where-Object {
+            -not [bool](Get-LocalTransportState ([int]$_)).healthy
+        }
+    )
     $profileRepair = -not $secondProfilesHealthy
     if ($secondFailed.Count -eq 0 -and -not $profileRepair) {
-        if ($remainingAuxiliaryFailed.Count -gt 0) {
-            Send-Report "failed" "AI stream recovery did not restore every auxiliary mount." @() $true
-            Write-WatchdogLog (
-                "AI stream recovery unresolved ids=" + ($remainingAuxiliaryFailed -join ",")
-            )
-            exit 24
-        }
-        $status = if ([bool]$auxiliaryRecovery.repaired) { "repaired" } else { "transient" }
-        $message = if ([bool]$auxiliaryRecovery.repaired) {
-            "Confirmed AI stream failure was repaired and verified."
-        }
-        else {
-            "The second check passed; no repair was performed."
-        }
-        Send-Report $status $message @() $true
+        Clear-PublicFailureState @($mounts | ForEach-Object { [int]$_.StationId } | Sort-Object -Unique)
+        $message = "Local source health recovered on confirmation; no repair was performed."
+        Send-Report "transient" $message @() $true
         Write-WatchdogLog $message
         exit 0
     }
-    # Public volume probes are valuable evidence, but their FFmpeg decoder can
-    # time out transiently on a busy origin. The station sink now probes mount
-    # presence and re-registers its own source. Restart a whole worker only when
-    # that local transport evidence also reports unhealthy.
-    $locallyUnhealthyFailed = @(Get-RepairableStationIds $secondFailed)
-    $publicOnlyFailed = @(
-        $secondFailed | Where-Object { $locallyUnhealthyFailed -notcontains [int]$_ }
-    )
-    # Repeating a failed listener GET does not turn a flowing source into a
-    # failed writer. Keep reporting the origin fault without resetting songs
-    # or healthy sibling mounts; actual local failures remain repairable.
-    $escalatedPublicOnlyFailed = @()
-    $suppressedPublicOnlyFailed = @(
-        $publicOnlyFailed | Where-Object { $escalatedPublicOnlyFailed -notcontains [int]$_ }
-    )
-    $repairableFailed = @(
-        @($locallyUnhealthyFailed) + @($escalatedPublicOnlyFailed) |
-            Sort-Object -Unique
-    )
-    $primaryOnlyRepairIds = @()
-    foreach ($stationId in $repairableFailed) {
-        if ($locallyUnhealthyFailed -contains [int]$stationId) {
-            continue
-        }
-        $stationMounts = @($mounts | Where-Object {
-            [int]$_.StationId -eq [int]$stationId
-        })
-        $failedRows = @($secondAudio | Where-Object {
-            [int]$_.station_id -eq [int]$stationId -and
-            -not ($_.decoded -and $_.audible)
-        })
-        if ($stationMounts.Count -gt 0 -and $failedRows.Count -eq 1) {
-            $primaryMount = ([uri]$stationMounts[0].Url).AbsolutePath
-            if ([string]$failedRows[0].mount -eq [string]$primaryMount) {
-                $primaryOnlyRepairIds += [int]$stationId
-            }
-        }
-    }
-    if ($repairableFailed.Count -eq 0 -and -not $profileRepair) {
-        Send-Report "transient" "Public listener failure disagrees with an active source; worker restart suppressed." $publicOnlyFailed $true
-        Write-WatchdogLog (
-            "Public-only probe disagreement stations={0}; preserving active source connections." -f
-            ($publicOnlyFailed -join ",")
-        )
-        exit 0
-    }
+    $repairableFailed = @($secondFailed | Sort-Object -Unique)
     if (Test-RepairCooldown) {
-        Send-Report "cooldown" "Confirmed public audio failure, but the 15-minute successful-repair cooldown prevented a loop." $repairableFailed (-not $profileRepair)
-        Write-WatchdogLog "Confirmed public audio failure suppressed by 15-minute successful-repair cooldown."
+        Send-Report "cooldown" "Confirmed local source failure; the 15-minute successful-repair cooldown prevented a loop." $repairableFailed (-not $profileRepair)
+        Write-WatchdogLog "Confirmed local source failure suppressed by the successful-repair cooldown."
         exit 21
     }
 
-    if ($suppressedPublicOnlyFailed.Count -gt 0) {
-        Write-WatchdogLog (
-            "Public-only probe disagreement stations={0}; healthy workers were preserved." -f
-            ($suppressedPublicOnlyFailed -join ",")
-        )
-    }
-    if ($escalatedPublicOnlyFailed.Count -gt 0) {
-        Write-WatchdogLog (
-            "Sustained public failure escalated stations={0}; forcing affected station repair." -f
-            ($escalatedPublicOnlyFailed -join ",")
-        )
-    }
-
-    # Rebuild only the failed station's output branches first. This preserves
-    # scheduler/song position while re-registering stale Icecast sources. The
-    # backend repair API remains the bounded fallback if a worker command fails.
-    $outputRecovery = Invoke-StationOutputRecovery $repairableFailed $primaryOnlyRepairIds
+    # Repair only source writers whose local heartbeat remained unhealthy in
+    # both snapshots. Listener GET/decoder failures never restart a station.
+    $outputRecovery = Invoke-StationOutputRecovery $repairableFailed
     $fallbackStationIds = @($outputRecovery.failed_ids)
     $repair = Invoke-WatchdogApi -Method POST -Path "/api/watchdog/repair" -Body @{
         station_ids = @($fallbackStationIds)
@@ -930,33 +860,40 @@ try {
     $restartedCount = @($outputRecovery.recovered).Count + @($repair.restarted).Count
     $deferredCount = @($repair.deferred).Count
     if ($restartedCount -eq 0 -and $deferredCount -gt 0 -and -not $profileRepair) {
-        Send-Report "transient" "Affected station repair was deferred by the backend; public verification remains failed." $repairableFailed $true
-        Write-WatchdogLog "Healthy source transport recovered before repair; worker restart suppressed."
+        Send-Report "transient" "Affected source recovered before repair; worker restart was suppressed." @() $true
+        Write-WatchdogLog "Source transport recovered before repair; worker restart suppressed."
         exit 0
     }
-    # Output recovery intentionally staggers mount reconnects by up to 30 s to
-    # protect the small origin from a reconnect storm. Verify only after that
-    # window plus encoder warm-up has elapsed.
+    # Output recovery staggers reconnects to protect the origin. Verify against
+    # local source-writer timestamps after that window plus encoder warm-up.
     Start-Sleep -Seconds 45
     $finalSnapshot = Invoke-WatchdogApi -Method GET -Path "/api/watchdog/status"
     $finalProfilesHealthy = Test-ManagedProfilesHealthy $finalSnapshot
-    $finalAudio = Test-SelectedStreams $repairableFailed
-    $finalFailed = @($finalAudio | Where-Object { -not ($_.decoded -and $_.audible) } | ForEach-Object { [int]$_.station_id } | Sort-Object -Unique)
-    if ($finalFailed.Count -gt 0 -or $remainingAuxiliaryFailed.Count -gt 0 -or -not $finalProfilesHealthy) {
+    $finalStationIds = @(
+        $finalSnapshot.stations |
+            ForEach-Object { [int](Get-OptionalProperty $_ "station_id" 0) } |
+            Where-Object { $_ -gt 0 } |
+            Sort-Object -Unique
+    )
+    $finalFailed = @(
+        $finalStationIds | Where-Object {
+            -not [bool](Get-LocalTransportState ([int]$_)).healthy
+        }
+    )
+    if ($finalFailed.Count -gt 0 -or -not $finalProfilesHealthy) {
         Mark-PublicRepairFailed $finalFailed
-        Send-Report "failed" "Repair completed but final verification still failed." $finalFailed $finalProfilesHealthy
+        Send-Report "failed" "Repair completed but local source verification still failed." $finalFailed $finalProfilesHealthy
         Write-WatchdogLog (
-            "Repair final verification failed stations=" + ($finalFailed -join ",") +
-            " auxiliary=" + ($remainingAuxiliaryFailed -join ",")
+            "Repair final local verification failed stations=" + ($finalFailed -join ",")
         )
         exit 22
     }
-    # Only successful repairs enter cooldown.  A failed final verification must
-    # remain eligible for another attempt on the next scheduled run.
+    # Only successful repairs enter cooldown. A failed final verification stays
+    # eligible for a later attempt, while healthy streams remain untouched.
     Save-RepairState ("audio={0};profiles={1}" -f ($repairableFailed -join ","), $profileRepair)
-    Clear-PublicFailureState $repairableFailed
-    Send-Report "repaired" "Confirmed failures were repaired and final verification passed." @() $true
-    Write-WatchdogLog "Repair and final verification passed."
+    Clear-PublicFailureState @($mounts | ForEach-Object { [int]$_.StationId } | Sort-Object -Unique)
+    Send-Report "repaired" "Confirmed local source failures were repaired and verified." @() $true
+    Write-WatchdogLog "Local source repair and final verification passed."
     exit 0
 }
 catch {

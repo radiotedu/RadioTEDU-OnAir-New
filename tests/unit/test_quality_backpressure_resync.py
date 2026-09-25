@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import queue
+import threading
 import time
 import unittest
 from types import SimpleNamespace
@@ -94,9 +95,11 @@ class QualityBackpressureResyncTests(unittest.TestCase):
         sink._writer_failed = True
         self.assertFalse(sink.is_running())
 
-    def test_full_branch_queue_resyncs_without_blocking_sibling_fanout(self):
+    def test_full_branch_queue_waits_for_space_without_dropping_pcm(self):
         sink = IcecastAudioSink("ffmpeg", lambda *_args, **_kwargs: None)
         sink._process = _Process()
+        sink._connector_thread = SimpleNamespace(is_alive=lambda: True)
+        sink._writer_stop.clear()
         old_chunks = 0
         while True:
             try:
@@ -105,23 +108,29 @@ class QualityBackpressureResyncTests(unittest.TestCase):
             except queue.Full:
                 break
 
-        started = time.monotonic()
-        accepted = sink.write_pcm(b"latest-program-clock")
-        elapsed = time.monotonic() - started
-
-        self.assertFalse(accepted)
-        self.assertLess(elapsed, 0.05)
+        result = []
+        writer = threading.Thread(
+            target=lambda: result.append(sink.write_pcm(b"latest-program-clock"))
+        )
+        writer.start()
+        time.sleep(0.05)
+        self.assertTrue(writer.is_alive())
+        self.assertEqual(sink.health_snapshot()["dropped_pcm_chunks"], 0)
+        sink._pcm_queue.get_nowait()
+        writer.join(timeout=1.0)
+        self.assertFalse(writer.is_alive())
+        self.assertEqual(result, [True])
         retained = []
         while not sink._pcm_queue.empty():
             retained.append(sink._pcm_queue.get_nowait())
-        self.assertEqual(len(retained), 96)
+        self.assertEqual(len(retained), old_chunks)
         self.assertEqual(retained[-1], b"latest-program-clock")
         self.assertNotEqual(retained[0], b"stale-0")
         snapshot = sink.health_snapshot()
         self.assertTrue(snapshot["writer_backpressured"])
         self.assertIsNotNone(snapshot["writer_backpressure_age_seconds"])
         self.assertEqual(snapshot["pcm_queue_capacity_chunks"], old_chunks)
-        self.assertEqual(snapshot["dropped_pcm_chunks"], old_chunks - 95)
+        self.assertEqual(snapshot["dropped_pcm_chunks"], 0)
 
     def test_source_retries_do_not_exhaust_after_backoff_sequence(self):
         attempts = []
@@ -142,6 +151,8 @@ class QualityBackpressureResyncTests(unittest.TestCase):
             icecast_port=8000,
             icecast_mount="/lofi",
             icecast_password="",
+            stream_codec_profile="",
+            stream_bitrate_kbps=192,
         )
 
         sink._start_connector_worker(cfg)

@@ -26,26 +26,29 @@ def _runtime(heartbeat: dict) -> dict:
     return dict(heartbeat.get("runtime_status") or {})
 
 
-def _flac_branch_healthy(runtime: dict) -> bool:
-    branches = dict(runtime.get("branch_health") or {})
-    return any(
-        bool(value) and str(branch).casefold().endswith("-flac")
-        for branch, value in branches.items()
-    )
-
-
 def _healthy(heartbeat: dict) -> bool:
     runtime = _runtime(heartbeat)
     health = dict(runtime.get("icecast_mount_health") or {})
     branches = dict(runtime.get("branch_health") or {})
+    pcm_age = runtime.get("program_pcm_age_seconds")
     return bool(
         heartbeat.get("running")
         and runtime.get("running")
+        and runtime.get("program_running")
+        and pcm_age is not None
+        and float(pcm_age) <= 5.0
         and runtime.get("output_feed_active")
         and not runtime.get("program_pcm_stalled")
         and health.get("mount_healthy")
+        and health.get("process_running")
+        and health.get("writer_running")
+        and not health.get("writer_failed")
+        and not health.get("network_failed")
+        and health.get("last_write_age_seconds") is not None
+        and float(health["last_write_age_seconds"]) <= 5.0
+        and health.get("last_network_write_age_seconds") is not None
+        and float(health["last_network_write_age_seconds"]) <= 5.0
         and branches.get("icecast")
-        and _flac_branch_healthy(runtime)
     )
 
 
@@ -86,9 +89,11 @@ def _backup_state(station_ids: tuple[int, ...]) -> Path:
     destination = BACKUP_ROOT / f"{stamp}-rolling-worker-reload"
     destination.mkdir(parents=True, exist_ok=False)
     for station_id in station_ids:
+        heartbeat = _read_heartbeat(station_id)
+        generation = int(heartbeat.get("generation") or 0)
         for source in (
             _heartbeat_path(station_id),
-            STATE_ROOT / f"station-{station_id}-g1.json",
+            STATE_ROOT / f"station-{station_id}-g{generation}.json",
         ):
             if source.is_file():
                 shutil.copy2(source, destination / source.name)
@@ -184,9 +189,10 @@ def main() -> int:
         int(path.name.split(".", 1)[0].split("-")[1])
         for path in STATE_ROOT.glob("station-*.heartbeat.json")
     }
-    if live_files != set(EXPECTED_STATIONS):
+    missing_live_files = set(EXPECTED_STATIONS) - live_files
+    if missing_live_files:
         raise RuntimeError(
-            f"refusing rolling reload: expected live stations {EXPECTED_STATIONS}, found {sorted(live_files)}"
+            f"refusing rolling reload: protected stations are missing {sorted(missing_live_files)}; found {sorted(live_files)}"
         )
     for station_id in station_ids:
         if not _healthy(_read_heartbeat(station_id)):
