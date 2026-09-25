@@ -4,7 +4,7 @@ import hashlib
 import json
 from datetime import datetime, timezone
 
-from app.db import get_connection, init_db
+from app.db import get_connection, get_read_connection, init_db
 
 
 def _canonical(payload: dict | None) -> str:
@@ -24,9 +24,12 @@ class AuditChain:
         actor_id: int | None = None,
         conn=None,
     ) -> dict:
-        init_db()
         owned = conn is None
-        connection = conn or get_connection()
+        if owned:
+            init_db()
+            connection = get_connection()
+        else:
+            connection = conn
         try:
             cur = connection.cursor()
             if not connection.in_transaction:
@@ -73,7 +76,9 @@ class AuditChain:
 
     def verify(self) -> dict:
         init_db()
-        conn = get_connection()
+        # Verification is read-only. Avoid taking/reconfiguring the writer
+        # connection while playout and operator actions are using SQLite.
+        conn = get_read_connection(timeout_seconds=3.0)
         try:
             rows = conn.execute("SELECT * FROM audit_chain ORDER BY id ASC").fetchall()
         finally:

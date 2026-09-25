@@ -831,9 +831,10 @@ async def operation_log_middleware(request: Request, call_next):
                 except ValueError:
                     station_id = None
             try:
-                init_db()
-                # Mutation logging is best-effort and must never hold an API
-                # acknowledgement behind the normal 30-second SQLite wait.
+                # Lifespan initializes the schema before accepting requests.
+                # Re-running init_db() here can enter migration/repair work on
+                # every POST and hold the response path under SQLite load.
+                # Keep mutation logging best-effort and tightly bounded.
                 with closing(get_connection(timeout_seconds=0.25)) as log_conn:
                     LogRepository(log_conn).add_operation_log(
                         station_id=station_id,
@@ -845,20 +846,24 @@ async def operation_log_middleware(request: Request, call_next):
                             "request_id": str(getattr(request.state, "request_id", "") or ""),
                         },
                     )
-                user = getattr(request.state, "current_user", None)
-                actor_id = int(user.get("id")) if isinstance(user, dict) and user.get("id") else None
-                audit_chain.append(
-                    category="security",
-                    action="api.mutation",
-                    station_id=station_id,
-                    actor_id=actor_id,
-                    payload={
-                        "method": method,
-                        "path": path,
-                        "status_code": int(response.status_code),
-                        "request_id": str(getattr(request.state, "request_id", "") or ""),
-                    },
-                )
+                    user = getattr(request.state, "current_user", None)
+                    actor_id = int(user.get("id")) if isinstance(user, dict) and user.get("id") else None
+                    # Reuse the short-lived best-effort connection. Opening a
+                    # default 30-second writer here used to hold successful
+                    # API responses behind SQLite contention.
+                    audit_chain.append(
+                        category="security",
+                        action="api.mutation",
+                        station_id=station_id,
+                        actor_id=actor_id,
+                        payload={
+                            "method": method,
+                            "path": path,
+                            "status_code": int(response.status_code),
+                            "request_id": str(getattr(request.state, "request_id", "") or ""),
+                        },
+                        conn=log_conn,
+                    )
             except Exception:
                 # Logging must never break the request path.
                 pass
