@@ -284,6 +284,10 @@ class ProcessAudioBridgeHost:
         self._program_start = self._guest_start + _GUEST_CAPACITY
         self._stop = threading.Event()
         self._thread = None
+        # The pump owns the mapping while it reads/writes it. A timed join by
+        # itself is not enough when a registry callback is slow.
+        self._pump_lock = threading.Lock()
+        self._closed = False
 
     @staticmethod
     def _snapshot_active_user_id(snapshot: dict) -> int:
@@ -296,6 +300,9 @@ class ProcessAudioBridgeHost:
         return 0
 
     def _write_status(self, snapshot: dict, guest_on_air: bool) -> None:
+        mapping = self._mapping
+        if mapping is None:
+            return
         flags = 0
         if bool(snapshot.get("live_input_enabled")):
             flags |= _FLAG_LIVE_ENABLED
@@ -305,20 +312,20 @@ class ProcessAudioBridgeHost:
             flags |= _FLAG_RECEIVING
         if guest_on_air:
             flags |= _FLAG_GUEST_ON_AIR
-        struct.pack_into("<I", self._mapping, _OFF_FLAGS, flags)
+        struct.pack_into("<I", mapping, _OFF_FLAGS, flags)
         struct.pack_into(
             "<q",
-            self._mapping,
+            mapping,
             _OFF_ACTIVE_USER_ID,
             self._snapshot_active_user_id(snapshot),
         )
         struct.pack_into(
-            "<f", self._mapping, _OFF_LEVEL_DB, float(snapshot.get("level_db", -60.0))
+            "<f", mapping, _OFF_LEVEL_DB, float(snapshot.get("level_db", -60.0))
         )
         struct.pack_into(
-            "<f", self._mapping, _OFF_PEAK_DB, float(snapshot.get("peak_db", -60.0))
+            "<f", mapping, _OFF_PEAK_DB, float(snapshot.get("peak_db", -60.0))
         )
-        struct.pack_into("<d", self._mapping, _OFF_UPDATED_EPOCH, time.time())
+        struct.pack_into("<d", mapping, _OFF_UPDATED_EPOCH, time.time())
 
     def _discard_input(self, write_offset: int, read_offset: int) -> None:
         _write_u64(self._mapping, read_offset, _read_u64(self._mapping, write_offset))
@@ -402,34 +409,67 @@ class ProcessAudioBridgeHost:
         self._write_status(snapshot, guest_on_air)
 
     def _run(self) -> None:
-        while not self._stop.is_set():
-            started = time.monotonic()
-            try:
-                self._pump_once()
-            except Exception:
-                self._write_status({}, False)
-            remaining = max(0.001, 0.02 - (time.monotonic() - started))
-            self._stop.wait(remaining)
+        try:
+            while not self._stop.is_set():
+                started = time.monotonic()
+                with self._pump_lock:
+                    # close() can set the event while this thread waits for
+                    # the lock, so recheck it only after acquiring ownership.
+                    if self._stop.is_set() or self._closed:
+                        break
+                    try:
+                        self._pump_once()
+                    except Exception:
+                        if not self._stop.is_set():
+                            try:
+                                self._write_status({}, False)
+                            except Exception:
+                                pass
+                remaining = max(0.001, 0.02 - (time.monotonic() - started))
+                self._stop.wait(remaining)
+        finally:
+            self._stop.set()
+            self._close_mapping()
 
     def start(self) -> None:
-        if self._thread is not None and self._thread.is_alive():
-            return
-        self._stop.clear()
-        self._thread = threading.Thread(
-            target=self._run,
-            daemon=True,
-            name=f"station-audio-bridge-{self.station_id}",
-        )
-        self._thread.start()
+        with self._pump_lock:
+            if self._closed:
+                raise RuntimeError("station audio bridge is closed")
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._stop.clear()
+            self._thread = threading.Thread(
+                target=self._run,
+                daemon=True,
+                name=f"station-audio-bridge-{self.station_id}",
+            )
+            self._thread.start()
+
+    def _close_mapping(self) -> None:
+        with self._pump_lock:
+            if self._closed:
+                return
+            try:
+                self._write_status({}, False)
+            except Exception:
+                pass
+            self._closed = True
+            self._mapping = None
+            self._bridge.close()
 
     def close(self) -> None:
         self._stop.set()
-        if self._thread is not None and self._thread is not threading.current_thread():
-            self._thread.join(timeout=2.0)
+        thread = self._thread
+        if thread is threading.current_thread():
+            # The run() finally block closes the mapping after the current
+            # pump has unwound.
+            return
+        if thread is not None:
+            thread.join(timeout=2.0)
+            if thread.is_alive():
+                # Do not invalidate memory still owned by a slow callback.
+                # run() closes it as soon as the callback returns.
+                return
         self._thread = None
-        try:
-            self._write_status({}, False)
-        except Exception:
-            pass
-        self._bridge.close()
+        self._close_mapping()
 
