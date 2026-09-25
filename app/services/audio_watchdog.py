@@ -22,6 +22,7 @@ WATCHDOG_STATIONS = {
     4: ("pop", "http://stream.radiotedu.com:11154/radio"),
     8: ("rock", "http://stream.radiotedu.com:11154/rock"),
     10: ("situation", "http://stream.radiotedu.com:11154/situation"),
+    11: ("maincharacter", "http://stream.radiotedu.com:11154/maincharacter"),
 }
 CAMPAIGN_STATION_IDS = (1, 4, 8, 9)
 

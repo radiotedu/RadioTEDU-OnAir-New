@@ -1599,18 +1599,17 @@ class StationRuntimeRegistry:
         if not isinstance(mount, dict):
             return False
         if "network_writer_running" in mount:
-            # Each source connector owns its startup delay, backpressure, and
-            # network retries. A second recovery loop must not reset that work
-            # or disconnect healthy sibling outputs while one mount reconnects.
-            # A stalled producer cannot be repaired by tearing down its outputs.
+            # A listener probe miss must not reset a source that is actively
+            # writing. Thread liveness alone is insufficient: sendall() can be
+            # blocked while its worker thread still appears alive. Require
+            # fresh local writes on every required mount so a stalled socket
+            # can be recovered without disconnecting healthy sibling outputs.
             mounts = {"icecast": mount}
             for item in status.get("extra_icecast_mounts") or ():
                 mounts[str(item.get("branch") or "")] = dict(item.get("health") or {})
             return bool(
                 all(
-                    mounts.get(branch, {}).get("network_writer_running")
-                    and mounts.get(branch, {}).get("writer_running")
-                    and not mounts.get(branch, {}).get("writer_failed", False)
+                    self._mount_transport_is_flowing(mounts.get(branch, {}))
                     for branch in required_branches
                 )
             )
@@ -1632,6 +1631,23 @@ class StationRuntimeRegistry:
             and not mount.get("writer_backpressured", False)
             and write_age <= 2.0
         )
+
+    @staticmethod
+    def _mount_transport_is_flowing(mount: dict) -> bool:
+        if not (
+            mount.get("network_writer_running")
+            and mount.get("writer_running")
+            and not mount.get("writer_failed", False)
+            and not mount.get("network_failed", False)
+            and not mount.get("writer_backpressured", False)
+        ):
+            return False
+        try:
+            write_age = float(mount.get("last_write_age_seconds"))
+            network_write_age = float(mount.get("last_network_write_age_seconds"))
+        except (TypeError, ValueError):
+            return False
+        return write_age <= 5.0 and network_write_age <= 5.0
 
     def is_process_running(self, station_id: int) -> bool:
         """Lightweight check: is the station's audio feed still active?

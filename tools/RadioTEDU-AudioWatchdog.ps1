@@ -40,10 +40,11 @@ $mounts = @(
     [pscustomobject]@{ StationId = 4; Genre = "pop-low"; Url = "$listenerRoot/radio-low" },
     [pscustomobject]@{ StationId = 8; Genre = "rock"; Url = "$listenerRoot/rock" },
     [pscustomobject]@{ StationId = 8; Genre = "rock-low"; Url = "$listenerRoot/rock-low" },
-    [pscustomobject]@{ StationId = 10; Genre = "situation"; Url = "$listenerRoot/situation" }
+    [pscustomobject]@{ StationId = 10; Genre = "situation"; Url = "$listenerRoot/situation" },
+    [pscustomobject]@{ StationId = 11; Genre = "maincharacter"; Url = "$listenerRoot/maincharacter" }
 )
-# English/French AI radio is hosted by the separate Services computer.  This
-# streaming PC intentionally owns and monitors the 15 configured public mounts.
+# English/French AI radio is hosted by the separate Services computer. This
+# host checks local source writers for its configured radio station workers.
 $auxiliaryMounts = @()
 
 try {
@@ -112,22 +113,11 @@ function Test-OriginResponsive {
 }
 
 function Start-BackendIfNeeded {
-    if (Test-BackendReady) {
+    if (Test-BackendPortOpen) {
         return
     }
-    if (Test-BackendPortOpen) {
-        # A temporarily busy backend must not be mistaken for an absent one.
-        # Launching a second backend against the same port and station leases
-        # creates source-owner churn and audible reconnects.
-        $healthDeadline = (Get-Date).AddSeconds(30)
-        do {
-            Start-Sleep -Seconds 1
-            if (Test-BackendReady) {
-                return
-            }
-        } while ((Get-Date) -lt $healthDeadline)
-        throw "Backend port is owned but the health endpoint remained unavailable; duplicate launch refused."
-    }
+    # Local worker recovery is independent of backend API readiness. Starting a
+    # second process while a listener is already owned can churn source leases.
     $service = Get-Service -Name $SupervisorServiceName -ErrorAction SilentlyContinue
     if ($null -ne $service) {
         if ($service.Status -ne [System.ServiceProcess.ServiceControllerStatus]::Running) {
@@ -143,11 +133,11 @@ function Start-BackendIfNeeded {
     $deadline = (Get-Date).AddSeconds(60)
     do {
         Start-Sleep -Seconds 1
-        if (Test-BackendReady) {
+        if (Test-BackendPortOpen) {
             return
         }
     } while ((Get-Date) -lt $deadline)
-    throw "Backend did not become ready within 60 seconds."
+    Write-WatchdogLog "Backend listener did not become available; continuing local worker checks."
 }
 
 function Invoke-PendingBackendSourceReload {
@@ -204,7 +194,8 @@ function Get-WatchdogToken {
         }
         Start-Sleep -Milliseconds 500
     } while ((Get-Date) -lt $deadline)
-    throw "Watchdog API token is unavailable."
+    Write-WatchdogLog "Watchdog API token is unavailable; continuing local source checks without API reporting."
+    return ""
 }
 
 function Invoke-WatchdogApi {
@@ -215,11 +206,25 @@ function Invoke-WatchdogApi {
     )
     $headers = @{ "X-RadioTEDU-Watchdog-Token" = $script:WatchdogToken }
     if ($Method -eq "GET") {
-        return Invoke-RestMethod -Method Get -Uri ($apiRoot + $Path) -Headers $headers -TimeoutSec 45
+        return Invoke-RestMethod -Method Get -Uri ($apiRoot + $Path) -Headers $headers -TimeoutSec 8
     }
     $json = if ($null -eq $Body) { "{}" } else { $Body | ConvertTo-Json -Depth 8 -Compress }
     return Invoke-RestMethod -Method Post -Uri ($apiRoot + $Path) -Headers $headers `
         -ContentType "application/json" -Body $json -TimeoutSec 180
+}
+
+function Get-WatchdogStatusSnapshot {
+    try {
+        Write-WatchdogLog "Requesting optional watchdog status snapshot."
+        return Invoke-WatchdogApi -Method GET -Path "/api/watchdog/status"
+    }
+    catch {
+        Write-WatchdogLog (
+            "Watchdog status API unavailable; continuing local source checks: " +
+            $_.Exception.Message
+        )
+        return $null
+    }
 }
 
 function Test-ManagedProfilesHealthy([object]$Snapshot) {
@@ -529,6 +534,22 @@ function Get-LocalTransportState([int]$StationId) {
     }
 }
 
+function Get-WatchdogStationIds([object]$Snapshot) {
+    $snapshotStations = @(Get-OptionalProperty $Snapshot "stations" @())
+    $snapshotIds = @(
+        $snapshotStations |
+            ForEach-Object { [int](Get-OptionalProperty $_ "station_id" 0) }
+    )
+    $configuredOutputIds = @(
+        $mounts | ForEach-Object { [int]$_.StationId }
+    )
+    return @(
+        @($snapshotIds) + @($configuredOutputIds) |
+            Where-Object { [int]$_ -gt 0 } |
+            Sort-Object -Unique
+    )
+}
+
 function Get-RepairableStationIds([int[]]$FailedIds) {
     $repairable = @()
     foreach ($stationId in $FailedIds) {
@@ -742,6 +763,67 @@ function Invoke-StationOutputRecovery(
     }
 }
 
+function Test-PrimaryOnlyRecoveryPreferred([int]$StationId) {
+    try {
+        $heartbeatPath = Join-Path $DataRoot (
+            "State\StationWorkers\station-{0}.heartbeat.json" -f $StationId
+        )
+        $heartbeat = Get-Content -LiteralPath $heartbeatPath -Raw | ConvertFrom-Json
+        $runtime = Get-OptionalProperty $heartbeat "runtime_status" $null
+        if (
+            $null -eq $runtime -or
+            -not [bool](Get-OptionalProperty $runtime "program_running" $false) -or
+            [bool](Get-OptionalProperty $runtime "program_pcm_stalled" $true) -or
+            [double](Get-OptionalProperty $runtime "program_pcm_age_seconds" 999999.0) -gt $TransportFreshnessSeconds
+        ) {
+            return $false
+        }
+
+        $primary = Get-OptionalProperty $runtime "icecast_mount_health" $null
+        $primaryStale = (
+            [bool](Get-OptionalProperty $primary "writer_failed" $false) -or
+            [bool](Get-OptionalProperty $primary "network_failed" $false) -or
+            [double](Get-OptionalProperty $primary "last_write_age_seconds" 999999.0) -gt $TransportFreshnessSeconds -or
+            [double](Get-OptionalProperty $primary "last_network_write_age_seconds" 999999.0) -gt $TransportFreshnessSeconds
+        )
+        if (-not $primaryStale) {
+            return $false
+        }
+
+        $required = Get-OptionalProperty $runtime "required_outputs" $null
+        $requiredExtraBranches = @(
+            $required.PSObject.Properties |
+                Where-Object { $_.Name.StartsWith("icecast:") -and [bool]$_.Value } |
+                ForEach-Object { [string]$_.Name }
+        )
+        if ($requiredExtraBranches.Count -eq 0) {
+            return $false
+        }
+        $extras = @(Get-OptionalProperty $runtime "extra_icecast_mounts" @())
+        foreach ($branch in $requiredExtraBranches) {
+            $extra = $extras | Where-Object { [string]$_.branch -eq $branch } | Select-Object -First 1
+            if ($null -eq $extra) {
+                return $false
+            }
+            $health = Get-OptionalProperty $extra "health" $null
+            if (
+                -not [bool](Get-OptionalProperty $health "writer_running" $false) -or
+                -not [bool](Get-OptionalProperty $health "network_writer_running" $false) -or
+                [bool](Get-OptionalProperty $health "writer_failed" $false) -or
+                [bool](Get-OptionalProperty $health "network_failed" $false) -or
+                [double](Get-OptionalProperty $health "last_write_age_seconds" 999999.0) -gt $TransportFreshnessSeconds -or
+                [double](Get-OptionalProperty $health "last_network_write_age_seconds" 999999.0) -gt $TransportFreshnessSeconds
+            ) {
+                return $false
+            }
+        }
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
 function Test-RepairCooldown {
     if (-not (Test-Path -LiteralPath $repairStatePath -PathType Leaf)) {
         return $false
@@ -769,6 +851,9 @@ function Send-Report(
     [int[]]$FailedIds,
     [bool]$ManagedProfilesOk
 ) {
+    if (-not $script:WatchdogToken) {
+        return
+    }
     try {
         Invoke-WatchdogApi -Method POST -Path "/api/watchdog/report" -Body @{
             status = $Status
@@ -786,14 +871,12 @@ try {
     Invoke-PendingBackendSourceReload
     Start-BackendIfNeeded
     $script:WatchdogToken = Get-WatchdogToken
-    $firstSnapshot = Invoke-WatchdogApi -Method GET -Path "/api/watchdog/status"
-    $firstProfilesHealthy = Test-ManagedProfilesHealthy $firstSnapshot
-    $stationIds = @(
-        $firstSnapshot.stations |
-            ForEach-Object { [int](Get-OptionalProperty $_ "station_id" 0) } |
-            Where-Object { $_ -gt 0 } |
-            Sort-Object -Unique
-    )
+    Write-WatchdogLog "Starting watchdog cycle; local worker health does not depend on backend API availability."
+    $firstSnapshot = Get-WatchdogStatusSnapshot
+    $firstProfilesHealthy = if ($null -eq $firstSnapshot) { $null } else {
+        [bool](Test-ManagedProfilesHealthy $firstSnapshot)
+    }
+    $stationIds = @(Get-WatchdogStationIds $firstSnapshot)
     if ($stationIds.Count -eq 0) {
         throw "Watchdog status did not include any station runtimes."
     }
@@ -802,26 +885,27 @@ try {
             -not [bool](Get-LocalTransportState ([int]$_)).healthy
         }
     )
-    if ($firstFailed.Count -eq 0 -and $firstProfilesHealthy) {
+    if ($firstFailed.Count -eq 0 -and $firstProfilesHealthy -ne $false) {
         Clear-PublicFailureState @($mounts | ForEach-Object { [int]$_.StationId } | Sort-Object -Unique)
-        Send-Report "ok" "Local source writers and managed profiles are healthy; no listener probes were run." @() $true
-        Write-WatchdogLog "OK: local source writers and managed profiles healthy; public listener probes skipped."
+        $profilesMessage = if ($null -eq $firstProfilesHealthy) {
+            "Managed profiles were not checked because the API is unavailable."
+        }
+        else { "Managed profiles are healthy." }
+        Send-Report "ok" "Local source writers are healthy. $profilesMessage No listener probes were run." @() ([bool]$firstProfilesHealthy)
+        Write-WatchdogLog "OK: local source writers healthy; $profilesMessage"
         exit 0
     }
 
     Write-WatchdogLog (
         "First local check failed stations={0} managed_profiles_ok={1}; waiting 30 seconds for confirmation." -f
-        ($firstFailed -join ","), $firstProfilesHealthy
+        ($firstFailed -join ","), $(if ($null -eq $firstProfilesHealthy) { "unverified" } else { $firstProfilesHealthy })
     )
     Start-Sleep -Seconds 30
-    $secondSnapshot = Invoke-WatchdogApi -Method GET -Path "/api/watchdog/status"
-    $secondProfilesHealthy = Test-ManagedProfilesHealthy $secondSnapshot
-    $stationIds = @(
-        $secondSnapshot.stations |
-            ForEach-Object { [int](Get-OptionalProperty $_ "station_id" 0) } |
-            Where-Object { $_ -gt 0 } |
-            Sort-Object -Unique
-    )
+    $secondSnapshot = Get-WatchdogStatusSnapshot
+    $secondProfilesHealthy = if ($null -eq $secondSnapshot) { $null } else {
+        [bool](Test-ManagedProfilesHealthy $secondSnapshot)
+    }
+    $stationIds = @(Get-WatchdogStationIds $secondSnapshot)
     if ($stationIds.Count -eq 0) {
         throw "Second watchdog status did not include any station runtimes."
     }
@@ -830,11 +914,15 @@ try {
             -not [bool](Get-LocalTransportState ([int]$_)).healthy
         }
     )
-    $profileRepair = -not $secondProfilesHealthy
+    $profileRepair = $secondProfilesHealthy -eq $false
     if ($secondFailed.Count -eq 0 -and -not $profileRepair) {
         Clear-PublicFailureState @($mounts | ForEach-Object { [int]$_.StationId } | Sort-Object -Unique)
         $message = "Local source health recovered on confirmation; no repair was performed."
-        Send-Report "transient" $message @() $true
+        $profilesOk = [bool]$secondProfilesHealthy
+        if ($null -eq $secondProfilesHealthy) {
+            $message += " Managed profiles remain unverified because the API is unavailable."
+        }
+        Send-Report "transient" $message @() $profilesOk
         Write-WatchdogLog $message
         exit 0
     }
@@ -847,18 +935,43 @@ try {
 
     # Repair only source writers whose local heartbeat remained unhealthy in
     # both snapshots. Listener GET/decoder failures never restart a station.
-    $outputRecovery = Invoke-StationOutputRecovery $repairableFailed
-    $fallbackStationIds = @($outputRecovery.failed_ids)
-    $repair = Invoke-WatchdogApi -Method POST -Path "/api/watchdog/repair" -Body @{
-        station_ids = @($fallbackStationIds)
-        force_station_ids = @($fallbackStationIds)
-        repair_managed_profiles = $profileRepair
+    $primaryOnlyStationIds = @(
+        $repairableFailed | Where-Object { Test-PrimaryOnlyRecoveryPreferred ([int]$_) }
+    )
+    $outputRecovery = Invoke-StationOutputRecovery `
+        -StationIds $repairableFailed `
+        -PrimaryOnlyStationIds $primaryOnlyStationIds
+    $apiStationIds = @(
+        (Get-OptionalProperty $secondSnapshot "stations" @()) |
+            ForEach-Object { [int](Get-OptionalProperty $_ "station_id" 0) }
+    )
+    $fallbackStationIds = @(
+        $outputRecovery.failed_ids | Where-Object {
+            $apiStationIds -contains [int]$_
+        }
+    )
+    $repair = $null
+    if ($null -ne $secondSnapshot -and ($fallbackStationIds.Count -gt 0 -or $profileRepair)) {
+        try {
+            $repair = Invoke-WatchdogApi -Method POST -Path "/api/watchdog/repair" -Body @{
+                station_ids = @($fallbackStationIds)
+                force_station_ids = @($fallbackStationIds)
+                repair_managed_profiles = $profileRepair
+            }
+            if (-not [bool]$repair.ok) {
+                Write-WatchdogLog "Backend repair API returned an incomplete result; continuing local verification."
+                $repair = $null
+            }
+        }
+        catch {
+            Write-WatchdogLog ("Backend repair API unavailable; continuing local verification: " + $_.Exception.Message)
+        }
     }
-    if (-not [bool]$repair.ok) {
-        throw "Repair API returned an incomplete result."
+    elseif ($null -eq $secondSnapshot) {
+        Write-WatchdogLog "Backend repair deferred because the status API is unavailable. Local output recovery has still run."
     }
-    $restartedCount = @($outputRecovery.recovered).Count + @($repair.restarted).Count
-    $deferredCount = @($repair.deferred).Count
+    $restartedCount = @($outputRecovery.recovered).Count + @((Get-OptionalProperty $repair "restarted" @())).Count
+    $deferredCount = @((Get-OptionalProperty $repair "deferred" @())).Count
     if ($restartedCount -eq 0 -and $deferredCount -gt 0 -and -not $profileRepair) {
         Send-Report "transient" "Affected source recovered before repair; worker restart was suppressed." @() $true
         Write-WatchdogLog "Source transport recovered before repair; worker restart suppressed."
@@ -867,22 +980,20 @@ try {
     # Output recovery staggers reconnects to protect the origin. Verify against
     # local source-writer timestamps after that window plus encoder warm-up.
     Start-Sleep -Seconds 45
-    $finalSnapshot = Invoke-WatchdogApi -Method GET -Path "/api/watchdog/status"
-    $finalProfilesHealthy = Test-ManagedProfilesHealthy $finalSnapshot
-    $finalStationIds = @(
-        $finalSnapshot.stations |
-            ForEach-Object { [int](Get-OptionalProperty $_ "station_id" 0) } |
-            Where-Object { $_ -gt 0 } |
-            Sort-Object -Unique
-    )
+    $finalSnapshot = Get-WatchdogStatusSnapshot
+    $finalProfilesHealthy = if ($null -eq $finalSnapshot) { $null } else {
+        [bool](Test-ManagedProfilesHealthy $finalSnapshot)
+    }
+    $finalStationIds = @(Get-WatchdogStationIds $finalSnapshot)
     $finalFailed = @(
         $finalStationIds | Where-Object {
             -not [bool](Get-LocalTransportState ([int]$_)).healthy
         }
     )
-    if ($finalFailed.Count -gt 0 -or -not $finalProfilesHealthy) {
+    if ($finalFailed.Count -gt 0 -or $finalProfilesHealthy -eq $false) {
         Mark-PublicRepairFailed $finalFailed
-        Send-Report "failed" "Repair completed but local source verification still failed." $finalFailed $finalProfilesHealthy
+        $message = "Repair completed but local source verification still failed for station ids=" + ($finalFailed -join ",")
+        Send-Report "failed" $message $finalFailed ([bool]$finalProfilesHealthy)
         Write-WatchdogLog (
             "Repair final local verification failed stations=" + ($finalFailed -join ",")
         )
@@ -890,10 +1001,16 @@ try {
     }
     # Only successful repairs enter cooldown. A failed final verification stays
     # eligible for a later attempt, while healthy streams remain untouched.
-    Save-RepairState ("audio={0};profiles={1}" -f ($repairableFailed -join ","), $profileRepair)
+    if ($restartedCount -gt 0) {
+        Save-RepairState ("audio={0};profiles={1}" -f ($repairableFailed -join ","), $profileRepair)
+    }
     Clear-PublicFailureState @($mounts | ForEach-Object { [int]$_.StationId } | Sort-Object -Unique)
-    Send-Report "repaired" "Confirmed local source failures were repaired and verified." @() $true
-    Write-WatchdogLog "Local source repair and final verification passed."
+    $verifiedMessage = if ($null -eq $finalProfilesHealthy) {
+        "Local source repair and verification passed; managed profiles remain unverified because the API is unavailable."
+    }
+    else { "Confirmed local source failures were repaired and verified." }
+    Send-Report "repaired" $verifiedMessage @() ([bool]$finalProfilesHealthy)
+    Write-WatchdogLog $verifiedMessage
     exit 0
 }
 catch {

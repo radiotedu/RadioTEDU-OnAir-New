@@ -69,6 +69,7 @@ def test_audio_watchdog_installer_is_independent_and_fail_closed():
     assert "Get-LocalTransportState" in watchdog
     assert "force_station_ids = @($fallbackStationIds)" in watchdog
     assert "Invoke-StationOutputRecovery" in watchdog
+    assert 'StationId = 11; Genre = "maincharacter"' in watchdog
     assert '"recover_station"' in watchdog
     assert '"recover_station_primary_output"' in watchdog
     assert "Start-Sleep -Seconds 45" in watchdog
@@ -79,8 +80,12 @@ def test_audio_watchdog_installer_is_independent_and_fail_closed():
     flow_start = watchdog.index("try {\n    Invoke-PendingBackendSourceReload")
     flow_end = watchdog.index("\ncatch {\n", flow_start)
     active_flow = watchdog[flow_start:flow_end]
-    assert 'Invoke-WatchdogApi -Method GET -Path "/api/watchdog/status"' in active_flow
+    assert "Get-WatchdogStatusSnapshot" in active_flow
+    assert "continuing with local" in watchdog
+    assert "Backend repair deferred because the status API is unavailable" in active_flow
     assert "Get-LocalTransportState" in active_flow
+    assert "Get-WatchdogStationIds" in active_flow
+    assert "$apiStationIds -contains [int]$_" in active_flow
     assert "Local source writers" in active_flow
     assert "Test-OriginResponsive" not in active_flow
     assert "Test-SelectedStreams" not in active_flow

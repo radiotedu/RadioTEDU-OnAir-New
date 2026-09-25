@@ -11,6 +11,8 @@ from pathlib import Path
 STATE_ROOT = Path(r"C:\ProgramData\RadioTEDU\OnAir\State\StationWorkers")
 BACKUP_ROOT = Path(r"H:\RadioTEDU-Backups")
 EXPECTED_STATIONS = (1, 2, 4, 5, 8, 9)
+ADDITIONAL_OUTPUT_STATIONS = (10, 11)
+ALLOWED_STATION_IDS = EXPECTED_STATIONS + ADDITIONAL_OUTPUT_STATIONS
 
 
 def _heartbeat_path(station_id: int) -> Path:
@@ -175,13 +177,16 @@ def main() -> int:
         description="Gracefully reload isolated RadioTEDU workers one at a time."
     )
     parser.add_argument("--station-id", action="append", type=int, default=[])
-    parser.add_argument("--startup-timeout-seconds", type=float, default=90.0)
+    # Some stations need several minutes to reacquire a scheduled programme
+    # after their isolated worker exits. Keep the other streams untouched
+    # while allowing the selected station the full startup window.
+    parser.add_argument("--startup-timeout-seconds", type=float, default=300.0)
     parser.add_argument("--settle-seconds", type=float, default=12.0)
     parser.add_argument("--verify-seconds", type=float, default=20.0)
     args = parser.parse_args()
     station_ids = tuple(args.station_id or EXPECTED_STATIONS)
-    if not station_ids or any(value not in EXPECTED_STATIONS for value in station_ids):
-        raise ValueError(f"station ids must be selected from {EXPECTED_STATIONS}")
+    if not station_ids or any(value not in ALLOWED_STATION_IDS for value in station_ids):
+        raise ValueError(f"station ids must be selected from {ALLOWED_STATION_IDS}")
     if len(set(station_ids)) != len(station_ids):
         raise ValueError("station ids must not repeat")
 

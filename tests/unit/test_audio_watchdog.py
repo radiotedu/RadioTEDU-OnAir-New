@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import pytest
 
-from app.services.audio_watchdog import AudioWatchdogService
+from app.services.audio_watchdog import AudioWatchdogService, WATCHDOG_STATIONS
+
+
+def test_snapshot_and_repair_allow_maincharacter_mount():
+    assert WATCHDOG_STATIONS[11] == (
+        "maincharacter",
+        "http://stream.radiotedu.com:11154/maincharacter",
+    )
 
 
 def test_repair_restarts_only_selected_station(monkeypatch):
