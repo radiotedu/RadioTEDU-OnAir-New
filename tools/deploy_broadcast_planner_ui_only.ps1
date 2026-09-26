@@ -61,6 +61,13 @@ $service = Get-Service -Name $ServiceName -ErrorAction Stop
 $wasRunning = $service.Status -eq [System.ServiceProcess.ServiceControllerStatus]::Running
 $stamp = Get-Date -Format 'yyyyMMddTHHmmssfff'
 $backupRoot = Join-Path $resolvedWorkspaceRoot "deployment-backups\ui-only-$stamp"
+$databaseBackupRoot = Join-Path $backupRoot 'database'
+$databaseFiles = @(
+    $databasePathResolved,
+    "$databasePathResolved-wal",
+    "$databasePathResolved-shm"
+)
+$databaseSnapshotCreated = $false
 New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
 $serviceStopped = $false
 
@@ -93,13 +100,7 @@ try {
     if (-not (Test-Path -LiteralPath $databasePathResolved -PathType Leaf)) {
         throw "Database file was not found at $databasePathResolved. Pass the configured database path with -DatabasePath."
     }
-    $databaseBackupRoot = Join-Path $backupRoot 'database'
     New-Item -ItemType Directory -Path $databaseBackupRoot -Force | Out-Null
-    $databaseFiles = @(
-        $databasePathResolved,
-        "$databasePathResolved-wal",
-        "$databasePathResolved-shm"
-    )
     foreach ($databaseFile in $databaseFiles) {
         if (Test-Path -LiteralPath $databaseFile -PathType Leaf) {
             Copy-Item -LiteralPath $databaseFile -Destination (Join-Path $databaseBackupRoot (Split-Path -Leaf $databaseFile)) -Force
@@ -112,6 +113,7 @@ try {
     $sourceHash = (Get-FileHash -LiteralPath $databasePathResolved -Algorithm SHA256).Hash
     $backupHash = (Get-FileHash -LiteralPath $databaseCopy -Algorithm SHA256).Hash
     if ($sourceHash -ne $backupHash) { throw 'The pre-deployment database snapshot did not match its source.' }
+    $databaseSnapshotCreated = $true
 
     foreach ($relative in $files) {
         $sourceFile = Join-Path $sourceRoot $relative
@@ -136,11 +138,21 @@ try {
         verification = 'Complete in the RadioTEDU OnAir UI; this script runs no application tests.'
     } | ConvertTo-Json -Depth 4
 } catch {
-    if ($serviceStopped) {
-        $current = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-        if ($current -and $current.Status -eq [System.ServiceProcess.ServiceControllerStatus]::Running) {
-            Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
-            Wait-ServiceState $ServiceName 'Stopped' 60
+    $current = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    if ($current -and $current.Status -eq [System.ServiceProcess.ServiceControllerStatus]::Running) {
+        Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
+        Wait-ServiceState $ServiceName 'Stopped' 60
+        $serviceStopped = $true
+    }
+
+    if ($databaseSnapshotCreated) {
+        foreach ($databaseFile in $databaseFiles) {
+            $databaseBackup = Join-Path $databaseBackupRoot (Split-Path -Leaf $databaseFile)
+            if (Test-Path -LiteralPath $databaseBackup -PathType Leaf) {
+                Copy-Item -LiteralPath $databaseBackup -Destination $databaseFile -Force
+            } elseif (Test-Path -LiteralPath $databaseFile -PathType Leaf) {
+                Remove-Item -LiteralPath $databaseFile -Force
+            }
         }
     }
 
@@ -156,6 +168,7 @@ try {
 
     if ($wasRunning -and $serviceStopped) {
         Start-Service -Name $ServiceName -ErrorAction SilentlyContinue
+        Wait-ServiceState $ServiceName 'Running' 60
     }
     throw
 }
