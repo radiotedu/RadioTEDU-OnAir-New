@@ -1,11 +1,11 @@
-const CACHE_NAME = 'RadioTEDU-OnAir-shell-v29';
+const CACHE_NAME = 'RadioTEDU-OnAir-shell-v30';
 const SHELL_ASSETS = [
     '/',
     '/app',
     '/app/',
     '/login.html',
-    '/static/onair/styles.css?v=17',
-    '/static/onair/app.js?v=49',
+    '/static/onair/styles.css?v=18',
+    '/static/onair/app.js?v=50',
     '/static/onair/guest-room.js?v=6',
     '/static/onair/assets/radiotedu-logo.png',
     '/static/onair/assets/radiotedu-onair-logo.png',

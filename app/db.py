@@ -523,6 +523,19 @@ def _migrate_schedule_items(cur) -> None:
         )
 
 
+def _migrate_broadcast_plans(cur) -> None:
+    cur.execute("PRAGMA table_info(broadcast_plans)")
+    existing = {row[1] for row in cur.fetchall()}
+    if "cadence_mode" not in existing:
+        cur.execute(
+            "ALTER TABLE broadcast_plans ADD COLUMN cadence_mode TEXT NOT NULL DEFAULT 'time'"
+        )
+    if "repeat_every_songs" not in existing:
+        cur.execute(
+            "ALTER TABLE broadcast_plans ADD COLUMN repeat_every_songs INTEGER NOT NULL DEFAULT 10"
+        )
+
+
 def _migrate_ad_break_items(cur) -> None:
     cur.execute("PRAGMA table_info(ad_break_items)")
     existing = {row[1] for row in cur.fetchall()}
@@ -1746,11 +1759,13 @@ def _bootstrap_schema(cur) -> None:
         "starts_on TEXT NOT NULL, ends_on TEXT NOT NULL, weekdays_json TEXT NOT NULL DEFAULT '[1,2,3,4,5,6,7]', "
         "local_start TEXT NOT NULL DEFAULT '09:00', local_end TEXT NOT NULL DEFAULT '17:00', "
         "timezone TEXT NOT NULL DEFAULT 'Europe/Istanbul', repeat_every_minutes INTEGER NOT NULL DEFAULT 0, "
-        "sweeper_every_songs INTEGER NOT NULL DEFAULT 2, play_window_minutes INTEGER NOT NULL DEFAULT 15, "
+        "sweeper_every_songs INTEGER NOT NULL DEFAULT 2, cadence_mode TEXT NOT NULL DEFAULT 'time', "
+        "repeat_every_songs INTEGER NOT NULL DEFAULT 10, play_window_minutes INTEGER NOT NULL DEFAULT 15, "
         "priority INTEGER NOT NULL DEFAULT 0, enabled INTEGER NOT NULL DEFAULT 1, "
         "created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"
         ")"
     )
+    _migrate_broadcast_plans(cur)
     cur.execute(
         "CREATE TABLE IF NOT EXISTS broadcast_plan_targets ("
         "plan_id INTEGER NOT NULL REFERENCES broadcast_plans(id) ON DELETE CASCADE, "

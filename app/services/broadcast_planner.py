@@ -71,8 +71,14 @@ def cancel_future_occurrences(conn, plan_id: int) -> int:
             "UPDATE broadcast_plan_occurrences SET status='cancelled' WHERE id=? AND status='pending'",
             (int(row["id"]),),
         )
+    cur.execute(
+        "UPDATE ad_break_items SET status='cancelled' WHERE status='pending' "
+        "AND dedupe_key LIKE ?",
+        (f"broadcast-plan:{int(plan_id)}:song:%",),
+    )
+    cancelled_song_ads = max(0, int(cur.rowcount or 0))
     conn.commit()
-    return len(rows)
+    return len(rows) + cancelled_song_ads
 
 
 def _materialize_one(conn, plan, target, scheduled_local: datetime, now_utc: datetime) -> bool:
@@ -182,6 +188,7 @@ def materialize_broadcast_plans(conn=None, horizon_days: int = 14) -> dict:
         final_day = today_local + timedelta(days=max(1, min(int(horizon_days), 60)))
         plans = connection.execute(
             "SELECT * FROM broadcast_plans WHERE enabled=1 AND plan_type IN ('ad','recorded_program') "
+            "AND NOT (plan_type='ad' AND cadence_mode='songs') "
             "AND ends_on>=? AND starts_on<=? ORDER BY priority DESC, id",
             (today_local.isoformat(), final_day.isoformat()),
         ).fetchall()

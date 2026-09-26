@@ -11,7 +11,11 @@ from app.audio.virtual_sources import is_silence_input_uri
 from app.db import get_connection
 from app.engine.lease import LeaseService
 from app.engine.ad_policy import ads_enabled_from_settings, station_ads_enabled
-from app.engine.broadcast_plan_policy import resolve_sweeper_plan, station_has_planned_ad
+from app.engine.broadcast_plan_policy import (
+    materialize_song_cadence_ads,
+    resolve_sweeper_plan,
+    station_has_planned_ad,
+)
 from app.media_paths import resolve_runtime_media_path
 from app.engine.playout_state import PlayoutStateService
 from app.engine.priority import choose_source
@@ -2428,6 +2432,15 @@ class StationWorker:
 
         # Ad rows are policy-gated and remain playing until their audio ends.
         self._advance_playing_ad_item()
+        try:
+            # Song-cadence ads are materialized only after completed music
+            # items, so a due spot never shortens the song currently on air.
+            materialize_song_cadence_ads(self.conn, self.station_id)
+        except Exception:
+            _log.exception(
+                "Could not materialize song-cadence ads for station_id=%s",
+                self.station_id,
+            )
         self._fail_disabled_active_ads()
         self._ensure_hourly_ad_break()
 

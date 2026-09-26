@@ -8,7 +8,7 @@
   <meta name="description" content="Deterministic RadioTEDU OnAir automation wall for any radio station">
   <title>RadioTEDU OnAir</title>
   <link rel="manifest" href="/static/manifest.json">
-  <link rel="stylesheet" href="/static/onair/styles.css?v=17">
+  <link rel="stylesheet" href="/static/onair/styles.css?v=18">
 </head>
 <body>
   <div id="authGate" class="auth-gate" hidden>
@@ -243,6 +243,10 @@
             </div>
           </div>
           <div class="timeline-progress" aria-hidden="true"><span id="timelineProgressBar"></span></div>
+          <div class="ad-cadence-countdown" role="status" aria-live="polite">
+            <div><span>NEXT ADVERTISEMENT</span><strong id="adCadenceTitle">Checking schedule…</strong><small id="adCadenceDetail">Loading the next ad time.</small></div>
+            <div class="ad-cadence-clock"><b id="adCadenceRemaining">--:--</b><span id="adCadenceMode">Remaining time</span></div>
+          </div>
           <div class="forecast-heading"><span>UPCOMING</span><span>START / END</span></div>
           <ol id="forecastList" class="forecast-list"></ol>
         </article>
@@ -742,11 +746,13 @@
               <label>Daily window starts<input id="broadcastPlanLocalStart" type="time" value="09:00" required></label>
               <label>Daily window ends<input id="broadcastPlanLocalEnd" type="time" value="21:00" required></label>
             </div>
+            <label id="broadcastPlanCadenceModeField" hidden>Ad cadence<select id="broadcastPlanCadenceMode"><option value="time">At scheduled times</option><option value="songs">After a number of songs</option></select></label>
             <label id="broadcastPlanRepeatField">Repeat within the window<select id="broadcastPlanRepeat"><option value="0">Once, at the start time</option><option value="15">Every 15 minutes</option><option value="30">Every 30 minutes</option><option value="60" selected>Every hour</option><option value="120">Every 2 hours</option><option value="240">Every 4 hours</option></select></label>
             <label id="broadcastPlanSweeperField" hidden>Songs between sweepers<input id="broadcastPlanSweeperInterval" type="number" min="1" max="100" step="1" value="2"></label>
+            <label id="broadcastPlanAdSongsField" hidden>Completed music tracks between ads<input id="broadcastPlanAdSongsInterval" type="number" min="1" max="100" step="1" value="10"></label>
             <div class="field-grid two">
               <label id="broadcastPlanPlayWindowField">Allowed start delay for programmes (minutes)<input id="broadcastPlanPlayWindow" type="number" min="1" max="240" value="15"></label>
-              <label>Priority<input id="broadcastPlanPriority" type="number" min="-100" max="1000" value="0"></label>
+              <label>Priority (higher plays first when ads are due)<input id="broadcastPlanPriority" type="number" min="-100" max="1000" value="0"></label>
             </div>
             <label class="check-row"><input id="broadcastPlanEnabled" type="checkbox" checked> Plan enabled</label>
             <div class="button-row"><button id="saveBroadcastPlanButton" class="button primary" type="submit">Save and schedule</button><button id="resetBroadcastPlanButton" class="button secondary" type="button">New plan</button></div>
@@ -1027,7 +1033,7 @@
 
   <div id="busyOverlay" class="busy-overlay" hidden><div class="busy-card"><span class="spinner"></span><b id="busyTitle">Working...</b><small id="busyDetail">Waiting for verified state</small></div></div>
   <div id="toastRegion" class="toast-region" aria-live="assertive"></div>
-    <script src="/static/onair/app.js?v=49" defer></script>
+  <script src="/static/onair/app.js?v=50" defer></script>
     <script src="/static/onair/guest-room.js?v=6" defer></script>
     <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js', { scope: '/' });</script>
 </body>

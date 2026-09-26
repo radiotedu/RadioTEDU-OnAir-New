@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import date, time
+from datetime import date, datetime, time, timezone
 from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.db import get_connection, init_db
+from app.engine.broadcast_plan_policy import resolve_song_ad_plans, song_ad_progress
 from app.services.broadcast_planner import (
     cancel_future_occurrences,
     materialize_broadcast_plans,
@@ -32,6 +33,8 @@ class BroadcastPlanPayload(BaseModel):
     timezone: str = "Europe/Istanbul"
     repeat_every_minutes: int = Field(default=0, ge=0, le=1440)
     sweeper_every_songs: int = Field(default=2, ge=1, le=100)
+    cadence_mode: Literal["time", "songs"] = "time"
+    repeat_every_songs: int = Field(default=10, ge=1, le=100)
     play_window_minutes: int = Field(default=15, ge=1, le=240)
     priority: int = Field(default=0, ge=-100, le=1000)
     enabled: bool = True
@@ -51,6 +54,10 @@ def _validate_payload(payload: BroadcastPlanPayload) -> tuple[list[int], time, t
         raise HTTPException(status_code=422, detail="weekdays_must_use_iso_1_to_7")
     if payload.plan_type == "sweeper" and payload.repeat_every_minutes:
         raise HTTPException(status_code=422, detail="sweeper_uses_song_interval")
+    if payload.plan_type != "ad" and payload.cadence_mode != "time":
+        raise HTTPException(status_code=422, detail="song_cadence_is_for_ads_only")
+    if payload.plan_type == "ad" and payload.cadence_mode == "songs" and payload.repeat_every_minutes:
+        raise HTTPException(status_code=422, detail="song_cadence_cannot_repeat_by_minutes")
     if payload.repeat_every_minutes and payload.repeat_every_minutes < 5:
         raise HTTPException(status_code=422, detail="repeat_interval_minimum_is_5_minutes")
     try:
@@ -130,14 +137,16 @@ def _save_plan(conn, payload: BroadcastPlanPayload, plan_id: int | None = None) 
         conn.execute(
             "UPDATE broadcast_plans SET name=?, plan_type=?, source_station_id=?, source_track_id=?, "
             "starts_on=?, ends_on=?, weekdays_json=?, local_start=?, local_end=?, timezone=?, "
-            "repeat_every_minutes=?, sweeper_every_songs=?, play_window_minutes=?, priority=?, enabled=?, "
+            "repeat_every_minutes=?, sweeper_every_songs=?, cadence_mode=?, repeat_every_songs=?, "
+            "play_window_minutes=?, priority=?, enabled=?, "
             "updated_at=CURRENT_TIMESTAMP WHERE id=?",
             (
                 payload.name.strip(), payload.plan_type, int(payload.source_station_id), int(payload.track_id),
                 payload.starts_on.isoformat(), payload.ends_on.isoformat(),
                 json.dumps(sorted(set(payload.weekdays))), payload.local_start, payload.local_end,
                 payload.timezone, int(payload.repeat_every_minutes), int(payload.sweeper_every_songs),
-                int(payload.play_window_minutes), int(payload.priority), int(payload.enabled), int(plan_id),
+                payload.cadence_mode, int(payload.repeat_every_songs), int(payload.play_window_minutes),
+                int(payload.priority), int(payload.enabled), int(plan_id),
             ),
         )
         saved_id = int(plan_id)
@@ -147,14 +156,16 @@ def _save_plan(conn, payload: BroadcastPlanPayload, plan_id: int | None = None) 
             "INSERT INTO broadcast_plans "
             "(name, plan_type, source_station_id, source_track_id, starts_on, ends_on, weekdays_json, "
             "local_start, local_end, timezone, repeat_every_minutes, sweeper_every_songs, "
+            "cadence_mode, repeat_every_songs, "
             "play_window_minutes, priority, enabled) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 payload.name.strip(), payload.plan_type, int(payload.source_station_id), int(payload.track_id),
                 payload.starts_on.isoformat(), payload.ends_on.isoformat(),
                 json.dumps(sorted(set(payload.weekdays))), payload.local_start, payload.local_end,
                 payload.timezone, int(payload.repeat_every_minutes), int(payload.sweeper_every_songs),
-                int(payload.play_window_minutes), int(payload.priority), int(payload.enabled),
+                payload.cadence_mode, int(payload.repeat_every_songs), int(payload.play_window_minutes),
+                int(payload.priority), int(payload.enabled),
             ),
         )
         saved_id = int(cur.lastrowid)
@@ -193,6 +204,11 @@ def _serialize_plan(conn, row) -> dict:
         "WHERE plan_id=? AND status='pending'",
         (int(row["id"]),),
     ).fetchone()["amount"]
+    song_ad_count = conn.execute(
+        "SELECT COUNT(*) AS amount FROM ad_break_items WHERE status='pending' "
+        "AND dedupe_key LIKE ?",
+        (f"broadcast-plan:{int(row['id'])}:song:%",),
+    ).fetchone()["amount"]
     return {
         "id": int(row["id"]), "name": str(row["name"]), "plan_type": str(row["plan_type"]),
         "source_station_id": int(row["source_station_id"]), "source_track_id": int(row["source_track_id"]),
@@ -202,9 +218,12 @@ def _serialize_plan(conn, row) -> dict:
         "weekdays": sorted(_plan_days(row)), "local_start": str(row["local_start"]),
         "local_end": str(row["local_end"]), "timezone": str(row["timezone"]),
         "repeat_every_minutes": int(row["repeat_every_minutes"]),
+        "cadence_mode": str(row["cadence_mode"] or "time"),
+        "repeat_every_songs": int(row["repeat_every_songs"] or 10),
         "sweeper_every_songs": int(row["sweeper_every_songs"]),
         "play_window_minutes": int(row["play_window_minutes"]), "priority": int(row["priority"]),
-        "enabled": bool(row["enabled"]), "pending_occurrences": int(occurrence_count or 0),
+        "enabled": bool(row["enabled"]),
+        "pending_occurrences": int(occurrence_count or 0) + int(song_ad_count or 0),
         "targets": [dict(target) for target in targets],
     }
 
@@ -223,6 +242,51 @@ def list_broadcast_plans(station_id: int | None = None):
                 (int(station_id),),
             ).fetchall()
         return {"plans": [_serialize_plan(conn, row) for row in rows]}
+    finally:
+        conn.close()
+
+
+@router.get("/api/broadcast-plans/ad-status")
+def broadcast_ad_status(station_id: int):
+    """Return the next configured ad and its live song or clock countdown."""
+    init_db()
+    conn = get_connection()
+    try:
+        plans = resolve_song_ad_plans(conn, int(station_id))
+        statuses = []
+        for plan in plans:
+            progress = song_ad_progress(conn, plan, int(station_id))
+            statuses.append({**plan, **progress})
+        if statuses:
+            statuses.sort(key=lambda item: (not item["due"], int(item["remaining_songs"]), -int(item["priority"])))
+            selected = statuses[0]
+            return {
+                "station_id": int(station_id), "mode": "songs", "due": bool(selected["due"]),
+                "title": selected["track_title"], "artist": selected["track_artist"],
+                "plan_name": selected["name"], "priority": int(selected["priority"]),
+                "remaining_songs": int(selected["remaining_songs"]),
+                "due_ads": sum(1 for item in statuses if item["due"]),
+            }
+
+        item = conn.execute(
+            "SELECT a.due_at, a.priority, COALESCE(t.title,'') AS title, "
+            "COALESCE(t.artist,'') AS artist FROM ad_break_items a "
+            "LEFT JOIN tracks t ON t.id=a.track_id "
+            "WHERE a.station_id=? AND a.status='pending' "
+            "ORDER BY datetime(a.due_at), a.priority DESC, a.id LIMIT 1",
+            (int(station_id),),
+        ).fetchone()
+        if item:
+            due_at = datetime.fromisoformat(str(item["due_at"]).replace("Z", "+00:00"))
+            if due_at.tzinfo is None:
+                due_at = due_at.replace(tzinfo=timezone.utc)
+            remaining_seconds = max(0, int((due_at - datetime.now(timezone.utc)).total_seconds()))
+            return {
+                "station_id": int(station_id), "mode": "time", "due": remaining_seconds == 0,
+                "title": str(item["title"] or ""), "artist": str(item["artist"] or ""),
+                "priority": int(item["priority"] or 0), "remaining_seconds": remaining_seconds,
+            }
+        return {"station_id": int(station_id), "mode": "none", "due": False}
     finally:
         conn.close()
 
