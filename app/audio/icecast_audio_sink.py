@@ -16,6 +16,11 @@ from app.audio.icecast_source_transport import IcecastSourceTransport
 
 _log = logging.getLogger(__name__)
 
+
+class _MountProbeReconnect(RuntimeError):
+    """A controlled source reconnect after repeated missing-mount probes."""
+
+
 # 4096 bytes is about 21.3 ms of 48 kHz stereo s16 PCM.  Keep enough queued
 # audio to ride through a short upstream/TCP pause without deleting already
 # scheduled programme audio.  The previous 64-chunk queue was only ~1.36 s;
@@ -225,6 +230,8 @@ class IcecastAudioSink:
         self._probe_lock = threading.Lock()
         self._mount_healthy = None
         self._probe_failures = 0
+        self._last_mount_probe_reconnect_monotonic = None
+        self._mount_reconnect_requested = threading.Event()
         self._pcm_queue_capacity_chunks = _PCM_QUEUE_MAX_CHUNKS
         self._pcm_queue: queue.Queue[bytes] = queue.Queue(
             maxsize=self._pcm_queue_capacity_chunks
@@ -895,6 +902,11 @@ class IcecastAudioSink:
                     if encoded is None:
                         raise RuntimeError("Icecast encoder output is unavailable")
                     while not self._writer_stop.is_set():
+                        if self._mount_reconnect_requested.is_set():
+                            self._mount_reconnect_requested.clear()
+                            raise _MountProbeReconnect(
+                                "Icecast mount remained unavailable after repeated probes"
+                            )
                         chunk = encoded.read(_ENCODED_CHUNK_BYTES)
                         if not chunk:
                             if proc.poll() is None:
@@ -910,11 +922,23 @@ class IcecastAudioSink:
                             self._last_network_error = ""
                 except Exception as exc:
                     if not self._writer_stop.is_set():
-                        safe = self._sanitize_encoder_line(exc, effective_cfg)
-                        with self._writer_lock:
-                            self._network_failed = True
-                            self._last_network_error = safe
-                            self._network_error_count += 1
+                        if isinstance(exc, _MountProbeReconnect):
+                            _log.warning(
+                                "Icecast mount probe remained unavailable; reconnecting source mount=%s",
+                                effective_cfg.icecast_mount,
+                            )
+                            with self._writer_lock:
+                                # This is a deliberate branch-local recovery,
+                                # not a transport write failure. The external
+                                # mount probe remains the unhealthy signal.
+                                self._network_failed = False
+                                self._last_network_error = ""
+                        else:
+                            safe = self._sanitize_encoder_line(exc, effective_cfg)
+                            with self._writer_lock:
+                                self._network_failed = True
+                                self._last_network_error = safe
+                                self._network_error_count += 1
                         if (
                             not delivered_this_connection
                             and fallback_cfg is not None
@@ -964,6 +988,8 @@ class IcecastAudioSink:
             with self._probe_lock:
                 self._mount_healthy = None
                 self._probe_failures = 0
+                self._last_mount_probe_reconnect_monotonic = None
+                self._mount_reconnect_requested.clear()
 
         def run() -> None:
             initial_delay = self._probe_warmup_sec + _mount_spread_seconds(
@@ -981,12 +1007,21 @@ class IcecastAudioSink:
                     if healthy:
                         self._probe_failures = 0
                         self._mount_healthy = True
+                        self._last_mount_probe_reconnect_monotonic = None
+                        self._mount_reconnect_requested.clear()
                     else:
                         self._probe_failures += 1
                         if self._probe_failures >= self._probe_failure_threshold:
                             self._mount_healthy = False
-                # Listener health is diagnostic evidence only. Source writes
-                # and encoder failures own reconnection, never a failed GET.
+                        if self._probe_failures >= self._reconnect_failure_threshold:
+                            now = time.monotonic()
+                            last_request = self._last_mount_probe_reconnect_monotonic
+                            if last_request is None or now - last_request >= 300.0:
+                                self._last_mount_probe_reconnect_monotonic = now
+                                self._mount_reconnect_requested.set()
+                # A single listener-probe failure is diagnostic only. Sustained
+                # absence requests a rate-limited reconnect of this mount alone;
+                # it never tears down the station programme or sibling outputs.
                 if self._probe_stop.wait(self._probe_interval_sec):
                     return
 
@@ -1045,6 +1080,7 @@ class IcecastAudioSink:
         self._pcm_dispatch_stop.set()
         self._writer_stop.set()
         self._stderr_stop.set()
+        self._mount_reconnect_requested.clear()
         self._signature = None
         self._cfg = None
         self._close_encoder_connection()

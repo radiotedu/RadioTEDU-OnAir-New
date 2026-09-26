@@ -926,9 +926,10 @@ class StationRuntime:
                 self._icecast_sink = IcecastAudioSink(
                     self.ffmpeg_bin,
                     self._spawn_process,
-                    # Listener GET failures must not tear down a healthy source.
-                    # The connector retries actual source/encoder failures.
-                    mount_probe=None,
+                    # Probe listener availability for truthful delivery health;
+                    # repeated failures only reconnect this source branch after
+                    # a long threshold and never stop station playout.
+                    mount_probe=probe_icecast_mount,
                     initial_connect_spread_sec=30.0,
                     drop_on_backpressure=False,
                 )
@@ -989,6 +990,8 @@ class StationRuntime:
                         sink = IcecastAudioSink(
                             self.ffmpeg_bin,
                             self._spawn_process,
+                            mount_probe=probe_icecast_mount,
+                            reconnect_failure_threshold=4,
                             initial_connect_spread_sec=30.0,
                             drop_on_backpressure=False,
                             decouple_input_backpressure=True,
