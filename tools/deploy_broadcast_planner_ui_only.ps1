@@ -27,6 +27,9 @@ $requiredLiveRoot = 'C:\Users\tedu\Documents\RadioTEDU-OnAir-Radio'
 if (-not [string]::Equals($resolvedLiveRoot, $requiredLiveRoot, [StringComparison]::OrdinalIgnoreCase)) {
     throw "Unexpected live runtime path: $resolvedLiveRoot"
 }
+if (-not (Test-Path -LiteralPath $databasePathResolved -PathType Leaf)) {
+    throw "Database file was not found at $databasePathResolved. Pass the configured database path with -DatabasePath."
+}
 
 $files = @(
     'app\api\broadcast_planner.py',
@@ -97,9 +100,6 @@ try {
         Wait-ServiceState $ServiceName 'Stopped' 60
     }
 
-    if (-not (Test-Path -LiteralPath $databasePathResolved -PathType Leaf)) {
-        throw "Database file was not found at $databasePathResolved. Pass the configured database path with -DatabasePath."
-    }
     New-Item -ItemType Directory -Path $databaseBackupRoot -Force | Out-Null
     foreach ($databaseFile in $databaseFiles) {
         if (Test-Path -LiteralPath $databaseFile -PathType Leaf) {
