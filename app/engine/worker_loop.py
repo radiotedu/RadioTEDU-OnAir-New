@@ -199,8 +199,13 @@ class StationWorkerLoopManager:
                 stop_event.wait(interval_sec)
 
     def start(
-        self, station_id: int, fallback_uri: str = "", interval_sec: float = 1.0
+        self,
+        station_id: int,
+        fallback_uri: str = "",
+        interval_sec: float = 1.0,
+        readiness_timeout_seconds: float | None = None,
     ) -> dict:
+        del readiness_timeout_seconds
         safe_interval = max(0.1, float(interval_sec))
         init_db()
         conn = get_connection()

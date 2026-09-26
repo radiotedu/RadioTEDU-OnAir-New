@@ -699,10 +699,25 @@ class ProcessIsolatedStationWorkerManager:
                 time.sleep(1.0)
 
     def start(
-        self, station_id: int, fallback_uri: str = "", interval_sec: float = 1.0
+        self,
+        station_id: int,
+        fallback_uri: str = "",
+        interval_sec: float = 1.0,
+        readiness_timeout_seconds: float | None = None,
     ) -> dict:
         station_id = int(station_id)
         safe_interval = max(0.1, float(interval_sec))
+        safe_readiness_timeout = max(
+            _STARTUP_TIMEOUT_SECONDS,
+            min(
+                90.0,
+                float(
+                    _STARTUP_TIMEOUT_SECONDS
+                    if readiness_timeout_seconds is None
+                    else readiness_timeout_seconds
+                ),
+            ),
+        )
         # Application startup owns database schema initialization. A station
         # start only reads its fallback settings and must not run migrations.
         conn = get_connection()
@@ -788,7 +803,7 @@ class ProcessIsolatedStationWorkerManager:
             with self._lock:
                 state["monitor_thread"] = monitor
             monitor.start()
-            if not ready_event.wait(_STARTUP_TIMEOUT_SECONDS):
+            if not ready_event.wait(safe_readiness_timeout):
                 raise RuntimeError("station worker process did not become ready")
         except Exception:
             self.stop(station_id)

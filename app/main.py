@@ -228,6 +228,7 @@ def _autostart_station_worker_loops(conn) -> None:
         rows = list(repo.list_all())
     from app.api.runtime import worker_loop_manager
 
+    failed_autostarts = []
     for row in rows:
         station_id = int(row["id"])
         if station_id <= 0:
@@ -252,6 +253,7 @@ def _autostart_station_worker_loops(conn) -> None:
                 station_settings.get("startup_ai_ready_intro_count", "0"),
                 station_settings.get("startup_ai_required_intro_count", "0"),
             )
+        fallback_uri = ""
         try:
             fallback_uri = resolve_station_fallback_uri(
                 station_id=station_id,
@@ -263,6 +265,9 @@ def _autostart_station_worker_loops(conn) -> None:
                 # A one-second scheduler cadence can miss the short transition
                 # overlap and expose producer startup as an audible microdrop.
                 interval_sec=0.1,
+                # Cold media caches and simultaneous station startup can exceed
+                # the interactive start deadline without indicating a dead worker.
+                readiness_timeout_seconds=45.0,
             )
         except Exception as exc:
             # A stale lease, corrupt fallback, or one failed worker must never
@@ -270,6 +275,29 @@ def _autostart_station_worker_loops(conn) -> None:
             # boot. The watchdog can repair the isolated station afterward.
             logger.exception(
                 "Station %d worker autostart failed; continuing with siblings: %s",
+                station_id,
+                exc,
+            )
+            failed_autostarts.append((station_id, fallback_uri))
+
+    # Retry isolated cold-start failures after sibling workers have initialized
+    # their shared dependencies and warmed the media/database caches.
+    for station_id, fallback_uri in failed_autostarts:
+        time.sleep(2.0)
+        try:
+            worker_loop_manager.start(
+                station_id=station_id,
+                fallback_uri=fallback_uri,
+                interval_sec=0.1,
+                readiness_timeout_seconds=45.0,
+            )
+            logger.info(
+                "Station %d worker autostart recovered on retry",
+                station_id,
+            )
+        except Exception as exc:
+            logger.exception(
+                "Station %d worker autostart retry failed; watchdog recovery remains enabled: %s",
                 station_id,
                 exc,
             )
