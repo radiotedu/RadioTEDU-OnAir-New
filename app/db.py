@@ -11,7 +11,7 @@ from pathlib import Path
 from app.config import get_data_root, get_db_path
 from app.auth.permissions import GLOBAL_PERMISSION_KEYS, SHOW_PERMISSION_KEYS
 
-_SCHEMA_VERSION = 24
+_SCHEMA_VERSION = 25
 _INIT_LOCK = threading.Lock()
 # API and auth handlers call init_db() defensively on many requests. Cache the
 # successful schema probe per database file so those paths do not reopen SQLite
@@ -196,6 +196,17 @@ def _post_version_repairs_needed(cur) -> bool:
         for row in cur.execute("PRAGMA index_list(music_usage_log)").fetchall()
     }
     if "idx_music_usage_broadcast_time" not in index_names:
+        return True
+    cur.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='broadcast_plans'"
+    )
+    if cur.fetchone() is None:
+        return True
+    plan_columns = {
+        str(row[1])
+        for row in cur.execute("PRAGMA table_info(broadcast_plans)").fetchall()
+    }
+    if not {"cadence_mode", "repeat_every_songs"}.issubset(plan_columns):
         return True
     return False
 
