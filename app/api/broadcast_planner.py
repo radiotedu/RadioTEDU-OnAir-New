@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from app.db import get_connection, init_db
 from app.engine.broadcast_plan_policy import resolve_song_ad_plans, song_ad_progress
 from app.services.broadcast_planner import (
+    _plan_days,
     cancel_future_occurrences,
     materialize_broadcast_plans,
 )
