@@ -991,6 +991,7 @@ class StationRuntime:
                             self._spawn_process,
                             initial_connect_spread_sec=30.0,
                             drop_on_backpressure=False,
+                            decouple_input_backpressure=True,
                         )
                     self._extra_icecast_sinks[branch] = sink
                 try:
