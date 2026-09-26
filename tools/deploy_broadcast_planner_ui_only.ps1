@@ -2,7 +2,8 @@
 param(
     [string]$LiveRoot = 'C:\Users\tedu\Documents\RadioTEDU-OnAir-Radio',
     [string]$ServiceName = 'RadioTEDU.OnAir.Supervisor',
-    [string]$WorkspaceRoot = 'C:\Users\tedu\Documents\RadioTEDU-OnAir'
+    [string]$WorkspaceRoot = 'C:\Users\tedu\Documents\RadioTEDU-OnAir',
+    [string]$DatabasePath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -17,6 +18,11 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 $sourceRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $resolvedLiveRoot = (Resolve-Path -LiteralPath $LiveRoot).Path
 $resolvedWorkspaceRoot = (Resolve-Path -LiteralPath $WorkspaceRoot).Path
+$databasePathResolved = if ([string]::IsNullOrWhiteSpace($DatabasePath)) {
+    Join-Path $env:ProgramData 'RadioTEDU\OnAir\cleanroom.db'
+} else {
+    (Resolve-Path -LiteralPath $DatabasePath).Path
+}
 $requiredLiveRoot = 'C:\Users\tedu\Documents\RadioTEDU-OnAir-Radio'
 if (-not [string]::Equals($resolvedLiveRoot, $requiredLiveRoot, [StringComparison]::OrdinalIgnoreCase)) {
     throw "Unexpected live runtime path: $resolvedLiveRoot"
@@ -84,6 +90,29 @@ try {
         Wait-ServiceState $ServiceName 'Stopped' 60
     }
 
+    if (-not (Test-Path -LiteralPath $databasePathResolved -PathType Leaf)) {
+        throw "Database file was not found at $databasePathResolved. Pass the configured database path with -DatabasePath."
+    }
+    $databaseBackupRoot = Join-Path $backupRoot 'database'
+    New-Item -ItemType Directory -Path $databaseBackupRoot -Force | Out-Null
+    $databaseFiles = @(
+        $databasePathResolved,
+        "$databasePathResolved-wal",
+        "$databasePathResolved-shm"
+    )
+    foreach ($databaseFile in $databaseFiles) {
+        if (Test-Path -LiteralPath $databaseFile -PathType Leaf) {
+            Copy-Item -LiteralPath $databaseFile -Destination (Join-Path $databaseBackupRoot (Split-Path -Leaf $databaseFile)) -Force
+        }
+    }
+    $databaseCopy = Join-Path $databaseBackupRoot (Split-Path -Leaf $databasePathResolved)
+    if (-not (Test-Path -LiteralPath $databaseCopy -PathType Leaf)) {
+        throw 'The pre-deployment database snapshot was not created.'
+    }
+    $sourceHash = (Get-FileHash -LiteralPath $databasePathResolved -Algorithm SHA256).Hash
+    $backupHash = (Get-FileHash -LiteralPath $databaseCopy -Algorithm SHA256).Hash
+    if ($sourceHash -ne $backupHash) { throw 'The pre-deployment database snapshot did not match its source.' }
+
     foreach ($relative in $files) {
         $sourceFile = Join-Path $sourceRoot $relative
         $liveFile = Join-Path $resolvedLiveRoot $relative
@@ -103,6 +132,7 @@ try {
         service = $ServiceName
         service_state = (Get-Service -Name $ServiceName).Status.ToString()
         rollback_files = $backupRoot
+        database_snapshot = $databaseBackupRoot
         verification = 'Complete in the RadioTEDU OnAir UI; this script runs no application tests.'
     } | ConvertTo-Json -Depth 4
 } catch {
