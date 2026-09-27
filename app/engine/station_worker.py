@@ -2455,8 +2455,9 @@ class StationWorker:
         if queue_source == "host":
             host_pending = self.program_queue_repo.next_pending(self.station_id)
 
-        # While a queue item is playing, suppress manual count so ads/schedule
-        # can still fire; the next queue item waits until the current finishes.
+        # A due advertisement must wait for the active queue item to finish.
+        # Otherwise choose_source prioritizes ads over manual playback and cuts
+        # the current song or sweeper as soon as its cadence becomes due.
         manual_count = 1 if pending and not playing else 0
         # Suppress ad auto-fire during all active show states EXCEPT 'preparing' and 'on_break'.
         # 'preparing': normal automation, DJ hasn't gone live yet.
@@ -2473,7 +2474,7 @@ class StationWorker:
             manual_count = 0
         source = choose_source(
             manual_count=manual_count,
-            ad_due=False if ad_suppressed else bool(due_ad),
+            ad_due=False if (ad_suppressed or playing) else bool(due_ad),
             schedule_ready=bool(ready_schedule),
             fallback_ready=bool(self.fallback_uri) and not bool(playing),
             host_count=1 if host_pending else 0,
@@ -2495,7 +2496,6 @@ class StationWorker:
                 auto_done=False,  # keep as 'playing' until duration expires
             )
         if source == "ads" and due_ad:
-            self._finish_playing_queue_item()  # preempt queue track for ad
             item_id = int(due_ad["id"])
             track_id = int(due_ad["track_id"])
             return self._play_managed_item(
