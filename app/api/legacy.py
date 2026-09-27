@@ -714,6 +714,9 @@ def _run_ytdlp_download(url: str, output_dir: Path, audio_format: str, audio_qua
     ytdlp_bin = resolve_binary("yt-dlp.exe") or resolve_binary("yt-dlp") or shutil.which("yt-dlp")
     if not ytdlp_bin:
         raise FileNotFoundError("yt-dlp was not found in the managed runtime or PATH")
+    ffmpeg_bin = resolve_binary("ffmpeg.exe") or resolve_binary("ffmpeg")
+    if not ffmpeg_bin:
+        raise FileNotFoundError("ffmpeg was not found; yt-dlp needs it to extract and tag audio")
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -731,6 +734,7 @@ def _run_ytdlp_download(url: str, output_dir: Path, audio_format: str, audio_qua
         "--embed-metadata",
         "--parse-metadata", "%(uploader|)s:%(meta_artist)s",
         "--print", "after_move:filepath",
+        "--ffmpeg-location", str(ffmpeg_bin),
         "-o", output_template,
         "--restrict-filenames",
         "--windows-filenames",
