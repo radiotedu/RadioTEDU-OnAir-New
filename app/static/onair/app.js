@@ -4609,6 +4609,15 @@ async function loadYtdlpJobs() {
 async function loadYtdlpWorkspace() {
   const [settings] = await Promise.all([api(`/api/library/import/ytdlp/settings?station_id=${Number(state.stationId)}`), loadYtdlpJobs()]);
   state.ytdlpSettings = settings || {};
+  const importReady = Boolean(settings?.queue_mode_supported && settings?.binary_found && settings?.ffmpeg_found);
+  $('ytdlpQueueMode').disabled = !importReady;
+  $('queueYtdlpButton').disabled = !importReady;
+  $('ytdlpUpdateRequired').hidden = importReady;
+  if (!importReady) {
+    $('ytdlpUpdateRequired').textContent = settings?.queue_mode_supported
+      ? 'Install yt-dlp and FFmpeg before importing.'
+      : 'Import is unavailable until the application service loads the updated queue controls.';
+  }
   if ($('ytdlpAudioFormat').dataset.dirty !== '1') $('ytdlpAudioFormat').value = 'best';
   if ($('ytdlpAudioQuality').dataset.dirty !== '1') $('ytdlpAudioQuality').value = '0';
   if ($('ytdlpDownloadPlaylist').dataset.dirty !== '1') $('ytdlpDownloadPlaylist').checked = Boolean(settings.default_allow_playlist);
@@ -4620,6 +4629,9 @@ async function loadYtdlpWorkspace() {
 
 async function queueYtdlpImport(event) {
   event.preventDefault();
+  if (!state.ytdlpSettings?.queue_mode_supported || !state.ytdlpSettings?.binary_found || !state.ytdlpSettings?.ffmpeg_found) {
+    return setResult('ytdlpResult', 'The updated import service and its dependencies must be ready before this playlist can be queued.', 'error');
+  }
   let parsed;
   try { parsed = new URL($('ytdlpUrl').value.trim()); } catch (_) { return setResult('ytdlpResult', 'Enter a valid http(s) video or playlist URL.', 'error'); }
   if (!['http:', 'https:'].includes(parsed.protocol)) return setResult('ytdlpResult', 'Only http(s) download URLs are allowed.', 'error');

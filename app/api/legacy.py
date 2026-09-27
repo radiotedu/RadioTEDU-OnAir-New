@@ -3440,6 +3440,7 @@ def legacy_ytdlp_settings(
         "output_subdir": "downloads",
         "default_audio_format": "mp3",
         "default_audio_quality": "192",
+        "queue_mode_supported": True,
         "default_allow_playlist": True,
         "default_music_only_mode": True,
         "default_auto_trim": False,
