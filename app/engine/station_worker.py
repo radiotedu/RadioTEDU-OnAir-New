@@ -2031,6 +2031,23 @@ class StationWorker:
                             playing,
                             start_offset_seconds=0.0,
                         )
+                else:
+                    # Reaching the catalog boundary does not prove a complete
+                    # song reached the output queue. If the decoder died
+                    # without matching clean EOF, recover the same queue item
+                    # instead of marking it done and letting an ad or jingle
+                    # take over before the missing tail is rendered.
+                    _log.warning(
+                        "Runtime ended without clean EOF at track boundary; "
+                        "retrying station_id=%s queue_item_id=%s",
+                        self.station_id,
+                        int(playing["id"]),
+                    )
+                    self._restart_playing_queue_item_if_runtime_mismatched(
+                        playing,
+                        start_offset_seconds=0.0,
+                    )
+                    return False
             elif self.runtime_registry and music_crossfade_due:
                 rt_status = self.runtime_registry.status(self.station_id)
                 current_track_uri, _, _, _, _ = self._track_runtime_fields(

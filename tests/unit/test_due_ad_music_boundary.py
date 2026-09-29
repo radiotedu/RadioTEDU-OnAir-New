@@ -116,6 +116,34 @@ class DueAdMusicBoundaryTests(unittest.TestCase):
         self.assertFalse(advanced)
         self.assertEqual(worker.completed, [])
 
+    def test_dead_source_at_due_ad_boundary_retries_song_instead_of_skipping_tail(self):
+        worker = self._worker({"id": 23})
+        started_at = datetime.datetime.now(datetime.timezone.utc).replace(
+            tzinfo=None
+        ) - datetime.timedelta(seconds=11)
+        worker.queue_repo.playing["started_at"] = started_at.strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        worker.runtime_registry._status = {
+            "running": False,
+            "program_running": False,
+            "producer_eof": False,
+            "active_input_uri": "test://current-song",
+        }
+        retries = []
+        worker._restart_playing_queue_item_if_runtime_mismatched = (
+            lambda item, *, start_offset_seconds: retries.append(
+                (item["id"], start_offset_seconds)
+            )
+            or True
+        )
+
+        advanced = worker._advance_playing_queue_item()
+
+        self.assertFalse(advanced)
+        self.assertEqual(worker.completed, [])
+        self.assertEqual(retries, [(12, 0.0)])
+
 
 if __name__ == "__main__":
     unittest.main()
