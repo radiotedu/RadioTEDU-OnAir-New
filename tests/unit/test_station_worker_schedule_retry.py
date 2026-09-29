@@ -74,3 +74,25 @@ def test_schedule_keeps_playout_ownership_if_retry_cannot_be_persisted():
     assert should_keep_schedule_owner is True
     assert worker.schedule_repo.item is not None
     assert worker.schedule_repo.failed == []
+
+
+def test_schedule_keeps_ownership_while_encoder_input_fifos_drain():
+    worker = _worker()
+    status = {
+        "program_running": False,
+        "producer_eof": False,
+        "producer_draining": True,
+        "active_input_uri": "E:/Programmes/recording.mp3",
+    }
+    worker.runtime_registry = SimpleNamespace(status=lambda _station_id: status)
+    started = []
+    worker._start_runtime_station = lambda *args, **kwargs: started.append(
+        (args, kwargs)
+    )
+
+    should_keep_schedule_owner = worker._advance_playing_schedule_item()
+
+    assert should_keep_schedule_owner is True
+    assert worker.schedule_repo.item is not None
+    assert worker.schedule_repo.failed == []
+    assert started == []

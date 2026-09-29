@@ -27,6 +27,7 @@ from app.audio.shoutcast_audio_sink import ShoutcastAudioSink
 from app.audio.live_audio_mixer import LiveAudioMixer
 from app.audio.local_audio_sink import LocalAudioSink
 from app.audio.output_health_router import OutputHealthRouter
+from app.audio.output_health import icecast_mount_transport_is_healthy
 from app.audio.sound_effect_player import SoundEffectPlayer
 from app.runtime_paths import resolve_binary
 
@@ -53,6 +54,7 @@ _SILENCE_FLOOR_INTERVAL_SECONDS = (
 _SILENCE_FLOOR_AFTER_SECONDS = _SILENCE_FLOOR_INTERVAL_SECONDS * 2.0
 _SILENCE_FLOOR_STARTUP_GRACE_SECONDS = 1.0
 _PROGRAM_PCM_STALL_SECONDS = 5.0
+_PROGRAM_FANOUT_BLOCKED_SECONDS = 0.5
 _DIRECT_ICECAST_STARTUP_GRACE_SECONDS = 2.0
 # RTSAS registers a replacement source before the previous ingest task's
 # ``finally`` block has necessarily observed the TCP FIN. If the new source is
@@ -283,6 +285,7 @@ class StationRuntime:
         self._producer_exit_generation = None
         self._producer_exit_code = None
         self._producer_exit_pcm_accepted = False
+        self._producer_exit_drain_watermarks: dict[str, tuple[object, int, int]] = {}
         self._transition_until_monotonic = None
         self._last_transition_mode = "none"
         self.station_id = int(station_id) if station_id is not None else None
@@ -294,6 +297,9 @@ class StationRuntime:
         self._live_mix_thread = None
         self._live_mix_stop = threading.Event()
         self._pcm_write_lock = threading.Lock()
+        self._program_fanout_lock = threading.Lock()
+        self._program_fanout_inflight = 0
+        self._program_fanout_started_monotonic = None
         self._last_program_pcm_monotonic = time.monotonic()
         self._silence_floor_started_monotonic = 0.0
         self._silence_floor_thread = None
@@ -469,6 +475,28 @@ class StationRuntime:
             targets.extend(sorted(self._extra_icecast_sinks.items()))
         return targets
 
+    def _required_icecast_branches(
+        self, cfg: StationPipelineConfig | None = None
+    ) -> set[str]:
+        """Return configured branches, including unavailable configured sinks."""
+        active_cfg = cfg or self._active_cfg
+        if active_cfg is None:
+            return set()
+        required = {"icecast"} if bool(active_cfg.icecast_enabled) else set()
+        required.update(self._extra_output_configs(active_cfg))
+        return required
+
+    def _program_fanout_health(self) -> tuple[bool, float]:
+        with self._program_fanout_lock:
+            started = self._program_fanout_started_monotonic
+            inflight = self._program_fanout_inflight > 0
+        age = (
+            0.0
+            if not inflight or started is None
+            else max(0.0, time.monotonic() - float(started))
+        )
+        return inflight, age
+
     def _pcm_output_targets(self) -> list[tuple[str, object]]:
         targets = self._icecast_output_targets()
         if self._local_sink is not None:
@@ -487,6 +515,43 @@ class StationRuntime:
         ]
 
     def _write_pcm_chunk_to_targets(
+        self,
+        chunk: bytes,
+        targets: list[tuple[str, object]],
+        *,
+        program_data: bool = True,
+        generation: int | None = None,
+        required_branches: set[str] | None = None,
+    ) -> bool:
+        if not program_data:
+            return self._write_pcm_chunk_to_targets_impl(
+                chunk,
+                targets,
+                program_data=False,
+                generation=generation,
+                required_branches=required_branches,
+            )
+        with self._program_fanout_lock:
+            if self._program_fanout_inflight == 0:
+                self._program_fanout_started_monotonic = time.monotonic()
+            self._program_fanout_inflight += 1
+        try:
+            return self._write_pcm_chunk_to_targets_impl(
+                chunk,
+                targets,
+                program_data=True,
+                generation=generation,
+                required_branches=required_branches,
+            )
+        finally:
+            with self._program_fanout_lock:
+                self._program_fanout_inflight = max(
+                    0, self._program_fanout_inflight - 1
+                )
+                if self._program_fanout_inflight == 0:
+                    self._program_fanout_started_monotonic = None
+
+    def _write_pcm_chunk_to_targets_impl(
         self,
         chunk: bytes,
         targets: list[tuple[str, object]],
@@ -517,7 +582,10 @@ class StationRuntime:
                     )
                     self._router.set_branch_health(branch, healthy)
                     wrote_any = wrote_any or accepted
-                    branch_acceptance[branch] = healthy
+                    # Admission to a retained sink FIFO is the EOF ownership
+                    # signal. Process/transport health remains a separate
+                    # router signal; reconnecting sinks can accept PCM safely.
+                    branch_acceptance[branch] = accepted
                     continue
                 stdin = getattr(sink, "stdin", None)
                 is_running = getattr(sink, "is_running", None)
@@ -813,6 +881,7 @@ class StationRuntime:
         self._producer_exit_generation = None
         self._producer_exit_code = None
         self._producer_exit_pcm_accepted = False
+        self._producer_exit_drain_watermarks = {}
         self._active_signature = target_signature
         self._active_cfg = cfg
         self._active_started_monotonic = (
@@ -827,9 +896,9 @@ class StationRuntime:
     ) -> None:
         """Record a current producer's exit so EOF is not mistaken for a stall.
 
-        File decoders seed the Icecast PCM queue ahead of its real-time writer.
-        A clean FFmpeg EOF therefore means the complete track is already queued,
-        even though the worker's wall clock has not reached the track duration.
+        Completion is withheld until every configured output's PCM watermark
+        passes through its encoder input FIFO. That is internal queue-drain
+        evidence, not proof that an origin or listener decoded the audio.
         """
         if not self._generation_is_current(generation):
             return
@@ -841,7 +910,59 @@ class StationRuntime:
             return
         self._producer_exit_generation = int(generation)
         self._producer_exit_code = int(return_code)
-        self._producer_exit_pcm_accepted = bool(pcm_accepted)
+        required = self._required_icecast_branches()
+        targets = dict(self._icecast_output_targets())
+        watermarks: dict[str, tuple[object, int, int]] = {}
+        accepted = bool(pcm_accepted and required)
+        for branch in required:
+            sink = targets.get(branch)
+            get_watermark = getattr(sink, "pcm_drain_watermark", None)
+            try:
+                watermark = get_watermark() if callable(get_watermark) else None
+                if not isinstance(watermark, dict):
+                    accepted = False
+                    continue
+                watermarks[branch] = (
+                    sink,
+                    int(watermark.get("epoch", -1)),
+                    int(watermark.get("accepted_bytes", -1)),
+                )
+                if watermarks[branch][1] < 0 or watermarks[branch][2] < 0:
+                    accepted = False
+            except Exception:
+                accepted = False
+        if len(watermarks) != len(required):
+            accepted = False
+        self._producer_exit_drain_watermarks = watermarks
+        self._producer_exit_pcm_accepted = accepted
+
+    def _producer_exit_drain_state(self, *, current: bool) -> tuple[bool, bool]:
+        """Return (EOF fully drained, still draining) for this producer."""
+        if not (
+            current
+            and self._producer_exit_code == 0
+            and self._producer_exit_pcm_accepted
+        ):
+            return False, False
+        if not self._producer_exit_drain_watermarks:
+            return False, False
+        pending = False
+        for sink, epoch, accepted_bytes in self._producer_exit_drain_watermarks.values():
+            get_watermark = getattr(sink, "pcm_drain_watermark", None)
+            try:
+                watermark = get_watermark() if callable(get_watermark) else None
+                if not isinstance(watermark, dict):
+                    return False, False
+                if int(watermark.get("epoch", -1)) != epoch:
+                    # The queue was cleared/replaced after this producer ended.
+                    return False, False
+                if int(watermark.get("accepted_bytes", -1)) < accepted_bytes:
+                    return False, False
+                if int(watermark.get("drained_bytes", -1)) < accepted_bytes:
+                    pending = True
+            except Exception:
+                return False, False
+        return (not pending), pending
 
     def _clear_transition_window(self) -> None:
         self._transition_until_monotonic = None
@@ -1001,7 +1122,7 @@ class StationRuntime:
             return False
 
     def _ensure_extra_icecast_sinks(
-        self, cfg: StationPipelineConfig
+        self, cfg: StationPipelineConfig, *, preserve_pcm: bool = False
     ) -> dict[str, bool]:
         desired = self._extra_output_configs(cfg)
         with self._extra_icecast_lock:
@@ -1042,7 +1163,10 @@ class StationRuntime:
                         )
                     self._extra_icecast_sinks[branch] = sink
                 try:
-                    sink.ensure_started(output_cfg)
+                    if preserve_pcm:
+                        sink.ensure_started(output_cfg, preserve_pcm=True)
+                    else:
+                        sink.ensure_started(output_cfg)
                     healthy = bool(sink.is_running())
                 except Exception as exc:
                     healthy = False
@@ -1388,9 +1512,10 @@ class StationRuntime:
                 # accepted by every configured Icecast output queue. Requiring
                 # only the primary mount can mark an ad/sweeper complete even
                 # when an auxiliary listener mount missed part of the source.
-                required_branches = {
-                    branch for branch, _target in output_targets
-                }
+                # Compare against the active configuration, not just live sink
+                # objects. A missing primary remains required even when a
+                # backup is available, so its absence cannot certify EOF.
+                required_branches = self._required_icecast_branches()
                 chunk_accepted = self._write_pcm_chunk_to_targets(
                     chunk,
                     output_targets,
@@ -1506,6 +1631,7 @@ class StationRuntime:
         target_signature: tuple,
         *,
         start_offset_seconds: float = 0.0,
+        preserve_sink_pcm: bool = False,
     ) -> None:
         if (
             not cfg.icecast_enabled
@@ -1513,8 +1639,13 @@ class StationRuntime:
             and not self._extra_output_configs(cfg)
         ):
             raise ValueError("no output targets enabled")
-        icecast_enabled = bool(cfg.icecast_enabled and self._ensure_icecast_sink(cfg))
-        extra_results = self._ensure_extra_icecast_sinks(cfg)
+        icecast_enabled = bool(
+            cfg.icecast_enabled
+            and self._ensure_icecast_sink(cfg, preserve_pcm=preserve_sink_pcm)
+        )
+        extra_results = self._ensure_extra_icecast_sinks(
+            cfg, preserve_pcm=preserve_sink_pcm
+        )
         extra_enabled = any(extra_results.values())
         local_enabled = bool(cfg.local_output_enabled and self._ensure_local_sink(cfg))
         if (
@@ -1693,6 +1824,7 @@ class StationRuntime:
         target_signature: tuple,
         *,
         start_offset_seconds: float = 0.0,
+        preserve_sink_pcm: bool = False,
     ) -> None:
         extra_configured = bool(self._extra_output_configs(cfg))
         if (
@@ -1704,9 +1836,14 @@ class StationRuntime:
         if (cfg.icecast_enabled or extra_configured) and not cfg.local_output_enabled:
             try:
                 icecast_enabled = bool(
-                    cfg.icecast_enabled and self._ensure_icecast_sink(cfg)
+                    cfg.icecast_enabled
+                    and self._ensure_icecast_sink(
+                        cfg, preserve_pcm=preserve_sink_pcm
+                    )
                 )
-                extra_results = self._ensure_extra_icecast_sinks(cfg)
+                extra_results = self._ensure_extra_icecast_sinks(
+                    cfg, preserve_pcm=preserve_sink_pcm
+                )
                 if not icecast_enabled and not any(extra_results.values()):
                     raise FileNotFoundError("ffmpeg")
                 self._process = self._spawn_icecast_pcm_producer(
@@ -1759,8 +1896,13 @@ class StationRuntime:
         except FileNotFoundError:
             pass
 
-        icecast_enabled = bool(cfg.icecast_enabled and self._ensure_icecast_sink(cfg))
-        extra_results = self._ensure_extra_icecast_sinks(cfg)
+        icecast_enabled = bool(
+            cfg.icecast_enabled
+            and self._ensure_icecast_sink(cfg, preserve_pcm=preserve_sink_pcm)
+        )
+        extra_results = self._ensure_extra_icecast_sinks(
+            cfg, preserve_pcm=preserve_sink_pcm
+        )
         extra_enabled = any(extra_results.values())
         local_enabled = bool(cfg.local_output_enabled and self._ensure_local_sink(cfg))
         self._local_process = None
@@ -1826,6 +1968,7 @@ class StationRuntime:
         *,
         start_offset_seconds: float = 0.0,
         rebuild_sinks: bool = False,
+        preserve_sink_pcm: bool = False,
     ) -> None:
         target_signature = self._signature(cfg)
         self._last_transition_mode = "restart"
@@ -1843,12 +1986,14 @@ class StationRuntime:
                 cfg,
                 target_signature,
                 start_offset_seconds=start_offset_seconds,
+                preserve_sink_pcm=preserve_sink_pcm,
             )
             return
         self._launch_steady_state(
             cfg,
             target_signature,
             start_offset_seconds=start_offset_seconds,
+            preserve_sink_pcm=preserve_sink_pcm,
         )
 
     def _start_crossfade(self, cfg: StationPipelineConfig) -> None:
@@ -1988,10 +2133,37 @@ class StationRuntime:
         cfg: StationPipelineConfig,
         *,
         start_offset_seconds: float = 0.0,
+        force_restart: bool = False,
+        expected_active_input_uri: str | None = None,
     ) -> None:
         self._refresh_runtime_bins()
         target_signature = self._signature(cfg)
         live_mix_requested = self._should_use_live_mix()
+        if force_restart:
+            def normalized_uri(value: object) -> str:
+                return str(value or "").strip().replace("\\", "/").rstrip("/").casefold()
+
+            expected_uri = normalized_uri(expected_active_input_uri)
+            active_uri = normalized_uri(
+                self._active_cfg.input_uri if self._active_cfg is not None else ""
+            )
+            requested_uri = normalized_uri(cfg.input_uri)
+            fanout_inflight, _fanout_age = self._program_fanout_health()
+            if (
+                not expected_uri
+                or expected_uri != active_uri
+                or expected_uri != requested_uri
+                or self._active_signature != target_signature
+                or not self.is_running()
+                or fanout_inflight
+            ):
+                raise RuntimeError("forced producer restart precondition failed")
+            self._restart_with(
+                cfg,
+                start_offset_seconds=start_offset_seconds,
+                preserve_sink_pcm=True,
+            )
+            return
         if self.is_running():
             if self._active_signature == target_signature:
                 self._active_cfg = cfg
@@ -2100,25 +2272,22 @@ class StationRuntime:
         if cfg is None:
             raise RuntimeError("no active playout request")
 
-        # Keep the decoded programme clock and current crossfade alive.  RTSAS
-        # needs a brief source-free window before a replacement source owns the
-        # mount; reconnect branches sequentially so one mount's late cleanup
-        # cannot interfere with another mount or restart the current song.
+        # Keep the decoded programme clock and output targets stable while each
+        # sink reconnects. The sink's preserved dispatch FIFO accepts the PCM
+        # generated during RTSAS's source-free release window, then drains it
+        # in order after the replacement source is registered.
         if cfg.icecast_enabled:
             sink = self._icecast_sink
-            self._icecast_sink = None
             self._router.set_branch_health("icecast", False)
             if sink is not None:
                 sink.stop(preserve_pcm=True)
             time.sleep(_ORIGIN_SOURCE_RELEASE_SECONDS)
-            if sink is not None:
-                self._icecast_sink = sink
             self._ensure_icecast_sink(cfg, preserve_pcm=True)
 
         desired = self._extra_output_configs(cfg)
         for branch, output_cfg in desired.items():
             with self._extra_icecast_lock:
-                sink = self._extra_icecast_sinks.pop(branch, None)
+                sink = self._extra_icecast_sinks.get(branch)
             self._router.set_branch_health(branch, False)
             if sink is not None:
                 sink.stop(preserve_pcm=True)
@@ -2136,8 +2305,6 @@ class StationRuntime:
                     output_cfg.icecast_mount,
                     exc,
                 )
-            with self._extra_icecast_lock:
-                self._extra_icecast_sinks[branch] = sink
             self._router.set_branch_health(branch, healthy)
 
         self._release_disabled_sinks(cfg)
@@ -2152,13 +2319,10 @@ class StationRuntime:
             return self.status()
 
         sink = self._icecast_sink
-        self._icecast_sink = None
         self._router.set_branch_health("icecast", False)
         if sink is not None:
             sink.stop(preserve_pcm=True)
         time.sleep(_ORIGIN_STALE_SOURCE_RELEASE_SECONDS)
-        if sink is not None:
-            self._icecast_sink = sink
         self._ensure_icecast_sink(cfg, preserve_pcm=True)
         return self.status()
 
@@ -2200,6 +2364,7 @@ class StationRuntime:
             0.0,
             time.monotonic() - float(self._last_program_pcm_monotonic or 0.0),
         )
+        fanout_inflight, _fanout_age = self._program_fanout_health()
         monitored = self._backend in {
             "ffmpeg",
             "live-mix",
@@ -2208,6 +2373,7 @@ class StationRuntime:
             monitored
             and self._program_running()
             and age >= _PROGRAM_PCM_STALL_SECONDS
+            and not fanout_inflight
         )
         return age, stalled
 
@@ -2303,6 +2469,13 @@ class StationRuntime:
         program_running = self._program_running()
         output_feed_active = self._output_feed_active()
         program_pcm_age, program_pcm_stalled = self._program_pcm_health()
+        program_fanout_inflight, program_fanout_inflight_seconds = (
+            self._program_fanout_health()
+        )
+        program_fanout_blocked = bool(
+            program_fanout_inflight
+            and program_fanout_inflight_seconds >= _PROGRAM_FANOUT_BLOCKED_SECONDS
+        )
         icecast_mount_health = (
             self._icecast_sink.health_snapshot()
             if self._icecast_sink is not None
@@ -2346,17 +2519,22 @@ class StationRuntime:
         delivery_health = dict(branch_health)
         delivery_health["icecast"] = bool(
             branch_health.get("icecast")
-            and icecast_mount_health.get("mount_healthy") is True
+            and icecast_mount_transport_is_healthy(icecast_mount_health)
         )
         for item in extra_icecast_mounts:
             branch = str(item.get("branch") or "")
             if branch:
                 delivery_health[branch] = bool(
                     branch_health.get(branch)
-                    and dict(item.get("health") or {}).get("mount_healthy") is True
+                    and icecast_mount_transport_is_healthy(
+                        item.get("health")
+                    )
                 )
         producer_exit_current = (
             self._producer_exit_generation == self._playout_generation
+        )
+        producer_eof, producer_draining = self._producer_exit_drain_state(
+            current=producer_exit_current
         )
         return {
             "running": output_feed_active,
@@ -2370,6 +2548,11 @@ class StationRuntime:
             "output_feed_active": output_feed_active,
             "program_pcm_age_seconds": round(program_pcm_age, 3),
             "program_pcm_stalled": program_pcm_stalled,
+            "program_fanout_blocked": program_fanout_blocked,
+            "program_fanout_inflight": program_fanout_inflight,
+            "program_fanout_blocked_seconds": round(
+                program_fanout_inflight_seconds, 3
+            ),
             "icecast_sink_running": self._icecast_sink_running(),
             "icecast_mount_health": icecast_mount_health,
             "extra_icecast_mounts": extra_icecast_mounts,
@@ -2380,11 +2563,9 @@ class StationRuntime:
             ),
             "local_sink_running": self._local_sink_running(),
             "backend": str(self._backend or "none"),
-            "producer_eof": bool(
-                producer_exit_current
-                and self._producer_exit_code == 0
-                and self._producer_exit_pcm_accepted
-            ),
+            "producer_eof": producer_eof,
+            "producer_draining": producer_draining,
+            "producer_drain_scope": "encoder_input_fifo",
             "producer_exit_code": (
                 self._producer_exit_code if producer_exit_current else None
             ),

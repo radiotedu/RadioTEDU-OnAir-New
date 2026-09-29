@@ -12,6 +12,7 @@ from logging.handlers import RotatingFileHandler
 from multiprocessing.connection import Client
 from pathlib import Path
 
+from app.audio.output_health import icecast_mount_transport_is_healthy
 from app.engine.process_audio_bridge import ProcessAudioBridgeClient
 from app.engine.runtime_registry import StationRuntimeRegistry
 from app.engine.runtime_supervisor import RuntimeSupervisor
@@ -226,8 +227,30 @@ def _write_heartbeat(
     _atomic_write_json(heartbeat_path, document)
 
 
+def _icecast_mount_transport_healthy(
+    health: dict | None,
+    *,
+    sink_running: bool | None = None,
+    require_process: bool = True,
+) -> bool:
+    """Require a live writer and recent local/network writes for one mount."""
+
+    mount = dict(health or {})
+    return icecast_mount_transport_is_healthy(
+        mount,
+        require_mount_healthy=False,
+        sink_running=sink_running,
+        require_process=require_process,
+        # Older worker snapshots exposed network-write ages before they exposed
+        # the explicit network_writer_running flag. Keep accepting those
+        # snapshots when their write timestamps are fresh; current snapshots
+        # still require the explicit writer-liveness evidence.
+        require_network_writer="network_writer_running" in mount,
+    )
+
+
 def _transport_is_healthy(runtime_status: dict | None) -> bool:
-    """Return whether the worker is still delivering current program audio."""
+    """Return whether every configured output is delivering current PCM."""
 
     status = dict(runtime_status or {})
     if not bool(status.get("program_running")):
@@ -242,48 +265,72 @@ def _transport_is_healthy(runtime_status: dict | None) -> bool:
         return False
 
     required = dict(status.get("required_outputs") or {})
-    if bool(required.get("icecast")):
-        mount = dict(status.get("icecast_mount_health") or {})
-        try:
-            write_age = float(mount.get("last_write_age_seconds") or 0.0)
-        except (TypeError, ValueError):
-            return False
-        if (
-            not bool(mount.get("process_running"))
-            or not bool(mount.get("writer_running"))
-            or bool(mount.get("writer_failed"))
-            or write_age > 5.0
-        ):
-            return False
-        if bool(mount.get("network_failed")):
-            return False
-        network_write_age = mount.get("last_network_write_age_seconds")
-        if network_write_age is not None:
-            try:
-                if float(network_write_age) > 5.0:
-                    return False
-            except (TypeError, ValueError):
-                return False
-        # Backpressure can remain latched while a healthy writer keeps its
-        # normal several-second reserve. Treat it as a fault only when the
-        # bounded queue is actually saturated for a sustained interval.
-        try:
-            queue_age = float(mount.get("writer_backpressure_age_seconds") or 0.0)
-            queue_seconds = float(mount.get("queued_pcm_seconds") or 0.0)
-            queue_capacity = float(mount.get("pcm_queue_capacity_chunks") or 0.0)
-        except (TypeError, ValueError):
-            return False
-        queue_capacity_seconds = queue_capacity * 4096.0 / (48000.0 * 2.0 * 2.0)
-        sustained_saturation = bool(
-            mount.get("writer_backpressured")
-            and queue_age >= 30.0
-            and queue_capacity_seconds > 0.0
-            and queue_seconds >= queue_capacity_seconds * 0.9
-        )
-        if sustained_saturation:
-            return False
-    if bool(required.get("local")) and not bool(status.get("local_sink_running")):
+    # Older worker snapshots can omit the required-output map even while the
+    # station's primary Icecast mount is configured. Keep the broadcast default
+    # fail-closed; an explicit icecast=False still represents an opt-out.
+    required.setdefault("icecast", True)
+    delivery = dict(status.get("delivery_health") or {})
+    branches = dict(status.get("branch_health") or {})
+    extra_mounts = {
+        str(item.get("branch") or ""): dict(item.get("health") or {})
+        for item in status.get("extra_icecast_mounts") or ()
+        if isinstance(item, dict) and str(item.get("branch") or "")
+    }
+    required_branches = {
+        str(output_name)
+        for output_name, enabled in required.items()
+        if bool(enabled)
+    }
+    # Older heartbeat/status payloads may omit required_outputs while still
+    # carrying the configured secondary branches. Treat those Icecast outputs
+    # as required unless the configuration explicitly disables one.
+    if "icecast" not in required:
+        required_branches.add("icecast")
+    configured_branches = set(extra_mounts)
+    configured_branches.update(
+        str(name)
+        for health_map in (delivery, branches)
+        for name in health_map
+        if str(name).startswith("icecast:")
+    )
+    required_branches.update(
+        branch
+        for branch in configured_branches
+        if branch not in required or bool(required[branch])
+    )
+    if not required_branches:
         return False
+
+    for branch in required_branches:
+        if branch in delivery and not bool(delivery[branch]):
+            return False
+        if branch in branches and not bool(branches[branch]):
+            return False
+
+        if branch == "icecast":
+            primary_health = status.get("icecast_mount_health")
+            if not _icecast_mount_transport_healthy(
+                primary_health,
+                sink_running=status.get("icecast_sink_running"),
+            ):
+                return False
+        elif branch == "local":
+            if not bool(status.get("local_sink_running")):
+                return False
+        elif branch.startswith("icecast:"):
+            mount_health = extra_mounts.get(branch)
+            if mount_health is not None:
+                if not _icecast_mount_transport_healthy(
+                    mount_health, require_process=False
+                ):
+                    return False
+            elif branch not in delivery or not bool(delivery[branch]):
+                # Older status payloads may only expose the aggregated
+                # delivery flag. If neither form carries evidence, fail closed.
+                return False
+        elif branch not in delivery and branch not in branches:
+            return False
+
     return True
 
 

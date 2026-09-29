@@ -367,6 +367,22 @@ def test_host_item_is_consumed_only_after_matching_clean_eof():
     assert started == []
 
 
+def test_host_item_stays_owned_while_encoder_input_fifos_drain():
+    worker, started, popped = _host_worker(
+        {
+            "running": True,
+            "program_running": False,
+            "producer_eof": False,
+            "producer_draining": True,
+            "active_input_uri": "E:/Host/show.mp3",
+        }
+    )
+
+    assert worker._advance_host_track() is False
+    assert popped == []
+    assert started == []
+
+
 def test_repeated_host_crash_releases_playout_without_consuming_item():
     worker, started, popped = _host_worker(
         {

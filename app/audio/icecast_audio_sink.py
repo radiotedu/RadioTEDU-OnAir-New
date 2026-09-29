@@ -267,6 +267,10 @@ class IcecastAudioSink:
         self._pcm_dispatch_stop = threading.Event()
         self._pcm_dispatch_thread = None
         self._pcm_dispatch_pending_chunk = None
+        # The programme dispatcher survives an output-only reconnect. It can
+        # keep accepting PCM into its bounded FIFO while the encoder/source is
+        # being replaced, then resumes the same pending frame in order.
+        self._writer_ready = threading.Event()
         self._pcm_dispatch_backpressured = False
         self._pcm_dispatch_backpressure_started_monotonic = None
         self._writer_stop = threading.Event()
@@ -278,6 +282,11 @@ class IcecastAudioSink:
         self._writer_backpressure_started_monotonic = None
         self._writer_dropped_chunks = 0
         self._writer_silence_chunks = 0
+        # Distinguish admission into the PCM FIFO from output-FIFO drain.
+        # The epoch changes whenever a full stop clears accepted programme PCM.
+        self._pcm_drain_epoch = 0
+        self._pcm_accepted_bytes = 0
+        self._pcm_drained_bytes = 0
         self._last_write_monotonic = None
         self._stderr_stop = threading.Event()
         self._stderr_thread = None
@@ -365,6 +374,7 @@ class IcecastAudioSink:
             try:
                 self._pcm_dispatch_queue.put(payload, timeout=0.05)
                 with self._writer_lock:
+                    self._pcm_accepted_bytes += len(payload)
                     if self._pcm_dispatch_queue.qsize() < max(
                         1, _PCM_INPUT_DISPATCH_QUEUE_MAX_CHUNKS // 2
                     ):
@@ -378,7 +388,9 @@ class IcecastAudioSink:
                         self._pcm_dispatch_backpressure_started_monotonic = time.monotonic()
         return False
 
-    def _write_pcm_blocking(self, chunk: bytes) -> bool:
+    def _write_pcm_blocking(
+        self, chunk: bytes, *, count_accepted: bool = True
+    ) -> bool:
         """Queue PCM losslessly, waiting for bounded space during backpressure."""
 
         if not chunk:
@@ -397,6 +409,9 @@ class IcecastAudioSink:
                         self._writer_backpressure_started_monotonic = time.monotonic()
             try:
                 self._pcm_queue.put(payload, timeout=0.05)
+                if count_accepted:
+                    with self._writer_lock:
+                        self._pcm_accepted_bytes += len(payload)
                 return True
             except queue.Full:
                 with self._writer_lock:
@@ -410,15 +425,38 @@ class IcecastAudioSink:
             try:
                 self._pcm_dispatch_queue.get_nowait()
             except queue.Empty:
-                return
+                break
+        with self._writer_lock:
+            self._pcm_drain_epoch += 1
+            self._pcm_accepted_bytes = 0
+            self._pcm_drained_bytes = 0
+
+    def pcm_drain_watermark(self) -> dict[str, int]:
+        """Return encoder input admission/drain evidence, not listener proof."""
+        with self._writer_lock:
+            return {
+                "epoch": int(self._pcm_drain_epoch),
+                "accepted_bytes": int(self._pcm_accepted_bytes),
+                "drained_bytes": int(self._pcm_drained_bytes),
+            }
 
     def _start_pcm_dispatch_worker(self) -> None:
         if not self._decouple_input_backpressure:
+            return
+        if (
+            self._pcm_dispatch_thread is not None
+            and self._pcm_dispatch_thread.is_alive()
+        ):
             return
         self._pcm_dispatch_stop.clear()
 
         def run() -> None:
             while not self._pcm_dispatch_stop.is_set():
+                # A preserved output restart stops only the encoder writer.
+                # Keep this worker alive with its current pending frame so
+                # producer writes can continue filling the dispatch reserve.
+                if not self._writer_ready.wait(timeout=0.05):
+                    continue
                 payload = self._pcm_dispatch_pending_chunk
                 if payload is None:
                     try:
@@ -428,7 +466,7 @@ class IcecastAudioSink:
                     self._pcm_dispatch_pending_chunk = payload
                 # This worker may wait for its own encoder/network branch. The
                 # primary mount and other auxiliary mounts keep receiving PCM.
-                if self._write_pcm_blocking(payload):
+                if self._write_pcm_blocking(payload, count_accepted=False):
                     self._pcm_dispatch_pending_chunk = None
                 elif self._pcm_dispatch_stop.is_set():
                     break
@@ -539,6 +577,9 @@ class IcecastAudioSink:
                     if dispatch_backpressure_age is None
                     else round(dispatch_backpressure_age, 3)
                 ),
+                "pcm_drain_epoch": int(self._pcm_drain_epoch),
+                "pcm_accepted_bytes": int(self._pcm_accepted_bytes),
+                "pcm_drained_bytes": int(self._pcm_drained_bytes),
                 "dropped_pcm_chunks": int(self._writer_dropped_chunks),
                 "continuity_silence_chunks": int(self._writer_silence_chunks),
                 "last_write_age_seconds": (
@@ -624,7 +665,11 @@ class IcecastAudioSink:
             try:
                 self._pcm_queue.get_nowait()
             except queue.Empty:
-                return
+                break
+        with self._writer_lock:
+            self._pcm_drain_epoch += 1
+            self._pcm_accepted_bytes = 0
+            self._pcm_drained_bytes = 0
 
     def _queued_pcm_bytes(self) -> int:
         # Queue.qsize() counts pipe reads, whose byte lengths vary on Windows.
@@ -670,6 +715,7 @@ class IcecastAudioSink:
 
     def _start_writer_worker(self) -> None:
         self._writer_stop.clear()
+        self._writer_ready.set()
         with self._writer_lock:
             self._writer_failed = False
             self._writer_backpressured = False
@@ -814,6 +860,8 @@ class IcecastAudioSink:
                     with self._writer_lock:
                         self._writer_failed = False
                         self._last_write_monotonic = time.monotonic()
+                        if not silence:
+                            self._pcm_drained_bytes += len(chunk)
                         # The normal playout reserve stays several seconds
                         # deep. Clear a previous pressure warning once the
                         # queue is below half capacity, not only when it drains
@@ -892,15 +940,25 @@ class IcecastAudioSink:
         # across transient source-server failures; stop() performs the final
         # queue cleanup after both workers have exited.
 
-    def _start_connector_worker(self, cfg: StationPipelineConfig) -> None:
+    def _start_connector_worker(
+        self,
+        cfg: StationPipelineConfig,
+        *,
+        preserve_pcm: bool = False,
+    ) -> None:
         def run() -> None:
             effective_cfg = cfg
             fallback_cfg = current_codec_fallback(cfg)
             delay_index = 0
             delays = (1.0, 2.0, 4.0, 8.0, 15.0, 30.0)
             omit_afterburner = False
-            initial_delay = _mount_spread_seconds(
-                cfg, self._initial_connect_spread_sec
+            # Output-only recovery already waits for the origin's old source
+            # session to release. Do not make the retained dispatch FIFO drain
+            # behind a second, multi-second startup spread.
+            initial_delay = (
+                0.0
+                if preserve_pcm
+                else _mount_spread_seconds(cfg, self._initial_connect_spread_sec)
             )
             if initial_delay > 0.0 and self._writer_stop.wait(initial_delay):
                 return
@@ -1141,7 +1199,7 @@ class IcecastAudioSink:
         self._profile_fallback_active = False
         self._start_writer_worker()
         self._start_pcm_dispatch_worker()
-        self._start_connector_worker(cfg)
+        self._start_connector_worker(cfg, preserve_pcm=preserve_pcm)
         self._start_probe_worker(
             cfg,
             preserve_failure_state=False,
@@ -1163,8 +1221,14 @@ class IcecastAudioSink:
         preserve_pcm: bool = False,
     ) -> None:
         self._probe_stop.set()
-        self._pcm_dispatch_stop.set()
+        # For an output-only recovery the dispatch worker and its input FIFO
+        # remain alive. That preserves frames produced during the mount release
+        # window; a full FIFO backpressures the station producer rather than
+        # returning a false acceptance or throwing audio away.
         self._writer_stop.set()
+        self._writer_ready.clear()
+        if not preserve_pcm:
+            self._pcm_dispatch_stop.set()
         self._stderr_stop.set()
         self._mount_reconnect_requested.clear()
         self._signature = None
@@ -1176,9 +1240,10 @@ class IcecastAudioSink:
         if self._writer_thread is not None:
             self._writer_thread.join(timeout=3.0)
         self._writer_thread = None
-        if self._pcm_dispatch_thread is not None:
-            self._pcm_dispatch_thread.join(timeout=3.0)
-        self._pcm_dispatch_thread = None
+        if not preserve_pcm:
+            if self._pcm_dispatch_thread is not None:
+                self._pcm_dispatch_thread.join(timeout=3.0)
+            self._pcm_dispatch_thread = None
         if self._connector_thread is not None:
             self._connector_thread.join(timeout=4.0)
         self._connector_thread = None

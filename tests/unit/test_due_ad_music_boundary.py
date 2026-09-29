@@ -509,6 +509,125 @@ class DueAdMusicBoundaryTests(unittest.TestCase):
         self.assertTrue(advanced)
         self.assertEqual(worker.completed, [12])
 
+    def test_sweeper_stays_owned_while_configured_output_fifos_drain(self):
+        worker = self._worker(None)
+        started_at = datetime.datetime.now(datetime.timezone.utc).replace(
+            tzinfo=None
+        ) - datetime.timedelta(seconds=4)
+        worker.queue_repo.playing.update(
+            started_at=started_at.strftime("%Y-%m-%d %H:%M:%S"),
+            duration=1.0,
+            track_type="jingle",
+        )
+        worker.runtime_registry._status.update(
+            program_running=False,
+            producer_eof=False,
+            producer_draining=True,
+            active_input_uri="test://current-song",
+        )
+        worker._track_runtime_fields = lambda _track_id: (
+            "test://current-song",
+            "TEDU Sweeper",
+            "RadioTEDU",
+            "",
+            "jingle",
+        )
+
+        advanced = worker._advance_playing_queue_item()
+
+        self.assertFalse(advanced)
+        self.assertEqual(worker.completed, [])
+        self.assertIsNotNone(worker.queue_repo.playing)
+
+    def test_ad_stays_owned_until_configured_output_fifos_drain(self):
+        worker = self._worker(None)
+        started_at = datetime.datetime.now(datetime.timezone.utc).replace(
+            tzinfo=None
+        ) - datetime.timedelta(seconds=45)
+        worker.ad_repo.playing = {
+            "id": 23,
+            "track_id": 711,
+            "started_at": started_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "duration": 20.0,
+        }
+        worker.runtime_registry._status.update(
+            program_running=False,
+            producer_eof=False,
+            producer_draining=True,
+            active_input_uri="test://powerapp-ad",
+        )
+        worker._track_runtime_fields = lambda _track_id: (
+            "test://powerapp-ad",
+            "PowerApp",
+            "RadioTEDU",
+            "",
+            "ad",
+        )
+        worker._start_runtime_station = lambda *_args, **_kwargs: self.fail(
+            "must not start another source while the current ad FIFO drains"
+        )
+
+        advanced = worker._advance_playing_ad_item()
+
+        self.assertFalse(advanced)
+        self.assertEqual(worker.ad_repo.done, [])
+        self.assertEqual(worker.ad_repo.playing["id"], 23)
+
+    def test_forced_restart_is_rejected_while_fanout_is_blocked(self):
+        worker = self._worker(None)
+        status = {
+            "program_running": True,
+            "program_pcm_stalled": True,
+            "program_fanout_blocked": True,
+            "program_fanout_inflight": True,
+            "active_input_uri": "test://current-song",
+        }
+
+        self.assertEqual(
+            worker._forced_restart_kwargs_for_stalled_source(
+                status, "test://current-song"
+            ),
+            {},
+        )
+
+        status["program_fanout_blocked"] = False
+        status["program_fanout_inflight"] = False
+        self.assertEqual(
+            worker._forced_restart_kwargs_for_stalled_source(
+                status, "test://current-song"
+            ),
+            {
+                "force_restart": True,
+                "expected_active_input_uri": "test://current-song",
+            },
+        )
+
+    def test_stalled_same_source_recovery_requests_explicit_forced_restart(self):
+        worker = self._worker(None)
+        started = []
+        worker.runtime_registry.start_station = lambda *args, **kwargs: started.append(
+            (args, kwargs)
+        )
+        worker.runtime_registry._status = {
+            "program_running": True,
+            "program_pcm_stalled": True,
+            "program_fanout_blocked": False,
+            "program_fanout_inflight": False,
+            "producer_eof": False,
+            "active_input_uri": "test://current-song",
+        }
+
+        assert worker._restart_playing_queue_item_if_runtime_mismatched(
+            worker.queue_repo.playing,
+            start_offset_seconds=0.0,
+        ) is True
+
+        assert len(started) == 1
+        assert started[0][0][1] == "test://current-song"
+        assert started[0][1]["force_restart"] is True
+        assert started[0][1]["expected_active_input_uri"] == "test://current-song"
+        assert worker.queue_repo.playing is not None
+
 
 if __name__ == "__main__":
     unittest.main()

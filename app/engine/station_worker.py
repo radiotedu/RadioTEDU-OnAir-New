@@ -1108,6 +1108,9 @@ class StationWorker:
             )
             return False
 
+        if self._runtime_source_is_draining(rt_status, track_uri):
+            return False
+
         if self._runtime_source_finished_naturally(rt_status, track_uri):
             # Only a clean EOF for this exact source consumes a host item.
             self.program_queue_repo.pop_item(item_id)
@@ -1140,6 +1143,9 @@ class StationWorker:
                 track_type=track_type,
                 crossfade_seconds=0.0,
                 start_offset_seconds=0.0,
+                **self._forced_restart_kwargs_for_stalled_source(
+                    rt_status, track_uri
+                ),
             )
             reason = "host_runtime_recovered"
         except Exception:
@@ -1382,6 +1388,37 @@ class StationWorker:
         active_uri = str(rt_status.get("active_input_uri") or "").strip()
         return bool(active_uri and self._same_runtime_uri(active_uri, expected_uri))
 
+    def _runtime_source_is_draining(
+        self, rt_status: dict | None, expected_uri: str
+    ) -> bool:
+        if not isinstance(rt_status, dict) or not bool(
+            rt_status.get("producer_draining", False)
+        ):
+            return False
+        active_uri = str(rt_status.get("active_input_uri") or "").strip()
+        return bool(active_uri and self._same_runtime_uri(active_uri, expected_uri))
+
+    def _forced_restart_kwargs_for_stalled_source(
+        self, rt_status: dict | None, expected_uri: str
+    ) -> dict:
+        """Only force a same-source restart for decoder stalls outside fanout."""
+        if not isinstance(rt_status, dict):
+            return {}
+        active_uri = str(rt_status.get("active_input_uri") or "").strip()
+        if not (
+            bool(rt_status.get("program_running", False))
+            and bool(rt_status.get("program_pcm_stalled", False))
+            and not bool(rt_status.get("program_fanout_blocked", False))
+            and not bool(rt_status.get("program_fanout_inflight", False))
+            and active_uri
+            and self._same_runtime_uri(active_uri, expected_uri)
+        ):
+            return {}
+        return {
+            "force_restart": True,
+            "expected_active_input_uri": active_uri,
+        }
+
     @staticmethod
     def _runtime_program_running(rt_status: dict | None) -> bool:
         if not isinstance(rt_status, dict):
@@ -1481,6 +1518,8 @@ class StationWorker:
         track_id = int(self._row_value(playing, "track_id", 0) or 0)
         track_uri, title, artist, album, track_type = self._track_runtime_fields(track_id)
         status = self.runtime_registry.status(self.station_id)
+        if self._runtime_source_is_draining(status, track_uri):
+            return False
         if self._runtime_source_finished_naturally(status, track_uri):
             # FFmpeg decoded the complete spot into the sink queue. Restarting
             # it while that reserve drains would replay its trailing audio.
@@ -1527,6 +1566,7 @@ class StationWorker:
                 stream_album=album,
                 track_type=track_type,
                 crossfade_seconds=0.0,
+                **self._forced_restart_kwargs_for_stalled_source(status, track_uri),
             )
             self.ad_repo.mark_playing(item_id)
             self._set_playout_state("ads", item_id, reason="ad_runtime_recovered")
@@ -1706,6 +1746,8 @@ class StationWorker:
                     exc_info=True,
                 )
                 return False
+            if self._runtime_source_is_draining(runtime_status, track_uri):
+                return False
             if self._runtime_source_finished_naturally(runtime_status, track_uri):
                 item_id = int(self._row_value(playing, "id", 0) or 0)
                 self.ad_repo.mark_done(item_id)
@@ -1771,6 +1813,9 @@ class StationWorker:
             )
             return True
 
+        if self._runtime_source_is_draining(status, track_uri):
+            return True
+
         if self._runtime_source_finished_naturally(status, track_uri):
             # The complete decoded programme is already behind the current
             # frames in each sink's FIFO. Mark it done and let the next source
@@ -1832,6 +1877,7 @@ class StationWorker:
                 stream_album=album,
                 track_type=track_type,
                 crossfade_seconds=0.0,
+                **self._forced_restart_kwargs_for_stalled_source(status, track_uri),
             )
             self._set_playout_state(
                 "schedule", item_id, reason="schedule_runtime_recovered"
@@ -1943,6 +1989,8 @@ class StationWorker:
             self._set_playout_state("none", None, reason="manual_track_missing")
             return True
         status = self.runtime_registry.status(self.station_id)
+        if self._runtime_source_is_draining(status, track_uri):
+            return False
         if self._runtime_playback_alive(status) and self._runtime_playback_matches(
             status, track_uri
         ):
@@ -1982,6 +2030,7 @@ class StationWorker:
                 track_type=track_type,
                 crossfade_seconds=0.0,
                 start_offset_seconds=max(0.0, float(start_offset_seconds or 0.0)),
+                **self._forced_restart_kwargs_for_stalled_source(status, track_uri),
             )
             self._set_playout_state(
                 "manual", item_id, reason="manual_runtime_recovered"

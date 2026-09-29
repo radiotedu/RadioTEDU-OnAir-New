@@ -2,6 +2,7 @@ import threading
 import time
 import builtins
 import json
+import pytest
 
 import app.engine.runtime_registry as runtime_registry_module
 from app.audio.gst_pipeline import StationPipelineConfig
@@ -589,3 +590,100 @@ def test_registry_stop_all_stops_and_clears():
     assert int(summary["stopped"]) == 2
     assert reg._runtimes == {}
     assert reg._required_outputs == {}
+
+
+def _queue_health(*, saturated_queue=None):
+    health = {
+        "process_running": True,
+        "mount_healthy": True,
+        "writer_running": True,
+        "writer_failed": False,
+        "writer_backpressured": False,
+        "writer_backpressure_age_seconds": 0.0,
+        "queued_pcm_seconds": 3.0,
+        "queued_pcm_chunks": 140,
+        "pcm_queue_capacity_chunks": 1024,
+        "pcm_dispatcher_running": True,
+        "pcm_dispatch_backpressured": False,
+        "pcm_dispatch_backpressure_age_seconds": 0.0,
+        "queued_dispatch_pcm_seconds": 2.0,
+        "queued_dispatch_pcm_chunks": 94,
+        "pcm_dispatch_queue_capacity_chunks": 512,
+        "network_writer_running": True,
+        "network_failed": False,
+        "last_write_age_seconds": 0.2,
+        "last_network_write_age_seconds": 0.2,
+    }
+    if saturated_queue == "pcm":
+        health.update(
+            {
+                "writer_backpressured": True,
+                "writer_backpressure_age_seconds": 31.0,
+                "queued_pcm_seconds": 20.9,
+                "queued_pcm_chunks": 1000,
+            }
+        )
+    elif saturated_queue == "dispatch":
+        health.update(
+            {
+                "pcm_dispatch_backpressured": True,
+                "pcm_dispatch_backpressure_age_seconds": 31.0,
+                "queued_dispatch_pcm_seconds": 10.6,
+                "queued_dispatch_pcm_chunks": 500,
+            }
+        )
+    return health
+
+
+class _QueueSaturationRuntime:
+    def __init__(self, *, target_branch, saturated_queue):
+        self.primary_health = _queue_health(
+            saturated_queue=saturated_queue if target_branch == "icecast" else None
+        )
+        self.secondary_health = _queue_health(
+            saturated_queue=(
+                saturated_queue if target_branch == "icecast:/low" else None
+            )
+        )
+
+    def branch_health(self):
+        # Simulate stale-true router flags. Per-mount telemetry must overrule it.
+        return {"icecast": True, "icecast:/low": True}
+
+    def is_running(self):
+        return True
+
+    def status(self):
+        return {
+            "running": True,
+            "output_feed_active": True,
+            "program_running": True,
+            "program_pcm_stalled": False,
+            "program_pcm_age_seconds": 0.2,
+            "delivery_health": {"icecast": True, "icecast:/low": True},
+            "icecast_mount_health": self.primary_health,
+            "extra_icecast_mounts": [
+                {"branch": "icecast:/low", "health": self.secondary_health}
+            ],
+        }
+
+
+@pytest.mark.parametrize("target_branch", ["icecast", "icecast:/low"])
+@pytest.mark.parametrize("saturated_queue", ["pcm", "dispatch"])
+def test_sustained_saturated_required_output_triggers_recovery(
+    target_branch, saturated_queue
+):
+    runtime = _QueueSaturationRuntime(
+        target_branch=target_branch,
+        saturated_queue=saturated_queue,
+    )
+    registry = StationRuntimeRegistry(runtime_factory=lambda: runtime)
+    registry._runtimes[1] = runtime
+    registry._required_outputs[1] = {
+        "icecast": True,
+        "icecast:/low": True,
+        "local": False,
+    }
+
+    assert registry.required_outputs_healthy(1) is False
+    assert registry._unverified_icecast_transport_is_flowing(1, runtime) is False

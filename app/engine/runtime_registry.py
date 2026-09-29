@@ -9,6 +9,7 @@ from urllib.request import Request, urlopen
 
 from app.audio.gst_pipeline import StationPipelineConfig
 from app.audio.metadata_policy import icecast_metadata_outputs
+from app.audio.output_health import icecast_mount_transport_is_healthy
 from app.audio.station_runtime import StationRuntime
 from app.db import get_connection, init_db
 from app.media_paths import resolve_runtime_media_path
@@ -1185,6 +1186,8 @@ class StationRuntimeRegistry:
         track_type: str = "music",
         crossfade_seconds: float | None = None,
         start_offset_seconds: float = 0.0,
+        force_restart: bool = False,
+        expected_active_input_uri: str | None = None,
     ) -> dict:
         with self._operation_lock(station_id):
             return self._start_station_unlocked(
@@ -1196,6 +1199,8 @@ class StationRuntimeRegistry:
                 track_type=track_type,
                 crossfade_seconds=crossfade_seconds,
                 start_offset_seconds=start_offset_seconds,
+                force_restart=force_restart,
+                expected_active_input_uri=expected_active_input_uri,
             )
 
     def _start_station_unlocked(
@@ -1208,6 +1213,8 @@ class StationRuntimeRegistry:
         track_type: str = "music",
         crossfade_seconds: float | None = None,
         start_offset_seconds: float = 0.0,
+        force_restart: bool = False,
+        expected_active_input_uri: str | None = None,
     ) -> dict:
         init_db()
         conn = get_connection()
@@ -1318,10 +1325,15 @@ class StationRuntimeRegistry:
         runtime = self._get_or_create(station_id)
         self.refresh_live_audio_settings(station_id)
         metadata_generation = self._next_metadata_generation(station_id)
-        runtime.start(
-            cfg,
-            start_offset_seconds=max(0.0, float(start_offset_seconds or 0.0)),
-        )
+        runtime_start_kwargs = {
+            "start_offset_seconds": max(0.0, float(start_offset_seconds or 0.0))
+        }
+        if force_restart:
+            runtime_start_kwargs.update(
+                force_restart=True,
+                expected_active_input_uri=str(expected_active_input_uri or ""),
+            )
+        runtime.start(cfg, **runtime_start_kwargs)
         with self._recovery_lock:
             self._recovery_state.pop(int(station_id), None)
         if bool(cfg.icecast_enabled):
@@ -1688,37 +1700,20 @@ class StationRuntimeRegistry:
             pcm_age = float(status.get("program_pcm_age_seconds"))
         except (TypeError, ValueError):
             return False
-        try:
-            write_age = float(mount.get("last_write_age_seconds"))
-        except (TypeError, ValueError):
-            return False
         return bool(
             status.get("program_running")
             and not status.get("program_pcm_stalled", False)
-            and pcm_age <= 2.0
-            and mount.get("process_running")
-            and mount.get("writer_running")
-            and not mount.get("writer_failed", False)
-            and not mount.get("writer_backpressured", False)
-            and write_age <= 2.0
+            and pcm_age <= 5.0
+            and self._mount_transport_is_flowing(mount)
         )
 
     @staticmethod
     def _mount_transport_is_flowing(mount: dict) -> bool:
-        if not (
-            mount.get("network_writer_running")
-            and mount.get("writer_running")
-            and not mount.get("writer_failed", False)
-            and not mount.get("network_failed", False)
-            and not mount.get("writer_backpressured", False)
-        ):
-            return False
-        try:
-            write_age = float(mount.get("last_write_age_seconds"))
-            network_write_age = float(mount.get("last_network_write_age_seconds"))
-        except (TypeError, ValueError):
-            return False
-        return write_age <= 5.0 and network_write_age <= 5.0
+        return icecast_mount_transport_is_healthy(
+            mount,
+            require_mount_healthy=False,
+            require_network_writer="network_writer_running" in mount,
+        )
 
     def is_process_running(self, station_id: int) -> bool:
         """Lightweight check: is the station's audio feed still active?
@@ -1756,6 +1751,7 @@ class StationRuntimeRegistry:
             return False
         try:
             status = runtime.status() if hasattr(runtime, "status") else {}
+            status = dict(status or {})
             feed_active = bool(
                 status.get("output_feed_active", False)
                 or status.get("running", False)
@@ -1772,17 +1768,35 @@ class StationRuntimeRegistry:
         ]
         if not required_branches:
             return True
-        return all(
-            bool(
-                branches.get(
-                    branch,
-                    branches.get("icecast", False)
-                    if branch.startswith("icecast:")
-                    else False,
-                )
+        delivery = dict(status.get("delivery_health") or {})
+        mounts = {
+            str(item.get("branch") or ""): dict(item.get("health") or {})
+            for item in status.get("extra_icecast_mounts") or ()
+            if isinstance(item, dict) and str(item.get("branch") or "")
+        }
+
+        def branch_is_healthy(branch: str) -> bool:
+            branch_health = branches.get(
+                branch,
+                branches.get("icecast", False)
+                if branch.startswith("icecast:")
+                else False,
             )
-            for branch in required_branches
-        )
+            if not bool(branch_health):
+                return False
+            if branch in delivery and not bool(delivery[branch]):
+                return False
+            if branch == "icecast":
+                mount = status.get("icecast_mount_health")
+                if isinstance(mount, dict):
+                    return icecast_mount_transport_is_healthy(mount)
+            elif branch.startswith("icecast:"):
+                mount = mounts.get(branch)
+                if mount:
+                    return icecast_mount_transport_is_healthy(mount)
+            return True
+
+        return all(branch_is_healthy(branch) for branch in required_branches)
 
     def snapshot(self) -> list[dict]:
         station_ids = sorted(
