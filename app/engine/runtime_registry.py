@@ -9,7 +9,10 @@ from urllib.request import Request, urlopen
 
 from app.audio.gst_pipeline import StationPipelineConfig
 from app.audio.metadata_policy import icecast_metadata_outputs
-from app.audio.output_health import icecast_mount_transport_is_healthy
+from app.audio.output_health import (
+    icecast_mount_has_sustained_saturation,
+    icecast_mount_transport_is_healthy,
+)
 from app.audio.station_runtime import StationRuntime
 from app.db import get_connection, init_db
 from app.media_paths import resolve_runtime_media_path
@@ -521,6 +524,7 @@ class StationRuntimeRegistry:
         self._metadata_worker_lock = threading.Lock()
         self._recovery_lock = threading.RLock()
         self._recovery_state: dict[int, dict] = {}
+        self._branch_recovery_state: dict[tuple[int, str], dict] = {}
         self._operation_locks_lock = threading.Lock()
         self._operation_locks: dict[int, threading.RLock] = {}
         if self._live_mic_registry is not None:
@@ -1501,6 +1505,26 @@ class StationRuntimeRegistry:
                 if now < float(previous.get("next_attempt_monotonic") or 0.0):
                     return self.status(sid)
 
+            try:
+                current_status = dict(runtime.status() or {})
+            except Exception:
+                current_status = {}
+            primary_health = dict(current_status.get("icecast_mount_health") or {})
+            if not self._output_failure_confirmed(primary_health):
+                with self._recovery_lock:
+                    self._recovery_state[sid] = {
+                        "state": "monitoring",
+                        "attempt_count": int(previous.get("attempt_count") or 0),
+                        "next_attempt_monotonic": (
+                            time.monotonic() + _PRIMARY_OUTPUT_MONITOR_RECHECK_SECONDS
+                        ),
+                        "error_code": "output_unverified",
+                        "message": (
+                            "Waiting for a confirmed primary mount failure before reconnecting."
+                        ),
+                    }
+                return self.status(sid)
+
             if self._unverified_icecast_transport_is_flowing(sid, runtime):
                 with self._recovery_lock:
                     self._recovery_state[sid] = {
@@ -1567,6 +1591,136 @@ class StationRuntimeRegistry:
                 }
             return self.status(sid)
 
+    @staticmethod
+    def _output_failure_confirmed(mount: dict | None) -> bool:
+        health = dict(mount or {})
+        if (
+            health.get("mount_healthy") is False
+            or bool(health.get("writer_failed"))
+            or bool(health.get("network_failed"))
+            or icecast_mount_has_sustained_saturation(health)
+        ):
+            return True
+        for key in ("last_write_age_seconds", "last_network_write_age_seconds"):
+            try:
+                if float(health.get(key)) > 10.0:
+                    return True
+            except (TypeError, ValueError):
+                continue
+        return False
+
+    def recover_station_output(self, station_id: int, branch: str) -> dict:
+        """Recover one failed output without interrupting its sibling mounts."""
+        sid = int(station_id)
+        output_branch = str(branch or "").strip()
+        if output_branch == "icecast":
+            return self.recover_station_primary_output(sid)
+
+        with self._operation_lock(sid):
+            runtime = self._runtimes.get(sid)
+            if runtime is None:
+                return self.status(sid)
+            if not bool(
+                self._required_outputs.get(sid, {}).get(output_branch, False)
+            ):
+                return self.status(sid)
+            recover = getattr(runtime, "recover_output_branch", None)
+            if not callable(recover):
+                return self.status(sid)
+
+            runtime_status = {}
+            try:
+                runtime_status = dict(runtime.status() or {})
+            except Exception:
+                pass
+            delivery = dict(runtime_status.get("delivery_health") or {})
+            branches = dict(runtime_status.get("branch_health") or {})
+            branch_ok = delivery.get(output_branch)
+            if branch_ok is None:
+                branch_ok = branches.get(output_branch)
+            mount = next(
+                (
+                    dict(item.get("health") or {})
+                    for item in runtime_status.get("extra_icecast_mounts") or ()
+                    if isinstance(item, dict)
+                    and str(item.get("branch") or "") == output_branch
+                ),
+                {},
+            )
+            now = time.monotonic()
+            state_key = (sid, output_branch)
+            with self._recovery_lock:
+                previous = dict(self._branch_recovery_state.get(state_key) or {})
+                if now < float(previous.get("next_attempt_monotonic") or 0.0):
+                    return self.status(sid)
+                if bool(branch_ok) and mount.get("mount_healthy") is not False:
+                    self._branch_recovery_state.pop(state_key, None)
+                    return self.status(sid)
+
+            failure_confirmed = self._output_failure_confirmed(mount)
+            if not failure_confirmed:
+                # A branch can be healthy-but-not-connected while its initial
+                # source registration is still retrying. Do not keep restarting
+                # it before the sink's own connector/probe has confirmed failure.
+                with self._recovery_lock:
+                    self._branch_recovery_state[state_key] = {
+                        "state": "monitoring",
+                        "attempt_count": int(previous.get("attempt_count") or 0),
+                        "next_attempt_monotonic": (
+                            time.monotonic() + _OUTPUT_MONITOR_RECHECK_SECONDS
+                        ),
+                        "error_code": "output_unverified",
+                        "message": "Waiting for this output branch's own probe/retry.",
+                    }
+                return self.status(sid)
+
+            attempt_count = int(previous.get("attempt_count") or 0) + 1
+            with self._recovery_lock:
+                self._branch_recovery_state[state_key] = {
+                    "state": "recovering",
+                    "attempt_count": attempt_count,
+                    "next_attempt_monotonic": 0.0,
+                    "error_code": "",
+                    "message": f"Reconnecting output branch {output_branch}.",
+                }
+
+            try:
+                recover(output_branch)
+            except Exception as exc:
+                delay = _OUTPUT_RECOVERY_DELAYS_SECONDS[
+                    min(attempt_count - 1, len(_OUTPUT_RECOVERY_DELAYS_SECONDS) - 1)
+                ]
+                error_code = self._recovery_error_code(exc)
+                with self._recovery_lock:
+                    self._branch_recovery_state[state_key] = {
+                        "state": "retry_wait",
+                        "attempt_count": attempt_count,
+                        "next_attempt_monotonic": time.monotonic() + delay,
+                        "error_code": error_code,
+                        "message": "Output branch recovery is waiting to retry.",
+                    }
+                _log.warning(
+                    "Output branch recovery failed station_id=%s branch=%s "
+                    "attempt=%s code=%s retry_seconds=%.1f",
+                    sid,
+                    output_branch,
+                    attempt_count,
+                    error_code,
+                    delay,
+                )
+            else:
+                with self._recovery_lock:
+                    self._branch_recovery_state[state_key] = {
+                        "state": "monitoring",
+                        "attempt_count": attempt_count,
+                        "next_attempt_monotonic": (
+                            time.monotonic() + _OUTPUT_MONITOR_RECHECK_SECONDS
+                        ),
+                        "error_code": "",
+                        "message": "Output branch restarted; checking delivered audio.",
+                    }
+            return self.status(sid)
+
     def _recover_station_unlocked(
         self, station_id: int, *, force: bool = False
     ) -> dict:
@@ -1582,6 +1736,34 @@ class StationRuntimeRegistry:
             if not force and now < float(
                 previous.get("next_attempt_monotonic") or 0.0
             ):
+                return self.status(sid)
+        required_branches = [
+            str(branch)
+            for branch, is_required in self._required_outputs.get(
+                sid, {"icecast": True, "local": False}
+            ).items()
+            if bool(is_required)
+        ]
+        if required_branches and all(
+            branch == "icecast" or branch.startswith("icecast:")
+            for branch in required_branches
+        ):
+            try:
+                runtime_status = dict(runtime.status() or {})
+                delivery = dict(runtime_status.get("delivery_health") or {})
+                branches = dict(runtime_status.get("branch_health") or {})
+                unhealthy_branches = [
+                    branch
+                    for branch in required_branches
+                    if not bool(delivery.get(branch, branches.get(branch, False)))
+                ]
+            except Exception:
+                unhealthy_branches = []
+            if unhealthy_branches:
+                # Keep recovery scoped to the failed Icecast branch. Rebuilding
+                # the whole station here would disconnect healthy sibling mounts.
+                for branch in unhealthy_branches:
+                    self.recover_station_output(sid, branch)
                 return self.status(sid)
         if not force and self._unverified_icecast_transport_is_flowing(
             sid, runtime

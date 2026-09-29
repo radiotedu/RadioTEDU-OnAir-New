@@ -22,7 +22,7 @@ from app.audio.ffmpeg_pipeline import (
     release_fast_cached_uri,
 )
 from app.audio.gst_pipeline import StationPipelineConfig, build_gst_pipeline
-from app.audio.icecast_audio_sink import IcecastAudioSink
+from app.audio.icecast_audio_sink import IcecastAudioSink, probe_icecast_mount
 from app.audio.shoutcast_audio_sink import ShoutcastAudioSink
 from app.audio.live_audio_mixer import LiveAudioMixer
 from app.audio.local_audio_sink import LocalAudioSink
@@ -1084,10 +1084,11 @@ class StationRuntime:
                 self._icecast_sink = IcecastAudioSink(
                     self.ffmpeg_bin,
                     self._spawn_process,
-                    # Source-write telemetry is cheaper and more useful than
-                    # repeatedly polling listener HTTP headers, which do not
-                    # prove that decoded programme audio is reaching listeners.
-                    mount_probe=None,
+                    # Verify a complete 512-byte listener canary, not only an
+                    # HTTP 200 header, so a half-open mount cannot stay green.
+                    mount_probe=probe_icecast_mount,
+                    probe_failure_threshold=2,
+                    reconnect_failure_threshold=4,
                     initial_connect_spread_sec=30.0,
                     drop_on_backpressure=False,
                     # Stage short source-write stalls in a primary-local FIFO.
@@ -1155,7 +1156,8 @@ class StationRuntime:
                         sink = IcecastAudioSink(
                             self.ffmpeg_bin,
                             self._spawn_process,
-                            mount_probe=None,
+                            mount_probe=probe_icecast_mount,
+                            probe_failure_threshold=2,
                             reconnect_failure_threshold=4,
                             initial_connect_spread_sec=30.0,
                             drop_on_backpressure=False,
@@ -2310,6 +2312,60 @@ class StationRuntime:
         self._release_disabled_sinks(cfg)
         return self.status()
 
+    def recover_output_branch(self, branch: str) -> dict:
+        """Reconnect one output branch while keeping sibling mounts flowing."""
+        output_branch = str(branch or "").strip()
+        if output_branch == "icecast":
+            return self.recover_primary_output()
+        cfg = self._active_cfg
+        if cfg is None:
+            raise RuntimeError("no active playout request")
+
+        output_cfg = self._extra_output_configs(cfg).get(output_branch)
+        if output_cfg is None:
+            raise RuntimeError(f"required output branch is not configured: {output_branch}")
+        protocol = str(output_cfg.source_protocol or "icecast").strip().lower()
+        if protocol not in {"icecast", "shoutcast"}:
+            raise ValueError("unsupported source protocol")
+
+        with self._extra_icecast_lock:
+            sink = self._extra_icecast_sinks.get(output_branch)
+            if sink is None:
+                if protocol == "shoutcast":
+                    sink = ShoutcastAudioSink(self.ffmpeg_bin, self._spawn_process)
+                else:
+                    sink = IcecastAudioSink(
+                        self.ffmpeg_bin,
+                        self._spawn_process,
+                        mount_probe=probe_icecast_mount,
+                        probe_failure_threshold=2,
+                        reconnect_failure_threshold=4,
+                        initial_connect_spread_sec=30.0,
+                        drop_on_backpressure=False,
+                        decouple_input_backpressure=True,
+                    )
+                self._extra_icecast_sinks[output_branch] = sink
+
+        self._router.set_branch_health(output_branch, False)
+        sink.stop(preserve_pcm=True)
+        time.sleep(_ORIGIN_SOURCE_RELEASE_SECONDS)
+        try:
+            sink.ensure_started(output_cfg, preserve_pcm=True)
+            healthy = bool(sink.is_running())
+        except Exception as exc:
+            self._router.set_branch_health(output_branch, False)
+            _log.warning(
+                "Output branch recovery failed station=%s branch=%s mount=%s: %s",
+                self._live_station_id(),
+                output_branch,
+                output_cfg.icecast_mount,
+                exc,
+            )
+            raise
+
+        self._router.set_branch_health(output_branch, healthy)
+        return self.status()
+
     def recover_primary_output(self) -> dict:
         """Clear a confirmed stale primary mount without touching other outputs."""
         cfg = self._active_cfg
@@ -2512,14 +2568,14 @@ class StationRuntime:
             )
         branch_health = self.branch_health()
         # Branch health proves that current PCM is reaching an output worker.
-        # Delivery health is intentionally stricter: a network branch is only
-        # healthy after the Icecast transport has verified the mount itself.
-        # Keeping these signals separate lets the writer retry an origin outage
-        # without making the supervisor restart healthy program playout.
+        # An unconfirmed initial listener probe does not make a starting branch
+        # unhealthy; a confirmed mount miss or stalled writer does.
         delivery_health = dict(branch_health)
         delivery_health["icecast"] = bool(
             branch_health.get("icecast")
-            and icecast_mount_transport_is_healthy(icecast_mount_health)
+            and icecast_mount_transport_is_healthy(
+                icecast_mount_health, require_mount_healthy=False
+            )
         )
         for item in extra_icecast_mounts:
             branch = str(item.get("branch") or "")
@@ -2527,7 +2583,7 @@ class StationRuntime:
                 delivery_health[branch] = bool(
                     branch_health.get(branch)
                     and icecast_mount_transport_is_healthy(
-                        item.get("health")
+                        item.get("health"), require_mount_healthy=False
                     )
                 )
         producer_exit_current = (

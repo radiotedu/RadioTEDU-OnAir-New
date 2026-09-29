@@ -5,12 +5,17 @@ class _FakeRegistry:
     def __init__(self, status_map):
         self.status_map = status_map
         self.stop_calls = []
+        self.output_recovery_calls = []
 
     def status(self, station_id: int):
         return self.status_map[station_id]
 
     def stop_station(self, station_id: int):
         self.stop_calls.append(station_id)
+        return self.status_map[station_id]
+
+    def recover_station_output(self, station_id: int, branch: str):
+        self.output_recovery_calls.append((station_id, branch))
         return self.status_map[station_id]
 
 
@@ -61,6 +66,7 @@ def test_degrade_when_icecast_branch_fails_but_program_is_running():
     out = sup.evaluate_station(2)
     assert out["action"] == "degrade"
     assert reg.stop_calls == []
+    assert reg.output_recovery_calls == []
 
 
 def test_degrade_when_required_secondary_icecast_output_is_unhealthy():
@@ -92,6 +98,7 @@ def test_degrade_when_required_secondary_icecast_output_is_unhealthy():
 
     assert out["action"] == "degrade"
     assert reg.stop_calls == []
+    assert reg.output_recovery_calls == [(5, "icecast:/cazz-low")]
 
 
 def test_no_action_when_all_required_icecast_outputs_are_healthy():
@@ -126,3 +133,4 @@ def test_no_action_when_all_required_icecast_outputs_are_healthy():
 
     assert out["action"] == "none"
     assert reg.stop_calls == []
+    assert reg.output_recovery_calls == []

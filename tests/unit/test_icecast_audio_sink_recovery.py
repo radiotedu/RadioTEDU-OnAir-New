@@ -1,9 +1,120 @@
 import queue
 import threading
+from types import SimpleNamespace
 
 import app.audio.icecast_audio_sink as sink_module
 from app.audio.gst_pipeline import StationPipelineConfig
 from app.audio.icecast_audio_sink import IcecastAudioSink
+
+
+def test_mount_probe_requires_audio_bytes_after_valid_headers(monkeypatch):
+    payload = b"a" * 512
+
+    class Response:
+        status = 200
+
+        def getheader(self, name):
+            assert name == "Content-Type"
+            return "audio/aac"
+
+        def read(self, size):
+            assert size == 512
+            return payload
+
+    class Connection:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def request(self, *_args, **_kwargs):
+            pass
+
+        def getresponse(self):
+            return Response()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(sink_module.http.client, "HTTPConnection", Connection)
+    cfg = SimpleNamespace(
+        icecast_host="stream.example.test",
+        icecast_port=8000,
+        icecast_mount="/cazz",
+        icecast_tls_enabled=False,
+    )
+
+    assert sink_module.probe_icecast_mount(cfg) is True
+
+
+def test_mount_probe_rejects_headers_without_audio_bytes(monkeypatch):
+    class Response:
+        status = 200
+
+        def getheader(self, name):
+            assert name == "Content-Type"
+            return "audio/aac"
+
+        def read(self, size):
+            assert size == 512
+            return b""
+
+    class Connection:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def request(self, *_args, **_kwargs):
+            pass
+
+        def getresponse(self):
+            return Response()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(sink_module.http.client, "HTTPConnection", Connection)
+    cfg = SimpleNamespace(
+        icecast_host="stream.example.test",
+        icecast_port=8000,
+        icecast_mount="/cazz",
+        icecast_tls_enabled=False,
+    )
+
+    assert sink_module.probe_icecast_mount(cfg) is False
+
+
+def test_mount_probe_rejects_a_partial_audio_canary(monkeypatch):
+    class Response:
+        status = 200
+
+        def getheader(self, name):
+            assert name == "Content-Type"
+            return "audio/aac"
+
+        def read(self, size):
+            assert size == 512
+            return b"partial"
+
+    class Connection:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def request(self, *_args, **_kwargs):
+            pass
+
+        def getresponse(self):
+            return Response()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(sink_module.http.client, "HTTPConnection", Connection)
+    cfg = SimpleNamespace(
+        icecast_host="stream.example.test",
+        icecast_port=8000,
+        icecast_mount="/cazz",
+        icecast_tls_enabled=False,
+    )
+
+    assert sink_module.probe_icecast_mount(cfg) is False
 
 
 def test_output_recovery_preserves_queued_and_inflight_pcm():

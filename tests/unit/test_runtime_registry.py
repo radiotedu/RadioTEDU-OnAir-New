@@ -112,6 +112,15 @@ class _RecoveringRuntime(_FakeRuntime):
 
 
 class _FlowingUnverifiedRuntime(_RecoveringRuntime):
+    def __init__(self):
+        super().__init__()
+        self.primary_recover_calls = 0
+
+    def recover_primary_output(self):
+        self.primary_recover_calls += 1
+        self.healthy = True
+        return {"running": True}
+
     def status(self):
         return {
             "running": False,
@@ -282,6 +291,83 @@ def test_registry_recovers_failed_required_output_with_preserved_runtime(
     assert status["recovery"]["attempt_count"] == 1
 
 
+def test_registry_recovers_only_the_confirmed_unhealthy_extra_output():
+    branch = "icecast:/cazz-flac"
+
+    class BranchRuntime:
+        def __init__(self):
+            self.calls = []
+            self.healthy = False
+
+        def status(self):
+            return {
+                "running": True,
+                "branch_health": {"icecast": True, branch: self.healthy},
+                "delivery_health": {"icecast": True, branch: self.healthy},
+                "icecast_mount_health": {"mount_healthy": True},
+                "extra_icecast_mounts": [
+                    {
+                        "branch": branch,
+                        "health": {
+                            "mount_healthy": False,
+                            "process_running": True,
+                            "writer_running": True,
+                            "network_writer_running": True,
+                        },
+                    }
+                ],
+            }
+
+        def recover_output_branch(self, output_branch):
+            self.calls.append(output_branch)
+            self.healthy = True
+
+    runtime = BranchRuntime()
+    reg = StationRuntimeRegistry()
+    reg._runtimes[5] = runtime
+    reg._required_outputs[5] = {"icecast": True, branch: True}
+    reg.status = lambda _station_id: runtime.status()
+
+    result = reg.recover_station_output(5, branch)
+
+    assert runtime.calls == [branch]
+    assert result["delivery_health"][branch] is True
+    assert reg._branch_recovery_state[(5, branch)]["state"] == "monitoring"
+
+
+def test_registry_waits_for_initial_branch_probe_before_recovery():
+    branch = "icecast:/cazz-flac"
+
+    class BranchRuntime:
+        def __init__(self):
+            self.calls = []
+
+        def status(self):
+            return {
+                "running": True,
+                "branch_health": {"icecast": True, branch: False},
+                "delivery_health": {"icecast": True, branch: False},
+                "icecast_mount_health": {"mount_healthy": True},
+                "extra_icecast_mounts": [
+                    {"branch": branch, "health": {"mount_healthy": None}}
+                ],
+            }
+
+        def recover_output_branch(self, output_branch):
+            self.calls.append(output_branch)
+
+    runtime = BranchRuntime()
+    reg = StationRuntimeRegistry()
+    reg._runtimes[5] = runtime
+    reg._required_outputs[5] = {"icecast": True, branch: True}
+    reg.status = lambda _station_id: runtime.status()
+
+    reg.recover_station_output(5, branch)
+
+    assert runtime.calls == []
+    assert reg._branch_recovery_state[(5, branch)]["error_code"] == "output_unverified"
+
+
 def test_registry_recovery_uses_bounded_retry_wait(tmp_path, monkeypatch):
     monkeypatch.setenv("CLEANROOM_DB_PATH", str(tmp_path / "cleanroom.db"))
     monkeypatch.setenv("CLEANROOM_DISABLE_ICECAST_METADATA", "1")
@@ -314,7 +400,7 @@ def test_registry_recovery_uses_bounded_retry_wait(tmp_path, monkeypatch):
     assert second["recovery"]["attempt_count"] == 1
 
 
-def test_registry_does_not_restart_flowing_source_for_probe_miss(
+def test_registry_recovers_only_the_primary_mount_after_probe_misses(
     tmp_path, monkeypatch
 ):
     monkeypatch.setenv("CLEANROOM_DB_PATH", str(tmp_path / "cleanroom.db"))
@@ -341,8 +427,8 @@ def test_registry_does_not_restart_flowing_source_for_probe_miss(
     status = reg.recover_station(1)
 
     assert fake.recover_calls == 0
+    assert fake.primary_recover_calls == 1
     assert status["recovery"]["state"] == "monitoring"
-    assert status["recovery"]["error_code"] == "output_unverified"
     assert status["recovery"]["retry_in_seconds"] > 0
 
 

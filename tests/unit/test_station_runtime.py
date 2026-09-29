@@ -467,6 +467,66 @@ def test_recover_primary_output_uses_long_release_without_stopping_programme(mon
     assert calls == ["stop-primary", ("release", 12.0), "start-primary"]
 
 
+def test_recover_output_branch_reconnects_only_the_named_extra_mount(monkeypatch):
+    cfg = replace(
+        _make_cfg(local_output_enabled=False),
+        extra_icecast_outputs=(
+            {"enabled": True, "icecast_mount": "/backup"},
+            {"enabled": True, "icecast_mount": "/other"},
+        ),
+    )
+    runtime = StationRuntime(process_factory=lambda *_args, **_kwargs: None)
+    runtime._active_cfg = cfg
+    calls = []
+
+    class Sink:
+        def __init__(self, name):
+            self.name = name
+
+        def stop(self, **kwargs):
+            calls.append(("stop", self.name, kwargs.get("preserve_pcm")))
+
+        def ensure_started(self, output_cfg, **kwargs):
+            calls.append(
+                (
+                    "start",
+                    self.name,
+                    output_cfg.icecast_mount,
+                    kwargs.get("preserve_pcm"),
+                )
+            )
+
+        def is_running(self):
+            return True
+
+        def write_pcm(self, _chunk):
+            return True
+
+    primary = Sink("primary")
+    backup = Sink("backup")
+    other = Sink("other")
+    runtime._icecast_sink = primary
+    runtime._extra_icecast_sinks = {
+        "icecast:/backup": backup,
+        "icecast:/other": other,
+    }
+    monkeypatch.setattr(
+        "app.audio.station_runtime.time.sleep",
+        lambda seconds: calls.append(("release", seconds)),
+    )
+    monkeypatch.setattr(runtime, "status", lambda: {"running": True})
+
+    assert runtime.recover_output_branch("icecast:/backup") == {"running": True}
+
+    assert calls == [
+        ("stop", "backup", True),
+        ("release", runtime_module._ORIGIN_SOURCE_RELEASE_SECONDS),
+        ("start", "backup", "/backup", True),
+    ]
+    assert runtime._icecast_sink is primary
+    assert runtime._extra_icecast_sinks["icecast:/other"] is other
+
+
 def test_runtime_falls_back_to_ffmpeg_when_gst_missing():
     launched = []
     fake_proc = _FakeProcess()
@@ -1443,7 +1503,7 @@ def test_stop_reaps_owned_process_when_active_reference_was_lost():
     assert runtime._owned_processes == []
 
 
-def test_primary_source_does_not_start_recurring_listener_probes(monkeypatch):
+def test_primary_source_uses_audio_byte_listener_probe(monkeypatch):
     captured = {}
 
     class Sink:
@@ -1458,5 +1518,32 @@ def test_primary_source_does_not_start_recurring_listener_probes(monkeypatch):
     runtime.ffmpeg_bin = "ffmpeg.exe"
     cfg = _make_cfg(local_output_enabled=False)
     assert runtime._ensure_icecast_sink(cfg)
-    assert captured["mount_probe"] is None
+    assert captured["mount_probe"] is runtime_module.probe_icecast_mount
+    assert captured["probe_failure_threshold"] == 2
     assert captured["cfg"] is cfg
+
+
+def test_extra_icecast_source_uses_audio_byte_listener_probe(monkeypatch):
+    captured = {}
+
+    class Sink:
+        def __init__(self, *_args, **kwargs):
+            captured.update(kwargs)
+
+        def ensure_started(self, _cfg, **_kwargs):
+            pass
+
+        def is_running(self):
+            return True
+
+    monkeypatch.setattr(runtime_module, "IcecastAudioSink", Sink)
+    runtime = StationRuntime(process_factory=lambda *_args, **_kwargs: None)
+    runtime.ffmpeg_bin = "ffmpeg.exe"
+    cfg = replace(
+        _make_cfg(local_output_enabled=False),
+        extra_icecast_outputs=({"enabled": True, "icecast_mount": "/backup"},),
+    )
+
+    assert runtime._ensure_extra_icecast_sinks(cfg) == {"icecast:/backup": True}
+    assert captured["mount_probe"] is runtime_module.probe_icecast_mount
+    assert captured["probe_failure_threshold"] == 2

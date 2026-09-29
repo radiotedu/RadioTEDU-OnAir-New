@@ -140,7 +140,7 @@ _AUTH_HEADER_RE = re.compile(r"(?i)(authorization\s*:\s*(?:basic|bearer)\s+)\S+"
 
 
 def probe_icecast_mount(cfg: StationPipelineConfig, timeout: float = 2.0) -> bool:
-    """Confirm that the configured source has created a readable mount."""
+    """Confirm that the configured mount returns actual audio bytes."""
 
     host = str(cfg.icecast_host or "").strip()
     port = int(cfg.icecast_port or 0)
@@ -183,10 +183,12 @@ def probe_icecast_mount(cfg: StationPipelineConfig, timeout: float = 2.0) -> boo
             or content_type in {"application/ogg", "video/ogg"}
         ):
             return False
-        # Header completion is the authoritative mount-presence signal. AAC
-        # streaming responses are intentionally endless and small encoders may
-        # not yield a body byte inside this short control-plane timeout.
-        return True
+        # A successful response header alone does not prove that an Icecast
+        # source is delivering audio. Read a small canary before declaring the
+        # mount healthy; this catches half-open mounts that return HTTP 200 but
+        # stall before sending any stream bytes.
+        payload = response.read(512)
+        return len(payload) == 512
     except (OSError, http.client.HTTPException, ssl.SSLError):
         return False
     finally:

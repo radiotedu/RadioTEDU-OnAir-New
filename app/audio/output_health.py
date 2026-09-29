@@ -83,7 +83,10 @@ def icecast_mount_transport_is_healthy(
     mount = dict(health or {})
     if not mount:
         return False
-    if require_mount_healthy and mount.get("mount_healthy") is not True:
+    mount_health = mount.get("mount_healthy")
+    if mount_health is False:
+        return False
+    if require_mount_healthy and mount_health is not True:
         return False
 
     process_evidence = []
