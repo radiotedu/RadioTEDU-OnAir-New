@@ -16,12 +16,22 @@ from urllib.parse import urlsplit
 
 
 DEFAULT_STREAMS = (
-    ("classic", "http://stream.radiotedu.com:11154/classic"),
-    ("lofi", "http://stream.radiotedu.com:11154/lofi"),
+    ("cazz-flac", "http://stream.radiotedu.com:11154/cazz-flac"),
+    ("cazz-low", "http://stream.radiotedu.com:11154/cazz-low"),
     ("cazz", "http://stream.radiotedu.com:11154/cazz"),
+    ("classic-flac", "http://stream.radiotedu.com:11154/classic-flac"),
+    ("classic-low", "http://stream.radiotedu.com:11154/classic-low"),
+    ("classic", "http://stream.radiotedu.com:11154/classic"),
+    ("energize-low", "http://stream.radiotedu.com:11154/energize-low"),
     ("energize", "http://stream.radiotedu.com:11154/energize"),
+    ("lofi-low", "http://stream.radiotedu.com:11154/lofi-low"),
+    ("lofi", "http://stream.radiotedu.com:11154/lofi"),
+    ("maincharacter", "http://stream.radiotedu.com:11154/maincharacter"),
+    ("radio-low", "http://stream.radiotedu.com:11154/radio-low"),
     ("radio", "http://stream.radiotedu.com:11154/radio"),
+    ("rock-low", "http://stream.radiotedu.com:11154/rock-low"),
     ("rock", "http://stream.radiotedu.com:11154/rock"),
+    ("situation", "http://stream.radiotedu.com:11154/situation"),
 )
 _CLOCK = re.compile(r"^(\d+):(\d+):(\d+(?:\.\d+)?)$")
 _SILENCE_START = re.compile(r"silence_start:\s*([0-9.]+)")
@@ -86,6 +96,8 @@ def build_ffmpeg_command(ffmpeg: Path, url: str) -> list[str]:
         "1",
         "-reconnect_delay_max",
         "5",
+        "-threads",
+        "1",
         "-i",
         url,
         "-vn",
@@ -113,6 +125,14 @@ class StreamState:
     first_media_seconds: float = 0.0
     last_progress_monotonic: float | None = None
     max_progress_gap_seconds: float = 0.0
+    measurement_started_monotonic: float | None = None
+    measurement_media_baseline: float = 0.0
+    measurement_last_progress_monotonic: float | None = None
+    measurement_max_progress_gap_seconds: float = 0.0
+    startup_delay_seconds: float | None = None
+    startup_progress_age_seconds: float | None = None
+    startup_transport_errors: int = 0
+    readiness_satisfied: bool = False
     current_silence_started_at: float | None = None
     max_silence_seconds: float = 0.0
     total_silence_seconds: float = 0.0
@@ -132,18 +152,28 @@ def _read_progress(state: StreamState, stream: IO[str]) -> None:
             continue
         now = time.monotonic()
         with state.lock:
-            if state.first_progress_monotonic is None:
-                state.first_progress_monotonic = now
-                state.first_media_seconds = media_seconds
-            elif media_seconds <= state.media_seconds + 0.001:
+            if media_seconds <= state.media_seconds + 0.001:
                 # FFmpeg emits progress records on a timer even while decoded
                 # media time is frozen. Such records must not hide a real stall.
                 continue
+            if state.first_progress_monotonic is None:
+                state.first_progress_monotonic = now
+                state.first_media_seconds = media_seconds
             if state.last_progress_monotonic is not None:
                 state.max_progress_gap_seconds = max(
                     state.max_progress_gap_seconds,
                     now - state.last_progress_monotonic,
                 )
+            if state.measurement_started_monotonic is not None:
+                measurement_previous = (
+                    state.measurement_last_progress_monotonic
+                    or state.measurement_started_monotonic
+                )
+                state.measurement_max_progress_gap_seconds = max(
+                    state.measurement_max_progress_gap_seconds,
+                    now - measurement_previous,
+                )
+                state.measurement_last_progress_monotonic = now
             state.last_progress_monotonic = now
             state.media_seconds = max(state.media_seconds, media_seconds)
 
@@ -160,6 +190,16 @@ def _read_diagnostics(state: StreamState, stream: IO[str]) -> None:
                 state.current_silence_started_at = float(start.group(1))
             if end:
                 duration = float(end.group(2))
+                if (
+                    state.measurement_started_monotonic is not None
+                    and state.current_silence_started_at is not None
+                ):
+                    silence_end = state.current_silence_started_at + duration
+                    silence_start = max(
+                        state.current_silence_started_at,
+                        state.measurement_media_baseline,
+                    )
+                    duration = max(0.0, silence_end - silence_start)
                 state.max_silence_seconds = max(state.max_silence_seconds, duration)
                 state.total_silence_seconds += max(0.0, duration)
                 state.silence_events += 1
@@ -171,32 +211,73 @@ def _read_diagnostics(state: StreamState, stream: IO[str]) -> None:
 
 def _snapshot(state: StreamState, now: float, *, stopping: bool = False) -> dict[str, Any]:
     with state.lock:
-        elapsed = now - state.started_monotonic
-        first_progress = state.first_progress_monotonic
-        last_progress = state.last_progress_monotonic
+        measurement_started = state.measurement_started_monotonic
+        measuring = measurement_started is not None
+        elapsed = (
+            now - measurement_started
+            if measuring
+            else now - state.started_monotonic
+        )
         media_seconds = state.media_seconds
         current_silence = 0.0
         if state.current_silence_started_at is not None:
-            current_silence = max(0.0, media_seconds - state.current_silence_started_at)
-        if first_progress is None:
+            silence_start = state.current_silence_started_at
+            if measuring:
+                silence_start = max(silence_start, state.measurement_media_baseline)
+            current_silence = max(0.0, media_seconds - silence_start)
+        if measuring:
+            measurement_last = (
+                state.measurement_last_progress_monotonic
+                or measurement_started
+            )
+            playback_margin = media_seconds - (
+                state.measurement_media_baseline + elapsed
+            )
+            progress_age = now - (
+                state.last_progress_monotonic or state.started_monotonic
+            )
+            maximum_progress_gap = max(
+                state.measurement_max_progress_gap_seconds,
+                now - (state.measurement_last_progress_monotonic or measurement_started),
+            )
+        elif state.first_progress_monotonic is None:
             playback_margin = None
-            progress_age = elapsed
+            progress_age = now - state.started_monotonic
+            maximum_progress_gap = state.max_progress_gap_seconds
         else:
-            expected_media = state.first_media_seconds + (now - first_progress)
+            expected_media = state.first_media_seconds + (
+                now - state.first_progress_monotonic
+            )
             playback_margin = media_seconds - expected_media
-            progress_age = now - (last_progress or first_progress)
+            progress_age = now - (
+                state.last_progress_monotonic or state.first_progress_monotonic
+            )
+            maximum_progress_gap = state.max_progress_gap_seconds
         maximum_silence = max(state.max_silence_seconds, current_silence)
         return {
             "label": state.label,
             "process_alive": state.process.poll() is None,
             "exit_code": state.process.poll(),
             "elapsed_seconds": round(elapsed, 3),
+            "measurement_active": measuring,
+            "startup_delay_seconds": (
+                round(state.startup_delay_seconds, 3)
+                if state.startup_delay_seconds is not None
+                else None
+            ),
+            "startup_progress_age_seconds": (
+                round(state.startup_progress_age_seconds, 3)
+                if state.startup_progress_age_seconds is not None
+                else None
+            ),
+            "startup_transport_errors": state.startup_transport_errors,
+            "readiness_satisfied": state.readiness_satisfied,
             "media_seconds": round(media_seconds, 3),
             "playback_margin_seconds": (
                 round(playback_margin, 3) if playback_margin is not None else None
             ),
             "progress_age_seconds": round(progress_age, 3),
-            "max_progress_gap_seconds": round(state.max_progress_gap_seconds, 3),
+            "max_progress_gap_seconds": round(maximum_progress_gap, 3),
             "current_silence_seconds": round(current_silence, 3),
             "max_silence_seconds": round(maximum_silence, 3),
             "total_silence_seconds": round(
@@ -237,6 +318,51 @@ def _start_stream(ffmpeg: Path, label: str, url: str) -> StreamState:
     return state
 
 
+def _begin_measurement(
+    state: StreamState,
+    now: float,
+    *,
+    readiness_satisfied: bool = True,
+) -> dict[str, Any]:
+    """Separate connection acquisition from the steady-state measurement window."""
+    with state.lock:
+        state.startup_delay_seconds = (
+            state.first_progress_monotonic - state.started_monotonic
+            if state.first_progress_monotonic is not None
+            else None
+        )
+        state.startup_progress_age_seconds = (
+            now - state.last_progress_monotonic
+            if state.last_progress_monotonic is not None
+            else now - state.started_monotonic
+        )
+        state.startup_transport_errors = state.transport_errors
+        state.readiness_satisfied = readiness_satisfied
+        state.measurement_started_monotonic = now
+        state.measurement_media_baseline = state.media_seconds
+        state.measurement_last_progress_monotonic = state.last_progress_monotonic
+        state.measurement_max_progress_gap_seconds = 0.0
+        state.max_silence_seconds = 0.0
+        state.total_silence_seconds = 0.0
+        state.silence_events = 0
+        state.transport_errors = 0
+        return {
+            "label": state.label,
+            "first_advancing_media_seconds": round(state.first_media_seconds, 3),
+            "startup_delay_seconds": (
+                round(state.startup_delay_seconds, 3)
+                if state.startup_delay_seconds is not None
+                else None
+            ),
+            "startup_progress_age_seconds": round(
+                state.startup_progress_age_seconds, 3
+            ),
+            "startup_transport_errors": state.startup_transport_errors,
+            "readiness_satisfied": state.readiness_satisfied,
+            "process_alive": state.process.poll() is None,
+        }
+
+
 def _evaluate(
     snapshots: list[dict[str, Any]],
     *,
@@ -245,60 +371,95 @@ def _evaluate(
     maximum_silence_seconds: float,
     maximum_progress_gap_seconds: float = 2.0,
     maximum_total_silence_seconds: float = 0.5,
+    maximum_startup_delay_seconds: float = 60.0,
 ) -> dict[str, Any]:
-    eligible = [row for row in snapshots if row["elapsed_seconds"] >= 10.0]
+    measured = [row for row in snapshots if row.get("measurement_active", True)]
+    # Older saved fixtures and reports have no startup fields. Keep their old
+    # behavior while new runs require a successful acquisition window.
+    has_startup_metrics = any("startup_delay_seconds" in row for row in snapshots)
+    startup_rows = [row for row in measured if "startup_delay_seconds" in row]
+    startup_delay = max(
+        (
+            float(row["startup_delay_seconds"])
+            for row in startup_rows
+            if row["startup_delay_seconds"] is not None
+        ),
+        default=None,
+    )
+    startup_age = max(
+        (float(row.get("startup_progress_age_seconds") or 0.0) for row in startup_rows),
+        default=0.0,
+    )
+    startup_transport_errors = max(
+        (int(row.get("startup_transport_errors", 0)) for row in startup_rows),
+        default=0,
+    )
+    startup_ok = not has_startup_metrics or (
+        startup_delay is not None
+        and startup_delay <= maximum_startup_delay_seconds
+        and startup_age <= maximum_progress_age_seconds
+        and startup_transport_errors == 0
+        and all(bool(row.get("readiness_satisfied", False)) for row in startup_rows)
+    )
     minimum_margin = min(
         (
             float(row["playback_margin_seconds"])
-            for row in eligible
+            for row in measured
             if row["playback_margin_seconds"] is not None
         ),
         default=None,
     )
     maximum_progress_age = max(
-        (float(row["progress_age_seconds"]) for row in snapshots),
+        (float(row["progress_age_seconds"]) for row in measured),
         default=0.0,
     )
     maximum_progress_gap = max(
         (
             float(row.get("max_progress_gap_seconds", 0.0))
-            for row in snapshots
+            for row in measured
         ),
         default=0.0,
     )
     maximum_silence = max(
-        (float(row["max_silence_seconds"]) for row in snapshots),
+        (float(row["max_silence_seconds"]) for row in measured),
         default=0.0,
     )
     maximum_total_silence = max(
-        (float(row.get("total_silence_seconds", 0.0)) for row in snapshots),
+        (float(row.get("total_silence_seconds", 0.0)) for row in measured),
         default=0.0,
     )
-    unexpected_exit = any(bool(row["unexpected_exit"]) for row in snapshots)
+    unexpected_exit = any(bool(row["unexpected_exit"]) for row in measured)
     exit_codes = [
         int(row["exit_code"])
-        for row in snapshots
+        for row in measured
         if row["unexpected_exit"] and row["exit_code"] is not None
     ]
     diagnostic_tail = next(
         (
             list(row["diagnostic_tail"])
-            for row in reversed(snapshots)
+            for row in reversed(measured)
             if row.get("diagnostic_tail")
         ),
         [],
     )
     continuity_ok = (
-        not unexpected_exit
+        startup_ok
+        and not unexpected_exit
         and minimum_margin is not None
         and minimum_margin >= minimum_margin_seconds
         and maximum_progress_age <= maximum_progress_age_seconds
         and maximum_progress_gap <= maximum_progress_gap_seconds
         and maximum_silence <= maximum_silence_seconds
         and maximum_total_silence <= maximum_total_silence_seconds
+        and startup_transport_errors == 0
+        and max((int(row["transport_errors"]) for row in measured), default=0) == 0
     )
     return {
         "continuity_ok": continuity_ok,
+        "startup_ok": startup_ok,
+        "startup_delay_seconds": startup_delay,
+        "startup_progress_age_seconds": startup_age,
+        "startup_transport_errors": startup_transport_errors,
         "minimum_playback_margin_seconds": minimum_margin,
         "maximum_progress_age_seconds": maximum_progress_age,
         "maximum_progress_gap_seconds": maximum_progress_gap,
@@ -307,9 +468,7 @@ def _evaluate(
         "unexpected_exit": unexpected_exit,
         "unexpected_exit_codes": sorted(set(exit_codes)),
         "diagnostic_tail": diagnostic_tail,
-        "transport_errors": max(
-            (int(row["transport_errors"]) for row in snapshots), default=0
-        ),
+        "transport_errors": max((int(row["transport_errors"]) for row in measured), default=0),
     }
 
 
@@ -341,13 +500,82 @@ def run(args: argparse.Namespace) -> int:
                 "timestamp": _utc_now(),
                 "duration_seconds": args.duration_seconds,
                 "sample_seconds": args.sample_seconds,
+                "warmup_seconds": args.warmup_seconds,
+                "readiness_stable_seconds": args.readiness_stable_seconds,
+                "maximum_startup_delay_seconds": args.maximum_startup_delay_seconds,
                 "labels": labels,
             },
         )
         try:
             states = [_start_stream(ffmpeg, label, url) for label, url in streams]
-            next_sample = time.monotonic()
-            while time.monotonic() - started < args.duration_seconds:
+            warmup_deadline = started + args.warmup_seconds
+            startup_deadline = started + args.maximum_startup_delay_seconds
+            readiness_last_progress: dict[str, float | None] = {
+                state.label: None for state in states
+            }
+            readiness_stable_since: dict[str, float | None] = {
+                state.label: None for state in states
+            }
+            while True:
+                now = time.monotonic()
+                all_ready = True
+                for state in states:
+                    with state.lock:
+                        last_progress = state.last_progress_monotonic
+                    previous_progress = readiness_last_progress[state.label]
+                    stable_since = readiness_stable_since[state.label]
+                    if last_progress is None:
+                        stable_since = None
+                    elif last_progress != previous_progress:
+                        if (
+                            previous_progress is None
+                            or last_progress - previous_progress
+                            > args.maximum_progress_gap_seconds
+                        ):
+                            stable_since = last_progress
+                        elif stable_since is None:
+                            stable_since = last_progress
+                        readiness_last_progress[state.label] = last_progress
+                    if (
+                        last_progress is None
+                        or now - last_progress > args.maximum_progress_gap_seconds
+                    ):
+                        stable_since = None
+                    readiness_stable_since[state.label] = stable_since
+                    if (
+                        stable_since is None
+                        or now - stable_since < args.readiness_stable_seconds
+                    ):
+                        all_ready = False
+                if now >= warmup_deadline and all_ready:
+                    break
+                if now >= max(warmup_deadline, startup_deadline):
+                    break
+                time.sleep(0.2)
+
+            measurement_started = time.monotonic()
+            readiness_satisfied = all_ready
+            startup_rows = [
+                _begin_measurement(
+                    state,
+                    measurement_started,
+                    readiness_satisfied=readiness_satisfied,
+                )
+                for state in states
+            ]
+            _write_json_line(
+                handle,
+                {
+                    "type": "continuity_measurement_start",
+                    "timestamp": _utc_now(),
+                    "warmup_elapsed_seconds": round(measurement_started - started, 3),
+                    "readiness_stable_seconds": args.readiness_stable_seconds,
+                    "all_mounts_stable": readiness_satisfied,
+                    "streams": startup_rows,
+                },
+            )
+            next_sample = measurement_started
+            while time.monotonic() - measurement_started < args.duration_seconds:
                 now = time.monotonic()
                 if now < next_sample:
                     time.sleep(min(0.25, next_sample - now))
@@ -380,11 +608,16 @@ def run(args: argparse.Namespace) -> int:
                 maximum_silence_seconds=args.maximum_silence_seconds,
                 maximum_progress_gap_seconds=args.maximum_progress_gap_seconds,
                 maximum_total_silence_seconds=args.maximum_total_silence_seconds,
+                maximum_startup_delay_seconds=args.maximum_startup_delay_seconds,
             )
         summary = {
             "type": "continuity_summary",
             "timestamp": _utc_now(),
             "elapsed_seconds": round(time.monotonic() - started, 3),
+            "warmup_elapsed_seconds": round(measurement_started - started, 3),
+            "measured_duration_seconds": round(time.monotonic() - measurement_started, 3),
+            "warmup_seconds": args.warmup_seconds,
+            "readiness_stable_seconds": args.readiness_stable_seconds,
             "continuity_ok": all(row["continuity_ok"] for row in summary_streams.values()),
             "streams": summary_streams,
         }
@@ -405,6 +638,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--stream", action="append", type=_parse_stream_arg)
     parser.add_argument("--duration-seconds", type=float, default=300.0)
     parser.add_argument("--sample-seconds", type=float, default=2.0)
+    parser.add_argument("--warmup-seconds", type=float, default=10.0)
+    parser.add_argument("--readiness-stable-seconds", type=float, default=10.0)
+    parser.add_argument("--maximum-startup-delay-seconds", type=float, default=60.0)
     parser.add_argument("--minimum-margin-seconds", type=float, default=-5.0)
     parser.add_argument("--maximum-progress-age-seconds", type=float, default=5.0)
     parser.add_argument("--maximum-progress-gap-seconds", type=float, default=2.0)
@@ -422,6 +658,12 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("duration-seconds must be between 10 seconds and 7 days")
     if not 0.5 <= args.sample_seconds <= 60.0:
         parser.error("sample-seconds must be between 0.5 and 60")
+    if not 0.0 <= args.warmup_seconds <= 300.0:
+        parser.error("warmup-seconds must be between 0 and 300")
+    if not 0.0 <= args.readiness_stable_seconds <= 300.0:
+        parser.error("readiness-stable-seconds must be between 0 and 300")
+    if not 1.0 <= args.maximum_startup_delay_seconds <= 600.0:
+        parser.error("maximum-startup-delay-seconds must be between 1 and 600")
     return run(args)
 
 
