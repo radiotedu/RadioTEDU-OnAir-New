@@ -623,13 +623,16 @@
           <p class="card-copy">Queue an approved URL for download into the selected station library. Jobs continue server-side when this screen is closed.</p>
           <form id="ytdlpImportForm" class="operator-form">
             <label>Video or playlist URL<input id="ytdlpUrl" type="url" required placeholder="https://www.youtube.com/playlist?list=..."></label>
-            <div class="field-grid two"><label>Track type<select id="ytdlpTrackType"><option value="music">Music</option><option value="jingle">Jingle</option><option value="ad">Advertising</option></select></label><label>Audio format<select id="ytdlpAudioFormat"><option value="mp3">MP3</option><option value="m4a">M4A/AAC</option><option value="flac">FLAC</option><option value="wav">WAV</option></select></label></div>
-            <div class="field-grid two"><label>Audio quality<input id="ytdlpAudioQuality" value="192" placeholder="192"></label><label>Intro cleaning<select id="ytdlpIntroPreset"><option value="normal">Normal</option><option value="conservative">Conservative</option><option value="aggressive">Aggressive</option></select></label></div>
+            <div class="field-grid two"><label>Track type<select id="ytdlpTrackType"><option value="music">Music</option><option value="jingle">Jingle</option><option value="ad">Advertising</option></select></label><label>Audio format<select id="ytdlpAudioFormat"><option value="best" selected>Best available source (recommended)</option><option value="mp3">MP3</option><option value="m4a">M4A/AAC</option><option value="flac">FLAC</option><option value="wav">WAV</option></select></label></div>
+            <div class="field-grid two"><label>Audio quality<input id="ytdlpAudioQuality" value="0" placeholder="0 = best"></label><label>Intro cleaning<select id="ytdlpIntroPreset"><option value="normal">Normal</option><option value="conservative">Conservative</option><option value="aggressive">Aggressive</option></select></label></div>
+            <label>After download<select id="ytdlpQueueMode" disabled><option value="replace_pending" selected>Replace upcoming queue; keep current track playing</option><option value="append">Add after the current queue</option><option value="library_only">Add to library only</option></select></label>
+            <p class="card-copy">Best available source keeps the original audio format and avoids lossy conversion. “Replace upcoming queue” leaves the on-air track untouched and starts this playlist next.</p>
+            <p id="ytdlpUpdateRequired" class="action-result" aria-live="polite">Import is unavailable until the application service loads the updated queue controls.</p>
             <label class="check-row"><input id="ytdlpDownloadPlaylist" type="checkbox"> Download the entire playlist</label>
             <label class="check-row"><input id="ytdlpMusicOnly" type="checkbox" checked> Music-only mode</label>
             <label class="check-row"><input id="ytdlpAutoTrim" type="checkbox"> Trim leading/trailing silence</label>
             <label class="check-row"><input id="ytdlpAutoIntro" type="checkbox"> Clean spoken/video intros</label>
-            <div class="button-row"><button id="queueYtdlpButton" class="button primary" type="submit">Queue import job</button><button id="refreshYtdlpButton" class="button secondary" type="button">Refresh jobs</button></div>
+            <div class="button-row"><button id="queueYtdlpButton" class="button primary" type="submit" disabled>Queue import job</button><button id="refreshYtdlpButton" class="button secondary" type="button">Refresh jobs</button></div>
           </form>
           <div id="ytdlpJobList" class="record-list"><div class="empty-state">No download jobs loaded.</div></div>
           <p id="ytdlpResult" class="action-result" aria-live="polite"></p>

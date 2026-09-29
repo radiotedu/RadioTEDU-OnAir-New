@@ -246,8 +246,9 @@ class YtDlpImportPayload(BaseModel):
     target_station_id: int | None = None
     download_playlist: bool = False
     music_only_mode: bool = True
-    audio_format: str = "mp3"
-    audio_quality: str = "192"
+    audio_format: str = "best"
+    audio_quality: str = "0"
+    queue_mode: str = "library_only"
     auto_trim_silence: bool = False
     trim_threshold_db: float = -45.0
     trim_min_silence: float = 0.15
@@ -710,23 +711,33 @@ def _get_audio_duration(file_path: str) -> float:
 def _run_ytdlp_download(url: str, output_dir: Path, audio_format: str, audio_quality: str,
                          download_playlist: bool, job_update_fn=None) -> list[Path]:
     """Run yt-dlp to download audio files. Returns list of downloaded file paths."""
-    ytdlp_bin = shutil.which("yt-dlp")
+    ytdlp_bin = resolve_binary("yt-dlp.exe") or resolve_binary("yt-dlp") or shutil.which("yt-dlp")
     if not ytdlp_bin:
-        raise FileNotFoundError("yt-dlp binary not found in PATH")
+        raise FileNotFoundError("yt-dlp was not found in the managed runtime or PATH")
+    ffmpeg_bin = resolve_binary("ffmpeg.exe") or resolve_binary("ffmpeg")
+    if not ffmpeg_bin:
+        raise FileNotFoundError("ffmpeg was not found; yt-dlp needs it to extract and tag audio")
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Build yt-dlp command
-    output_template = str(output_dir / "%(title)s.%(ext)s")
+    # Keep playlist order in filenames as a fallback for platforms where yt-dlp
+    # does not print the post-processing path in the expected order.
+    filename = "%(playlist_index)03d - %(title)s [%(id)s].%(ext)s" if download_playlist else "%(title)s [%(id)s].%(ext)s"
+    output_template = str(output_dir / filename)
     cmd = [
         ytdlp_bin,
         "--no-warnings",
-        "-x",                          # extract audio
+        "-f", "bestaudio/best",
+        "-x",
         "--audio-format", audio_format,
         "--audio-quality", audio_quality,
+        "--embed-metadata",
+        "--parse-metadata", "%(uploader|)s:%(meta_artist)s",
+        "--print", "after_move:filepath",
+        "--ffmpeg-location", str(ffmpeg_bin),
         "-o", output_template,
-        "--restrict-filenames",         # safe filenames
-        "--windows-filenames",          # Windows-safe
+        "--restrict-filenames",
+        "--windows-filenames",
     ]
 
     if not download_playlist:
@@ -740,16 +751,13 @@ def _run_ytdlp_download(url: str, output_dir: Path, audio_format: str, audio_qua
     if job_update_fn:
         job_update_fn("downloading", "Downloading audio...")
 
-    # Collect files before download to detect new ones
-    existing_files = set(output_dir.iterdir()) if output_dir.exists() else set()
-
     proc = subprocess.run(
         cmd,
         capture_output=True,
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=600,
+        timeout=3600 if download_playlist else 900,
         cwd=str(output_dir),
     )
 
@@ -758,27 +766,27 @@ def _run_ytdlp_download(url: str, output_dir: Path, audio_format: str, audio_qua
         _log.error("yt-dlp failed (rc=%d): %s", proc.returncode, stderr)
         raise RuntimeError(f"yt-dlp failed: {stderr[:500]}")
 
-    # Find new files
-    current_files = set(output_dir.iterdir()) if output_dir.exists() else set()
-    new_files = sorted(current_files - existing_files)
-
-    # Filter to audio files only
+    # Prefer yt-dlp's post-processing paths: they preserve playlist order.
     audio_exts = {".mp3", ".m4a", ".ogg", ".opus", ".wav", ".flac", ".aac", ".wma", ".webm"}
-    audio_files = [f for f in new_files if f.suffix.lower() in audio_exts]
+    audio_files: list[Path] = []
+    seen_paths: set[str] = set()
+    for line in (proc.stdout or "").splitlines():
+        candidate = Path(line.strip().strip('"'))
+        if candidate.suffix.lower() not in audio_exts:
+            continue
+        if not candidate.is_absolute():
+            candidate = output_dir / candidate
+        if candidate.is_file():
+            resolved = str(candidate.resolve())
+            if resolved not in seen_paths:
+                seen_paths.add(resolved)
+                audio_files.append(candidate)
 
     if not audio_files:
-        # Fallback: check if yt-dlp printed the filename
-        for line in (proc.stdout or "").splitlines():
-            if "Destination:" in line:
-                dest = line.split("Destination:", 1)[1].strip()
-                p = Path(dest)
-                if p.exists():
-                    audio_files.append(p)
-            elif "[ExtractAudio]" in line and "Destination:" in line:
-                dest = line.split("Destination:", 1)[1].strip()
-                p = Path(dest)
-                if p.exists():
-                    audio_files.append(p)
+        audio_files = sorted(
+            (path for path in output_dir.iterdir() if path.is_file() and path.suffix.lower() in audio_exts),
+            key=lambda path: path.name.casefold(),
+        )
 
     _log.info("Downloaded %d audio file(s)", len(audio_files))
     return audio_files
@@ -795,12 +803,13 @@ def _simulate_ytdlp_import(job_id: str, request_payload: dict) -> dict:
     target_station_id = int(request_payload.get("target_station_id") or station_id)
     audio_format = str(request_payload.get("audio_format") or "mp3").strip().lower() or "mp3"
     audio_quality = str(request_payload.get("audio_quality") or "192").strip()
+    queue_mode = str(request_payload.get("queue_mode") or "library_only").strip().lower()
     url = str(request_payload.get("url") or "")
     download_playlist = bool(request_payload.get("download_playlist", False))
 
     # Determine output directory
     db_dir = get_db_path().parent
-    output_dir = db_dir / "downloads" / f"station-{target_station_id}" / track_type
+    output_dir = db_dir / "downloads" / f"station-{target_station_id}" / track_type / f"import-{job_id}"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Job status update helper
@@ -849,16 +858,43 @@ def _simulate_ytdlp_import(job_id: str, request_payload: dict) -> dict:
             intro_max_cut_s=float(request_payload.get("intro_max_cut_s") or 18.0),
         )
         _accumulate_import_processing(processing_summary, processing_result)
-        title = file_path.stem.replace("_", " ").replace("-", " ").strip()
-        duration = float(processing_result.get("final_duration") or _get_audio_duration(abs_path))
+        fallback_title = file_path.stem
+        if " - " in fallback_title and fallback_title.split(" - ", 1)[0].strip().isdigit():
+            fallback_title = fallback_title.split(" - ", 1)[1]
+        if fallback_title.endswith("]") and " [" in fallback_title:
+            fallback_title = fallback_title.rsplit(" [", 1)[0]
+        metadata = _get_audio_metadata(abs_path, fallback_title=fallback_title.replace("_", " "))
+        title = str(metadata.get("title") or fallback_title.replace("_", " ").strip())
+        artist = _clean_artist_metadata(metadata.get("artist"))
+        duration = float(processing_result.get("final_duration") or metadata.get("duration") or _get_audio_duration(abs_path))
 
         cur.execute(
             "INSERT INTO tracks (station_id, title, artist, track_type, file_path, is_active, duration, bpm) "
-            "VALUES (?, ?, '', ?, ?, 1, ?, 0)",
-            (target_station_id, title, track_type, abs_path, duration),
+            "VALUES (?, ?, ?, ?, ?, 1, ?, ?)",
+            (target_station_id, title, artist, track_type, abs_path, duration, float(metadata.get("bpm") or 0.0)),
         )
         track_ids.append(int(cur.lastrowid))
         added += 1
+    queue_item_ids: list[int] = []
+    replaced_pending_items = 0
+    if queue_mode in {"replace_pending", "append"} and track_ids:
+        queue_repo = QueueRepository(conn)
+        if queue_mode == "replace_pending":
+            cur.execute(
+                "DELETE FROM queue_items WHERE station_id=? AND status='pending'",
+                (target_station_id,),
+            )
+            replaced_pending_items = max(0, int(cur.rowcount or 0))
+            if replaced_pending_items:
+                queue_repo._bump_change_sequence_in_transaction(target_station_id)
+        for index, track_id in enumerate(track_ids):
+            item_id, _created = queue_repo.enqueue_or_get_existing(
+                target_station_id,
+                int(track_id),
+                dedupe_key=f"ytdlp:{job_id}:{index}",
+                manage_transaction=False,
+            )
+            queue_item_ids.append(int(item_id))
     conn.commit()
 
     target_station_name = _station_name(conn, target_station_id) or f"Station {target_station_id}"
@@ -868,6 +904,10 @@ def _simulate_ytdlp_import(job_id: str, request_payload: dict) -> dict:
         "scan": {"added": added},
         "track_id": track_ids[0] if track_ids else None,
         "track_ids": track_ids,
+        "queue_mode": queue_mode,
+        "queued_tracks": len(queue_item_ids),
+        "queue_item_ids": queue_item_ids,
+        "replaced_pending_items": replaced_pending_items,
         "track_type": track_type,
         "target_station_id": target_station_id,
         "target_station_name": target_station_name,
@@ -3385,6 +3425,7 @@ def legacy_ytdlp_settings(
         "output_subdir": "downloads",
         "default_audio_format": "mp3",
         "default_audio_quality": "192",
+        "queue_mode_supported": True,
         "default_allow_playlist": True,
         "default_music_only_mode": True,
         "default_auto_trim": False,
@@ -3450,8 +3491,29 @@ def legacy_queue_ytdlp_import(
     if parsed_url.scheme.lower() not in {"http", "https"} or not parsed_url.netloc:
         raise HTTPException(status_code=400, detail="valid URL is required")
 
+    audio_format = str(payload.audio_format or "best").strip().lower()
+    if audio_format not in {"best", "mp3", "m4a", "flac", "wav", "opus", "vorbis", "aac", "alac"}:
+        raise HTTPException(status_code=400, detail="unsupported audio format")
+    queue_mode = str(payload.queue_mode or "replace_pending").strip().lower()
+    if queue_mode not in {"replace_pending", "append", "library_only"}:
+        raise HTTPException(status_code=400, detail="unsupported playlist queue mode")
+    audio_quality = str(payload.audio_quality or "0").strip().upper()
+    if audio_quality.endswith("K") and audio_quality[:-1].isdigit():
+        if int(audio_quality[:-1]) > 5000:
+            raise HTTPException(status_code=400, detail="audio bitrate must be between 1K and 5000K")
+    elif audio_quality.isdigit():
+        if int(audio_quality) > 5000:
+            raise HTTPException(status_code=400, detail="audio quality must be between 0 and 5000")
+        if int(audio_quality) > 10:
+            audio_quality += "K"
+    else:
+        raise HTTPException(status_code=400, detail="audio quality must be a numeric quality or bitrate")
+
     request_payload = payload.model_dump()
     request_payload["url"] = url
+    request_payload["audio_format"] = audio_format
+    request_payload["audio_quality"] = audio_quality
+    request_payload["queue_mode"] = queue_mode
     request_payload["track_type"] = str(payload.track_type or "music").strip().lower() or "music"
     request_payload["station_id"] = int(payload.station_id or 1)
     request_payload["target_station_id"] = int(payload.target_station_id or request_payload["station_id"])
