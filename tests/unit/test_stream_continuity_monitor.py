@@ -79,6 +79,27 @@ def test_evaluate_fails_real_playback_deficit() -> None:
     assert result["continuity_ok"] is False
 
 
+def test_evaluate_reports_no_progress_before_ten_second_margin_window() -> None:
+    result = _evaluate(
+        [
+            {
+                "elapsed_seconds": 4.0,
+                "playback_margin_seconds": None,
+                "progress_age_seconds": 4.0,
+                "max_progress_gap_seconds": 0.0,
+                "max_silence_seconds": 0.0,
+                "unexpected_exit": False,
+                "transport_errors": 0,
+            }
+        ],
+        minimum_margin_seconds=-5.0,
+        maximum_progress_age_seconds=3.0,
+        maximum_silence_seconds=0.25,
+    )
+    assert result["continuity_ok"] is False
+    assert result["maximum_progress_age_seconds"] == pytest.approx(4.0)
+
+
 def test_evaluate_fails_cumulative_short_silences() -> None:
     result = _evaluate(
         [

@@ -452,7 +452,6 @@ def test_worker_process_owns_local_runtime_and_writes_final_heartbeat(
         "app.engine.process_worker_child._configure_logging",
         lambda *_args: logging.getLogger("test-station-worker"),
     )
-    monkeypatch.setattr("app.engine.process_worker_child.init_db", lambda: None)
     monkeypatch.setattr(
         "app.engine.process_worker_child.RemoteRuntimeRegistry",
         lambda **_kwargs: (_ for _ in ()).throw(OSError("backend unavailable")),

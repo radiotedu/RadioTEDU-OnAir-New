@@ -256,13 +256,13 @@ def _evaluate(
         default=None,
     )
     maximum_progress_age = max(
-        (float(row["progress_age_seconds"]) for row in eligible),
+        (float(row["progress_age_seconds"]) for row in snapshots),
         default=0.0,
     )
     maximum_progress_gap = max(
         (
             float(row.get("max_progress_gap_seconds", 0.0))
-            for row in eligible
+            for row in snapshots
         ),
         default=0.0,
     )
