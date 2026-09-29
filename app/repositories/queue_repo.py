@@ -1,6 +1,11 @@
 import hashlib
 
 
+_MAX_RETRY_AFTER_SECONDS = 30 * 24 * 60 * 60
+_MAX_RETRY_COUNT = 10_000
+_MAX_LAST_ERROR_CHARS = 512
+
+
 class QueueRepository:
     def __init__(self, conn):
         self.conn = conn
@@ -153,7 +158,9 @@ class QueueRepository:
             "COALESCE(t.duration, 0.0) AS duration, COALESCE(t.track_type, 'music') AS track_type "
             "FROM queue_items q "
             "LEFT JOIN tracks t ON t.id = q.track_id "
-            "WHERE q.station_id=? AND q.status='pending' ORDER BY q.position ASC LIMIT 1",
+            "WHERE q.station_id=? AND q.status='pending' "
+            "AND (q.retry_after IS NULL OR datetime(q.retry_after) <= CURRENT_TIMESTAMP) "
+            "ORDER BY q.position ASC, q.id ASC LIMIT 1",
             (station_id,),
         )
         return cur.fetchone()
@@ -182,11 +189,38 @@ class QueueRepository:
         )
         self.conn.commit()
 
+    def defer(
+        self, item_id: int, retry_after_seconds: int | float, error: str = ""
+    ) -> int:
+        """Release a failed playing row while keeping it retryable and ordered."""
+        try:
+            seconds = int(float(retry_after_seconds))
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("retry_after_seconds must be a finite number") from exc
+        seconds = max(0, min(seconds, _MAX_RETRY_AFTER_SECONDS))
+        safe_error = str(error or "")[:_MAX_LAST_ERROR_CHARS]
+        cur = self.conn.cursor()
+        cur.execute(
+            "UPDATE queue_items SET status='pending', started_at=NULL, "
+            "finished_at=NULL, retry_after=datetime(CURRENT_TIMESTAMP, ?), "
+            "retry_count=MIN(MAX(COALESCE(retry_count, 0), 0) + 1, ?), last_error=? "
+            "WHERE id=? AND status='playing'",
+            (
+                f"+{seconds} seconds",
+                _MAX_RETRY_COUNT,
+                safe_error,
+                int(item_id),
+            ),
+        )
+        self.conn.commit()
+        return max(0, int(cur.rowcount or 0))
+
     def list_recent(self, station_id: int, limit: int = 20):
         safe_limit = max(1, min(int(limit), 200))
         cur = self.conn.cursor()
         cur.execute(
             "SELECT q.id, q.station_id, q.track_id, q.position, q.status, q.enqueued_at, q.started_at, q.finished_at, "
+            "q.retry_after, q.retry_count, q.last_error, "
             "COALESCE(t.title, '') AS title, COALESCE(t.artist, '') AS artist, "
             "COALESCE(t.duration, 0.0) AS duration, "
             "COALESCE(t.track_type, 'music') AS track_type "
@@ -238,6 +272,7 @@ class QueueRepository:
         cur = self.conn.cursor()
         cur.execute(
             "SELECT q.id, q.station_id, q.track_id, q.position, q.status, q.enqueued_at, q.started_at, q.finished_at, "
+            "q.retry_after, q.retry_count, q.last_error, "
             "COALESCE(t.title, '') AS title, COALESCE(t.artist, '') AS artist, "
             "COALESCE(t.duration, 0.0) AS duration, "
             "COALESCE(t.track_type, 'music') AS track_type "

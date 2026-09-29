@@ -328,6 +328,9 @@ _MAX_RESTART_ATTEMPTS_PER_ITEM = 3
 # Retry a source failure quickly enough to avoid multi-minute dead air while
 # still preventing a tight process-spawn loop when the failure is persistent.
 _RESTART_COOLDOWN_SEC = 5.0
+_AD_RECOVERY_RETRY_DELAY_SEC = 60.0
+_MANUAL_RECOVERY_RETRY_DELAY_SEC = 30.0
+_SCHEDULE_RECOVERY_RETRY_DELAY_SEC = 30.0
 _RECOVERY_FAILURE_LOG_INTERVAL_SEC = 60.0
 _TRANSIENT_OUTPUT_FAILURE_MARKERS = (
     "error number -10054",
@@ -934,6 +937,12 @@ class StationWorker:
             # Do not consume an advertisement or announcement when there is no
             # output runtime capable of carrying it. Keep the database row
             # pending so it can be retried when the station runtime returns.
+            if source in {"ads", "manual", "schedule"}:
+                mark_playing(item_id)
+                if self._defer_retryable_playout_item(
+                    source, item_id, "runtime_unavailable"
+                ):
+                    return {"source": source, "reason": "runtime_retry_deferred"}
             self._restore_managed_item_pending(source, item_id)
             self._set_playout_state(
                 "none", None, reason=f"{source}_runtime_unavailable"
@@ -969,6 +978,14 @@ class StationWorker:
             return {"source": source, "input_uri": track_uri, "item_id": item_id}
         except Exception as exc:
             if self._is_transient_output_failure(exc):
+                if source in {"ads", "manual", "schedule"} and self._defer_retryable_playout_item(
+                    source, item_id, exc
+                ):
+                    return {
+                        "source": source,
+                        "reason": "output_retry_deferred",
+                        "item_id": item_id,
+                    }
                 self._restore_managed_item_pending(source, item_id)
                 self._set_playout_state(
                     "none", None, reason=f"{source}_output_retry"
@@ -1456,6 +1473,10 @@ class StationWorker:
                 # A transient runtime status lag is not proof that the ad failed.
                 # Keep it active and let the next worker tick verify/recover it.
                 return False
+            if suppression_reason == "retry_deferred":
+                return self._defer_retryable_playout_item(
+                    "ads", item_id, "runtime_mismatch_after_restart_limit"
+                )
             self.ad_repo.mark_failed(item_id)
             self._set_playout_state(
                 "none", None, reason=f"ad_{suppression_reason}"
@@ -1485,9 +1506,9 @@ class StationWorker:
             self._set_playout_state("ads", item_id, reason="ad_runtime_recovered")
             self._broadcast_worker_state(include_queue=True, include_track=True)
         except Exception as exc:
-            # A failed source restart is not proof that the ad finished. Keep
-            # ownership in the ad queue; process_once will retry after the
-            # bounded restart cooldown instead of allowing music to replace it.
+            # A failed restart is not proof that the ad finished. Keep it owned
+            # during bounded quick retries; once those are exhausted, persist a
+            # later retry before the station advances to other ready content.
             self._set_playout_state(
                 "ads", item_id, reason="ad_runtime_recovery_retry"
             )
@@ -1512,6 +1533,98 @@ class StationWorker:
                 item_id,
                 error,
             )
+
+    def _defer_retryable_playout_item(
+        self,
+        source: str,
+        item_id: int,
+        error: object,
+    ) -> bool:
+        """Release a repeatedly failing playout row without consuming it."""
+        normalized_source = str(source or "").strip().lower()
+        if normalized_source not in {"ads", "manual", "schedule"}:
+            return False
+        repository_name = {
+            "ads": "ad_repo",
+            "manual": "queue_repo",
+            "schedule": "schedule_repo",
+        }[normalized_source]
+        repository = getattr(self, repository_name, None)
+        if repository is None:
+            _log.error(
+                "Cannot defer %s item station_id=%s item_id=%s: repository is unavailable",
+                normalized_source,
+                self.station_id,
+                item_id,
+            )
+            return False
+        defer = getattr(repository, "defer", None)
+        if not callable(defer):
+            _log.error(
+                "Cannot durably defer %s item station_id=%s item_id=%s: "
+                "repository does not support retry scheduling",
+                normalized_source,
+                self.station_id,
+                item_id,
+            )
+            return False
+
+        retry_after_seconds = {
+            "ads": _AD_RECOVERY_RETRY_DELAY_SEC,
+            "manual": _MANUAL_RECOVERY_RETRY_DELAY_SEC,
+            "schedule": _SCHEDULE_RECOVERY_RETRY_DELAY_SEC,
+        }[normalized_source]
+        error_type = type(error).__name__ if isinstance(error, BaseException) else "RecoveryError"
+        error_summary = str(error) if isinstance(error, str) else error_type
+        error_summary = " ".join(error_summary.split())[:240]
+        try:
+            deferred = defer(
+                int(item_id),
+                retry_after_seconds=retry_after_seconds,
+                error=error_summary or error_type,
+            )
+        except Exception:
+            _log.exception(
+                "Could not persist retry time for %s item station_id=%s item_id=%s",
+                normalized_source,
+                self.station_id,
+                item_id,
+            )
+            return False
+        if not deferred:
+            _log.error(
+                "Retry deferral did not update %s item station_id=%s item_id=%s",
+                normalized_source,
+                self.station_id,
+                item_id,
+            )
+            return False
+
+        _RESTART_SUPPRESSION.pop(
+            (int(self.station_id), normalized_source, int(item_id)), None
+        )
+        self._set_playout_state(
+            "none", None, reason=f"{normalized_source}_retry_deferred"
+        )
+        _log.warning(
+            "Deferred %s item station_id=%s item_id=%s for %.0fs after recovery failure (%s)",
+            normalized_source,
+            self.station_id,
+            item_id,
+            retry_after_seconds,
+            error_summary or error_type,
+        )
+        try:
+            self._broadcast_worker_state(include_queue=True, include_track=True)
+        except Exception:
+            _log.debug(
+                "Could not broadcast deferred %s state station_id=%s item_id=%s",
+                normalized_source,
+                self.station_id,
+                item_id,
+                exc_info=True,
+            )
+        return True
 
     def _advance_playing_ad_item(self) -> bool:
         current_playing = getattr(self.ad_repo, "current_playing", None)
@@ -1671,6 +1784,14 @@ class StationWorker:
         if not allowed:
             if reason == "restart_cooldown_active":
                 return True
+            if reason == "retry_deferred":
+                if self._defer_retryable_playout_item(
+                    "schedule", item_id, "runtime_mismatch_after_restart_limit"
+                ):
+                    return False
+                # Keep the schedule as owner if the retry deadline could not
+                # be persisted. Starting another source would lose that state.
+                return True
             self.schedule_repo.mark_failed(item_id)
             self._set_playout_state("none", None, reason="schedule_restart_limit")
             self._broadcast_worker_state(include_queue=True, include_track=True)
@@ -1765,13 +1886,12 @@ class StationWorker:
             return True, ""
         if int(state.get("attempts") or 0) >= _MAX_RESTART_ATTEMPTS_PER_ITEM:
             state["reason"] = "restart_limit_reached"
-            if str(source or "") in {"ads", "manual"}:
-                # Keep the active broadcast item queued across repeated transient
-                # mismatches. Start a fresh recovery cycle after a longer backoff
-                # instead of letting a due ad or sweeper replace unfinished audio.
+            if str(source or "") in {"ads", "manual", "schedule"}:
+                # Repeated in-memory retries must not hold a station forever.
+                # The caller persists a retry deadline before releasing ownership.
                 state["attempts"] = 0
-                state["next_allowed"] = now + max(_RESTART_COOLDOWN_SEC * 2, 5.0)
-                return False, "restart_cooldown_active"
+                state["next_allowed"] = now
+                return False, "retry_deferred"
             return False, "restart_limit_reached"
         if now < float(state.get("next_allowed") or 0.0):
             state["reason"] = "restart_cooldown_active"
@@ -1810,6 +1930,11 @@ class StationWorker:
                 # seamless input switch. Keep the queue item playing during
                 # that observation window; failing it here cuts audio early.
                 return False
+            if suppression_reason == "retry_deferred":
+                self._defer_retryable_playout_item(
+                    "manual", item_id, "runtime_mismatch_after_restart_limit"
+                )
+                return False
             self.queue_repo.mark_failed(item_id)
             self._set_playout_state(
                 "none", None, reason=f"manual_{suppression_reason}"
@@ -1839,8 +1964,8 @@ class StationWorker:
             return True
         except Exception as exc:
             # A failed restart does not prove that this song reached clean EOF.
-            # Keep ownership of the playing queue row so due ads and sweepers
-            # cannot take over after a transient process or sink failure.
+            # Keep ownership during bounded quick retries; after the retry limit,
+            # persist a delayed retry before the station resumes other content.
             self._set_playout_state(
                 "manual", item_id, reason="manual_runtime_recovery_retry"
             )

@@ -60,7 +60,7 @@ def test_ad_is_not_failed_during_runtime_restart_cooldown():
     assert failed == []
 
 
-def test_ad_restart_limit_schedules_a_later_recovery_cycle(monkeypatch):
+def test_ad_restart_limit_requests_a_persisted_retry(monkeypatch):
     state = {"attempts": 2, "next_allowed": 0.0, "reason": ""}
     monkeypatch.setattr(worker_module, "_MAX_RESTART_ATTEMPTS_PER_ITEM", 2)
     monkeypatch.setattr(worker_module, "_RESTART_COOLDOWN_SEC", 2.0)
@@ -75,9 +75,63 @@ def test_ad_restart_limit_schedules_a_later_recovery_cycle(monkeypatch):
     allowed, reason = worker._restart_attempt_allowed("ads", 42)
 
     assert allowed is False
-    assert reason == "restart_cooldown_active"
+    assert reason == "retry_deferred"
     assert state["attempts"] == 0
     assert state["next_allowed"] > 0.0
+
+
+def test_repeated_ad_restart_failure_releases_ownership_without_consuming_item(
+    monkeypatch,
+):
+    playing = {"id": 42, "track_id": 52944}
+    deferred = []
+    done = []
+    failed = []
+
+    def defer(item_id, *, retry_after_seconds, error=""):
+        deferred.append((item_id, retry_after_seconds, error))
+        if int(item_id) == playing["id"]:
+            playing.clear()
+        return 1
+
+    monkeypatch.setattr(
+        worker_module,
+        "_RESTART_SUPPRESSION",
+        {
+            (4, "ads", 42): {
+                "attempts": worker_module._MAX_RESTART_ATTEMPTS_PER_ITEM,
+                "next_allowed": 0.0,
+                "reason": "",
+            }
+        },
+    )
+    worker = StationWorker.__new__(StationWorker)
+    worker.station_id = 4
+    worker.runtime_registry = SimpleNamespace(status=lambda _station_id: {})
+    worker.ad_repo = SimpleNamespace(
+        current_playing=lambda _station_id: playing,
+        mark_done=done.append,
+        mark_failed=failed.append,
+        defer=defer,
+    )
+    worker._ads_enabled = lambda: True
+    worker._track_runtime_fields = lambda _track_id: (
+        "E:/Ads/PowerAPP.mp3", "PowerAPP", "", "", "ad"
+    )
+    worker._runtime_source_finished_naturally = lambda *_args: False
+    worker._runtime_playback_matches = lambda *_args: False
+    worker._set_playout_state = lambda *_args, **_kwargs: None
+    worker._broadcast_worker_state = lambda **_kwargs: None
+
+    result = worker._restart_playing_ad_item_if_runtime_mismatched(playing)
+
+    assert result is True
+    assert deferred and deferred[0][0] == 42
+    assert deferred[0][1] > 0
+    assert "runtime_mismatch" in deferred[0][2]
+    assert playing == {}
+    assert done == []
+    assert failed == []
 
 
 def _worker_with_playing_ad(*, runtime_status):

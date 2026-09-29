@@ -6,6 +6,7 @@ import time
 import unittest
 from types import SimpleNamespace
 
+from app.audio.gst_pipeline import StationPipelineConfig
 from app.audio.icecast_audio_sink import (
     IcecastAudioSink,
     _mount_spread_seconds,
@@ -164,6 +165,45 @@ class QualityBackpressureResyncTests(unittest.TestCase):
         self.assertEqual(len(stop.wait_calls), len(attempts))
         self.assertGreaterEqual(stop.wait_calls[-1], 30.0)
         self.assertEqual(sink.health_snapshot()["network_error_count"], 8)
+
+    def test_network_auth_failure_does_not_downgrade_codec_profile(self):
+        requested_profiles = []
+
+        def unauthorized_source(cfg):
+            requested_profiles.append(cfg.stream_codec_profile)
+            raise PermissionError("Icecast source returned 401 Unauthorized")
+
+        sink = IcecastAudioSink(
+            "ffmpeg",
+            lambda *_args, **_kwargs: None,
+            source_factory=unauthorized_source,
+        )
+        stop = _ControlledRetryStop(stop_after=4)
+        sink._writer_stop = stop
+        cfg = StationPipelineConfig(
+            input_uri="silence://continuous",
+            icecast_host="stream.example",
+            icecast_port=8000,
+            icecast_mount="/radio",
+            icecast_user="source",
+            icecast_password="test-password",
+            local_output_enabled=False,
+            output_device_id="",
+            stream_codec_profile="aac_low_192",
+            stream_bitrate_kbps=192,
+        )
+
+        try:
+            sink._start_connector_worker(cfg)
+            sink._connector_thread.join(timeout=1.0)
+
+            self.assertFalse(sink._connector_thread.is_alive())
+            self.assertEqual(requested_profiles, ["aac_low_192"] * 4)
+            health = sink.health_snapshot()
+            self.assertFalse(health["profile_fallback_active"])
+            self.assertEqual(health["network_error_count"], 4)
+        finally:
+            sink.stop()
 
 
 if __name__ == "__main__":

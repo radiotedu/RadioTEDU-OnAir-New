@@ -12,6 +12,7 @@ class _QueueRepo:
         self.playing = playing
         self.pending = pending
         self.failed = []
+        self.deferred = []
 
     def current_playing(self, _station_id):
         return self.playing
@@ -21,6 +22,12 @@ class _QueueRepo:
 
     def mark_failed(self, item_id):
         self.failed.append(int(item_id))
+
+    def defer(self, item_id, *, retry_after_seconds, error=""):
+        self.deferred.append((int(item_id), retry_after_seconds, error))
+        if self.playing and int(self.playing.get("id", 0)) == int(item_id):
+            self.playing = None
+        return 1
 
 
 class _PlayoutState:
@@ -48,6 +55,7 @@ class _AdRepo:
         self.playing = due
         self.done = []
         self.failed = []
+        self.deferred = []
 
     def next_due(self, _station_id):
         return self.due
@@ -63,6 +71,13 @@ class _AdRepo:
 
     def mark_failed(self, item_id):
         self.failed.append(int(item_id))
+
+    def defer(self, item_id, *, retry_after_seconds, error=""):
+        self.deferred.append((int(item_id), retry_after_seconds, error))
+        if self.playing and int(self.playing.get("id", 0)) == int(item_id):
+            self.playing = None
+            self.due = None
+        return 1
 
 
 class DueAdMusicBoundaryTests(unittest.TestCase):
@@ -203,7 +218,7 @@ class DueAdMusicBoundaryTests(unittest.TestCase):
         self.assertEqual(worker.completed, [])
         self.assertEqual(retries, [(12, 0.0)])
 
-    def test_restart_limit_keeps_current_queue_item_for_later_retry(self):
+    def test_restart_limit_defers_queue_item_for_later_retry(self):
         worker = self._worker({"id": 23})
         playing = worker.queue_repo.playing
         worker._track_runtime_fields = lambda _track_id: (
@@ -222,12 +237,14 @@ class DueAdMusicBoundaryTests(unittest.TestCase):
         recovered = worker._restart_playing_queue_item_if_runtime_mismatched(playing)
 
         self.assertFalse(recovered)
-        self.assertIs(worker.queue_repo.playing, playing)
+        self.assertIsNone(worker.queue_repo.playing)
         self.assertEqual(worker.queue_repo.failed, [])
-        self.assertEqual(
-            station_worker_module._RESTART_SUPPRESSION[(4, "manual", 12)]["attempts"],
-            0,
-        )
+        self.assertEqual(len(worker.queue_repo.deferred), 1)
+        deferred_id, retry_after, error = worker.queue_repo.deferred[0]
+        self.assertEqual(deferred_id, 12)
+        self.assertGreater(retry_after, 0)
+        self.assertIn("runtime_mismatch", error)
+        self.assertNotIn((4, "manual", 12), station_worker_module._RESTART_SUPPRESSION)
 
     def test_dead_matching_runtime_is_restarted(self):
         worker = self._worker({"id": 23})
@@ -308,6 +325,46 @@ class DueAdMusicBoundaryTests(unittest.TestCase):
         self.assertFalse(recovered)
         self.assertEqual(worker.ad_repo.failed, [])
         self.assertEqual(worker.playout_state.values[-1], (4, "ads", 23))
+
+    def test_transient_ad_start_failure_persists_retry_and_releases_playout(self):
+        worker = self._worker(
+            {
+                "id": 23,
+                "track_id": 711,
+                "started_at": "",
+                "duration": 20.0,
+            }
+        )
+        worker._track_runtime_fields = lambda _track_id: (
+            "test://powerapp-ad",
+            "PowerApp",
+            "RadioTEDU",
+            "",
+            "ad",
+        )
+        worker._is_transient_output_failure = lambda _error: True
+
+        def fail_transiently(*_args, **_kwargs):
+            raise RuntimeError("temporary output connector failure")
+
+        worker._start_runtime_station = fail_transiently
+
+        result = worker._play_managed_item(
+            source="ads",
+            item_id=23,
+            track_id=711,
+            mark_playing=worker.ad_repo.mark_playing,
+            mark_done=worker.ad_repo.mark_done,
+            mark_failed=worker.ad_repo.mark_failed,
+            auto_done=False,
+        )
+
+        self.assertEqual(result["reason"], "output_retry_deferred")
+        self.assertIsNone(worker.ad_repo.playing)
+        self.assertEqual(worker.ad_repo.done, [])
+        self.assertEqual(worker.ad_repo.failed, [])
+        self.assertEqual(worker.ad_repo.deferred[0][0], 23)
+        self.assertEqual(worker.playout_state.values[-1], (4, "none", None))
 
     def test_elapsed_time_without_runtime_does_not_consume_ad(self):
         worker = self._worker(None)

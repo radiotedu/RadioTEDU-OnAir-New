@@ -1,3 +1,8 @@
+_MAX_RETRY_AFTER_SECONDS = 30 * 24 * 60 * 60
+_MAX_RETRY_COUNT = 10_000
+_MAX_LAST_ERROR_CHARS = 512
+
+
 class AdBreakRepository:
     def __init__(self, conn):
         self.conn = conn
@@ -33,7 +38,9 @@ class AdBreakRepository:
         cur = self.conn.cursor()
         cur.execute(
             "SELECT * FROM ad_break_items "
-            "WHERE station_id=? AND status='pending' AND datetime(due_at) <= CURRENT_TIMESTAMP "
+            "WHERE station_id=? AND status='pending' "
+            "AND datetime(due_at) <= CURRENT_TIMESTAMP "
+            "AND (retry_after IS NULL OR datetime(retry_after) <= CURRENT_TIMESTAMP) "
             "ORDER BY priority DESC, datetime(due_at) ASC, id ASC "
             "LIMIT 1",
             (station_id,),
@@ -74,6 +81,7 @@ class AdBreakRepository:
         cur.execute(
             "SELECT a.id, a.station_id, a.track_id, a.due_at, a.status, a.priority, "
             "a.started_at, a.finished_at, a.dedupe_key, "
+            "a.retry_after, a.retry_count, a.last_error, "
             "COALESCE(t.title, '') AS title, COALESCE(t.artist, '') AS artist "
             "FROM ad_break_items a "
             "LEFT JOIN tracks t ON t.id = a.track_id "
@@ -111,3 +119,29 @@ class AdBreakRepository:
             (item_id,),
         )
         self.conn.commit()
+
+    def defer(
+        self, item_id: int, retry_after_seconds: int | float, error: str = ""
+    ) -> int:
+        """Release a failed playing ad while preserving its scheduled due time."""
+        try:
+            seconds = int(float(retry_after_seconds))
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("retry_after_seconds must be a finite number") from exc
+        seconds = max(0, min(seconds, _MAX_RETRY_AFTER_SECONDS))
+        safe_error = str(error or "")[:_MAX_LAST_ERROR_CHARS]
+        cur = self.conn.cursor()
+        cur.execute(
+            "UPDATE ad_break_items SET status='pending', started_at=NULL, "
+            "finished_at=NULL, retry_after=datetime(CURRENT_TIMESTAMP, ?), "
+            "retry_count=MIN(MAX(COALESCE(retry_count, 0), 0) + 1, ?), last_error=? "
+            "WHERE id=? AND status='playing'",
+            (
+                f"+{seconds} seconds",
+                _MAX_RETRY_COUNT,
+                safe_error,
+                int(item_id),
+            ),
+        )
+        self.conn.commit()
+        return max(0, int(cur.rowcount or 0))

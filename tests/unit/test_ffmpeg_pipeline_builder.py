@@ -3,6 +3,7 @@ from app.audio.ffmpeg_pipeline import (
     build_ffmpeg_crossfade_pcm_cmd,
     build_ffmpeg_icecast_cmd,
     build_ffmpeg_icecast_sink_cmd,
+    build_ffmpeg_encoded_sink_cmd,
     build_ffmpeg_local_pcm_cmd,
     build_ffmpeg_pcm_producer_cmd,
     build_ffplay_local_cmd,
@@ -66,6 +67,20 @@ def test_true_aac_plus_profile_requires_fdk_he_aac_encoder() -> None:
     assert "aac_he" in cmd
     assert "96k" in cmd
     assert "-afterburner" in cmd
+
+
+def test_encoded_sink_can_omit_unsupported_afterburner_without_changing_profile():
+    cfg = _cfg(stream_codec_profile="aac_low_192")
+    cmd = build_ffmpeg_encoded_sink_cmd(
+        cfg,
+        "ffmpeg.exe",
+        omit_afterburner=True,
+    )
+
+    assert "libfdk_aac" in cmd
+    assert "aac_low" in cmd
+    assert "192k" in cmd
+    assert "-afterburner" not in cmd
 
 
 def test_ffmpeg_command_omits_track_metadata_when_disabled(monkeypatch) -> None:

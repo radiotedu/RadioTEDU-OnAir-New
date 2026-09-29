@@ -501,6 +501,16 @@ def _migrate_queue_items(cur) -> None:
         cur.execute("ALTER TABLE queue_items ADD COLUMN finished_at TEXT")
     if "dedupe_key" not in existing:
         cur.execute("ALTER TABLE queue_items ADD COLUMN dedupe_key TEXT")
+    if "retry_after" not in existing:
+        cur.execute("ALTER TABLE queue_items ADD COLUMN retry_after TEXT")
+    if "retry_count" not in existing:
+        cur.execute(
+            "ALTER TABLE queue_items ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0"
+        )
+    if "last_error" not in existing:
+        cur.execute(
+            "ALTER TABLE queue_items ADD COLUMN last_error TEXT NOT NULL DEFAULT ''"
+        )
     cur.execute("UPDATE queue_items SET status='pending' WHERE status IS NULL")
     cur.execute(
         "UPDATE queue_items SET enqueued_at=CURRENT_TIMESTAMP WHERE enqueued_at IS NULL"
@@ -532,6 +542,16 @@ def _migrate_schedule_items(cur) -> None:
         cur.execute(
             "ALTER TABLE schedule_items ADD COLUMN event_name TEXT NOT NULL DEFAULT ''"
         )
+    if "retry_after" not in existing:
+        cur.execute("ALTER TABLE schedule_items ADD COLUMN retry_after TEXT")
+    if "retry_count" not in existing:
+        cur.execute(
+            "ALTER TABLE schedule_items ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0"
+        )
+    if "last_error" not in existing:
+        cur.execute(
+            "ALTER TABLE schedule_items ADD COLUMN last_error TEXT NOT NULL DEFAULT ''"
+        )
 
 
 def _migrate_broadcast_plans(cur) -> None:
@@ -556,6 +576,16 @@ def _migrate_ad_break_items(cur) -> None:
         cur.execute("ALTER TABLE ad_break_items ADD COLUMN finished_at TEXT")
     if "dedupe_key" not in existing:
         cur.execute("ALTER TABLE ad_break_items ADD COLUMN dedupe_key TEXT")
+    if "retry_after" not in existing:
+        cur.execute("ALTER TABLE ad_break_items ADD COLUMN retry_after TEXT")
+    if "retry_count" not in existing:
+        cur.execute(
+            "ALTER TABLE ad_break_items ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0"
+        )
+    if "last_error" not in existing:
+        cur.execute(
+            "ALTER TABLE ad_break_items ADD COLUMN last_error TEXT NOT NULL DEFAULT ''"
+        )
 
 
 def _migrate_station_outputs(cur) -> None:

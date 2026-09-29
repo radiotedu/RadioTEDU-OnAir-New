@@ -1,3 +1,8 @@
+_MAX_RETRY_AFTER_SECONDS = 30 * 24 * 60 * 60
+_MAX_RETRY_COUNT = 10_000
+_MAX_LAST_ERROR_CHARS = 512
+
+
 class ScheduleRepository:
     def __init__(self, conn):
         self.conn = conn
@@ -46,6 +51,7 @@ class ScheduleRepository:
             "AND status='pending' "
             "AND datetime(play_at) <= CURRENT_TIMESTAMP "
             "AND (window_end IS NULL OR datetime(window_end) >= CURRENT_TIMESTAMP) "
+            "AND (retry_after IS NULL OR datetime(retry_after) <= CURRENT_TIMESTAMP) "
             "ORDER BY datetime(play_at) ASC, id ASC "
             "LIMIT 1",
             (station_id,),
@@ -70,7 +76,7 @@ class ScheduleRepository:
         cur = self.conn.cursor()
         cur.execute(
             "SELECT s.id, s.station_id, s.track_id, s.play_at, s.window_end, "
-            "s.event_name, s.status, "
+            "s.event_name, s.status, s.retry_after, s.retry_count, s.last_error, "
             "COALESCE(t.title, '') AS title, COALESCE(t.artist, '') AS artist "
             "FROM schedule_items s "
             "LEFT JOIN tracks t ON t.id = s.track_id "
@@ -85,7 +91,7 @@ class ScheduleRepository:
         cur = self.conn.cursor()
         cur.execute(
             "SELECT s.id, s.station_id, s.track_id, s.play_at, s.window_end, "
-            "s.event_name, s.status, "
+            "s.event_name, s.status, s.retry_after, s.retry_count, s.last_error, "
             "COALESCE(t.title, '') AS title, COALESCE(t.artist, '') AS artist "
             "FROM schedule_items s "
             "LEFT JOIN tracks t ON t.id = s.track_id "
@@ -98,8 +104,8 @@ class ScheduleRepository:
     def get(self, schedule_id: int):
         cur = self.conn.cursor()
         cur.execute(
-            "SELECT id, station_id, track_id, play_at, window_end, event_name, "
-            "status FROM schedule_items WHERE id=?",
+            "SELECT id, station_id, track_id, play_at, window_end, event_name, status, "
+            "retry_after, retry_count, last_error FROM schedule_items WHERE id=?",
             (int(schedule_id),),
         )
         return cur.fetchone()
@@ -159,3 +165,29 @@ class ScheduleRepository:
         cur = self.conn.cursor()
         cur.execute("UPDATE schedule_items SET status='failed' WHERE id=?", (item_id,))
         self.conn.commit()
+
+    def defer(
+        self, item_id: int, retry_after_seconds: int | float, error: str = ""
+    ) -> int:
+        """Release a failed playing schedule row while preserving its timing."""
+        try:
+            seconds = int(float(retry_after_seconds))
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("retry_after_seconds must be a finite number") from exc
+        seconds = max(0, min(seconds, _MAX_RETRY_AFTER_SECONDS))
+        safe_error = str(error or "")[:_MAX_LAST_ERROR_CHARS]
+        cur = self.conn.cursor()
+        cur.execute(
+            "UPDATE schedule_items SET status='pending', "
+            "retry_after=datetime(CURRENT_TIMESTAMP, ?), "
+            "retry_count=MIN(MAX(COALESCE(retry_count, 0), 0) + 1, ?), last_error=? "
+            "WHERE id=? AND status='playing'",
+            (
+                f"+{seconds} seconds",
+                _MAX_RETRY_COUNT,
+                safe_error,
+                int(item_id),
+            ),
+        )
+        self.conn.commit()
+        return max(0, int(cur.rowcount or 0))

@@ -176,6 +176,7 @@ def _icecast_output_args(
     *,
     include_audio_filters: bool = True,
     include_content_type: bool = True,
+    omit_afterburner: bool = False,
 ) -> list[str]:
     profile = resolve_stream_profile(cfg.stream_codec_profile, cfg.stream_bitrate_kbps)
     args: list[str] = []
@@ -191,7 +192,22 @@ def _icecast_output_args(
     ffmpeg_profile = str(profile.get("ffmpeg_profile") or "").strip()
     if ffmpeg_profile:
         args.extend(["-profile:a", ffmpeg_profile])
-    args.extend(str(item) for item in profile.get("ffmpeg_encoder_args", []))
+    encoder_args = [
+        str(item) for item in profile.get("ffmpeg_encoder_args", [])
+    ]
+    if omit_afterburner:
+        filtered_encoder_args = []
+        skip_value = False
+        for item in encoder_args:
+            if skip_value:
+                skip_value = False
+                continue
+            if item == "-afterburner":
+                skip_value = True
+                continue
+            filtered_encoder_args.append(item)
+        encoder_args = filtered_encoder_args
+    args.extend(encoder_args)
     format_name = str(profile["format"])
     if format_name == "ogg":
         args.extend(["-page_duration", "20000", "-flush_packets", "1"])
@@ -584,6 +600,8 @@ def build_ffmpeg_icecast_sink_cmd(cfg: StationPipelineConfig, ffmpeg_bin: str) -
 def build_ffmpeg_encoded_sink_cmd(
     cfg: StationPipelineConfig,
     ffmpeg_bin: str,
+    *,
+    omit_afterburner: bool = False,
 ) -> list[str]:
     """Encode already-processed programme PCM for a protocol adapter.
 
@@ -607,7 +625,12 @@ def build_ffmpeg_encoded_sink_cmd(
         "-i",
         "pipe:0",
         "-vn",
-        *_icecast_output_args(cfg, include_audio_filters=False, include_content_type=False),
+        *_icecast_output_args(
+            cfg,
+            include_audio_filters=False,
+            include_content_type=False,
+            omit_afterburner=omit_afterburner,
+        ),
         "pipe:1",
     ]
 

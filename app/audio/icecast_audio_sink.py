@@ -86,6 +86,31 @@ def current_codec_fallback(
     return None
 
 
+def _codec_fallback_action(error_text: object) -> str | None:
+    """Classify only explicit FFmpeg encoder-option/capability failures."""
+
+    token = str(error_text or "").casefold()
+    if "afterburner" in token and any(
+        marker in token
+        for marker in (
+            "unrecognized option",
+            "option not found",
+            "error splitting the argument list",
+        )
+    ):
+        return "omit_afterburner"
+    if "libfdk_aac" in token and any(
+        marker in token
+        for marker in (
+            "unknown encoder",
+            "encoder not found",
+            "no such encoder",
+        )
+    ):
+        return "native_aac"
+    return None
+
+
 def _mount_spread_seconds(
     cfg: StationPipelineConfig,
     maximum_seconds: float,
@@ -873,6 +898,7 @@ class IcecastAudioSink:
             fallback_cfg = current_codec_fallback(cfg)
             delay_index = 0
             delays = (1.0, 2.0, 4.0, 8.0, 15.0, 30.0)
+            omit_afterburner = False
             initial_delay = _mount_spread_seconds(
                 cfg, self._initial_connect_spread_sec
             )
@@ -881,6 +907,7 @@ class IcecastAudioSink:
             while not self._writer_stop.is_set():
                 connected_at = None
                 delivered_this_connection = False
+                proc = None
                 try:
                     source = self._source_factory(effective_cfg)
                     if self._writer_stop.is_set():
@@ -890,7 +917,9 @@ class IcecastAudioSink:
                     # reconnects. The bounded queue backpressures the producer
                     # if the origin remains unavailable for an extended time.
                     command = build_ffmpeg_encoded_sink_cmd(
-                        effective_cfg, self.ffmpeg_bin
+                        effective_cfg,
+                        self.ffmpeg_bin,
+                        omit_afterburner=omit_afterburner,
                     )
                     proc = self._spawn_process(
                         command,
@@ -944,22 +973,59 @@ class IcecastAudioSink:
                                 self._network_failed = False
                                 self._last_network_error = ""
                         else:
-                            safe = self._sanitize_encoder_line(exc, effective_cfg)
-                            with self._writer_lock:
-                                self._network_failed = True
-                                self._last_network_error = safe
-                                self._network_error_count += 1
-                        if (
-                            not delivered_this_connection
-                            and fallback_cfg is not None
-                            and effective_cfg is cfg
-                        ):
-                            effective_cfg = fallback_cfg
-                            delay_index = 0
-                            self._profile_fallback_active = True
-                            self._effective_stream_codec_profile = str(
-                                effective_cfg.stream_codec_profile or ""
+                            fallback_action = None
+                            if not delivered_this_connection and effective_cfg is cfg:
+                                if proc is not None:
+                                    try:
+                                        if proc.poll() is not None and self._stderr_thread:
+                                            self._stderr_thread.join(timeout=0.25)
+                                    except Exception:
+                                        pass
+                                with self._stderr_lock:
+                                    encoder_error = " ".join(
+                                        (
+                                            str(exc),
+                                            self._last_encoder_option_error,
+                                            self._last_encoder_error,
+                                        )
+                                    )
+                                fallback_action = _codec_fallback_action(encoder_error)
+
+                            can_apply_fallback = (
+                                fallback_action == "omit_afterburner"
+                                and not omit_afterburner
+                            ) or (
+                                fallback_action == "native_aac"
+                                and fallback_cfg is not None
                             )
+                            if can_apply_fallback:
+                                with self._writer_lock:
+                                    self._network_failed = False
+                                    self._last_network_error = ""
+                                if fallback_action == "omit_afterburner":
+                                    # Keep the selected FDK encoder, AAC profile,
+                                    # and bitrate; omit only its unsupported flag.
+                                    omit_afterburner = True
+                                    delay_index = 0
+                                elif (
+                                    fallback_action == "native_aac"
+                                    and fallback_cfg is not None
+                                ):
+                                    # Change encoder only when FFmpeg explicitly
+                                    # says that the configured codec is unavailable.
+                                    effective_cfg = fallback_cfg
+                                    omit_afterburner = False
+                                    delay_index = 0
+                                    self._profile_fallback_active = True
+                                    self._effective_stream_codec_profile = str(
+                                        effective_cfg.stream_codec_profile or ""
+                                    )
+                            else:
+                                safe = self._sanitize_encoder_line(exc, effective_cfg)
+                                with self._writer_lock:
+                                    self._network_failed = True
+                                    self._last_network_error = safe
+                                    self._network_error_count += 1
                 finally:
                     if connected_at is not None and time.monotonic() - connected_at >= 30.0:
                         delay_index = 0
