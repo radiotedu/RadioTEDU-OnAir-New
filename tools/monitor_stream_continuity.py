@@ -90,7 +90,9 @@ def build_ffmpeg_command(ffmpeg: Path, url: str) -> list[str]:
         url,
         "-vn",
         "-af",
-        "silencedetect=noise=-65dB:d=2",
+        # A two-second detector hides precisely the short interruptions this
+        # monitor is intended to find.  One PCM frame is about 21 ms.
+        "silencedetect=noise=-75dB:d=0.01",
         "-f",
         "null",
         "NUL" if os.name == "nt" else "/dev/null",
@@ -113,6 +115,7 @@ class StreamState:
     max_progress_gap_seconds: float = 0.0
     current_silence_started_at: float | None = None
     max_silence_seconds: float = 0.0
+    total_silence_seconds: float = 0.0
     silence_events: int = 0
     transport_errors: int = 0
     stderr_tail: deque[str] = field(default_factory=lambda: deque(maxlen=5))
@@ -158,6 +161,7 @@ def _read_diagnostics(state: StreamState, stream: IO[str]) -> None:
             if end:
                 duration = float(end.group(2))
                 state.max_silence_seconds = max(state.max_silence_seconds, duration)
+                state.total_silence_seconds += max(0.0, duration)
                 state.silence_events += 1
                 state.current_silence_started_at = None
             if _TRANSPORT_ERROR.search(line):
@@ -181,6 +185,7 @@ def _snapshot(state: StreamState, now: float, *, stopping: bool = False) -> dict
             expected_media = state.first_media_seconds + (now - first_progress)
             playback_margin = media_seconds - expected_media
             progress_age = now - (last_progress or first_progress)
+        maximum_silence = max(state.max_silence_seconds, current_silence)
         return {
             "label": state.label,
             "process_alive": state.process.poll() is None,
@@ -193,7 +198,10 @@ def _snapshot(state: StreamState, now: float, *, stopping: bool = False) -> dict
             "progress_age_seconds": round(progress_age, 3),
             "max_progress_gap_seconds": round(state.max_progress_gap_seconds, 3),
             "current_silence_seconds": round(current_silence, 3),
-            "max_silence_seconds": round(state.max_silence_seconds, 3),
+            "max_silence_seconds": round(maximum_silence, 3),
+            "total_silence_seconds": round(
+                state.total_silence_seconds + current_silence, 3
+            ),
             "silence_events": state.silence_events,
             "transport_errors": state.transport_errors,
             "diagnostic_tail": list(state.stderr_tail),
@@ -235,6 +243,8 @@ def _evaluate(
     minimum_margin_seconds: float,
     maximum_progress_age_seconds: float,
     maximum_silence_seconds: float,
+    maximum_progress_gap_seconds: float = 2.0,
+    maximum_total_silence_seconds: float = 0.5,
 ) -> dict[str, Any]:
     eligible = [row for row in snapshots if row["elapsed_seconds"] >= 10.0]
     minimum_margin = min(
@@ -249,8 +259,19 @@ def _evaluate(
         (float(row["progress_age_seconds"]) for row in eligible),
         default=0.0,
     )
+    maximum_progress_gap = max(
+        (
+            float(row.get("max_progress_gap_seconds", 0.0))
+            for row in eligible
+        ),
+        default=0.0,
+    )
     maximum_silence = max(
         (float(row["max_silence_seconds"]) for row in snapshots),
+        default=0.0,
+    )
+    maximum_total_silence = max(
+        (float(row.get("total_silence_seconds", 0.0)) for row in snapshots),
         default=0.0,
     )
     unexpected_exit = any(bool(row["unexpected_exit"]) for row in snapshots)
@@ -272,13 +293,17 @@ def _evaluate(
         and minimum_margin is not None
         and minimum_margin >= minimum_margin_seconds
         and maximum_progress_age <= maximum_progress_age_seconds
+        and maximum_progress_gap <= maximum_progress_gap_seconds
         and maximum_silence <= maximum_silence_seconds
+        and maximum_total_silence <= maximum_total_silence_seconds
     )
     return {
         "continuity_ok": continuity_ok,
         "minimum_playback_margin_seconds": minimum_margin,
         "maximum_progress_age_seconds": maximum_progress_age,
+        "maximum_progress_gap_seconds": maximum_progress_gap,
         "maximum_silence_seconds": maximum_silence,
+        "total_silence_seconds": maximum_total_silence,
         "unexpected_exit": unexpected_exit,
         "unexpected_exit_codes": sorted(set(exit_codes)),
         "diagnostic_tail": diagnostic_tail,
@@ -353,6 +378,8 @@ def run(args: argparse.Namespace) -> int:
                 minimum_margin_seconds=args.minimum_margin_seconds,
                 maximum_progress_age_seconds=args.maximum_progress_age_seconds,
                 maximum_silence_seconds=args.maximum_silence_seconds,
+                maximum_progress_gap_seconds=args.maximum_progress_gap_seconds,
+                maximum_total_silence_seconds=args.maximum_total_silence_seconds,
             )
         summary = {
             "type": "continuity_summary",
@@ -379,8 +406,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--duration-seconds", type=float, default=300.0)
     parser.add_argument("--sample-seconds", type=float, default=2.0)
     parser.add_argument("--minimum-margin-seconds", type=float, default=-5.0)
-    parser.add_argument("--maximum-progress-age-seconds", type=float, default=15.0)
-    parser.add_argument("--maximum-silence-seconds", type=float, default=15.0)
+    parser.add_argument("--maximum-progress-age-seconds", type=float, default=5.0)
+    parser.add_argument("--maximum-progress-gap-seconds", type=float, default=2.0)
+    parser.add_argument("--maximum-silence-seconds", type=float, default=0.25)
+    parser.add_argument("--maximum-total-silence-seconds", type=float, default=0.5)
     parser.add_argument(
         "--output",
         default=str(

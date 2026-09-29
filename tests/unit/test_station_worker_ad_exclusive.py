@@ -243,6 +243,99 @@ def test_unknown_duration_crash_retries_from_start_not_wall_clock_offset():
     assert recovered == [0.0]
 
 
+def test_explicit_dead_producer_overrides_healthy_output_branch():
+    assert StationWorker._runtime_playback_alive(
+        {
+            "running": True,
+            "program_running": False,
+            "producer_eof": False,
+            "branch_health": {"icecast": True},
+            "required_outputs": {"icecast": True},
+        }
+    ) is False
+
+
+def _host_worker(runtime_status):
+    started = []
+    popped = []
+    worker = StationWorker.__new__(StationWorker)
+    worker.station_id = 4
+    worker.runtime_registry = SimpleNamespace(
+        status=lambda _station_id: runtime_status,
+        start_station=lambda *args, **kwargs: started.append((args, kwargs)),
+    )
+    worker.playout_state = SimpleNamespace(
+        get_current=lambda _station_id: {"source": "host", "item_id": 19}
+    )
+    worker.program_queue_repo = SimpleNamespace(
+        list_items=lambda _station_id: [{"id": 19, "track_id": 52944}],
+        pop_item=popped.append,
+    )
+    worker._track_runtime_fields = lambda _track_id: (
+        "E:/Host/show.mp3", "Host Track", "Presenter", "Show", "spoken_word"
+    )
+    worker._set_playout_state = lambda *_args, **_kwargs: None
+    worker._broadcast_worker_state = lambda **_kwargs: None
+    return worker, started, popped
+
+
+def test_host_crash_with_healthy_sink_retries_same_item_from_start():
+    worker, started, popped = _host_worker(
+        {
+            "running": True,
+            "program_running": False,
+            "producer_eof": False,
+            "active_input_uri": "E:/Host/show.mp3",
+            "branch_health": {"icecast": True},
+            "required_outputs": {"icecast": True},
+        }
+    )
+
+    assert worker._advance_host_track() is False
+    assert popped == []
+    assert len(started) == 1
+    assert started[0][0][1] == "E:/Host/show.mp3"
+    assert started[0][1]["start_offset_seconds"] == 0.0
+
+
+def test_host_item_is_consumed_only_after_matching_clean_eof():
+    worker, started, popped = _host_worker(
+        {
+            "running": True,
+            "program_running": False,
+            "producer_eof": True,
+            "active_input_uri": "E:/Host/show.mp3",
+        }
+    )
+
+    assert worker._advance_host_track() is True
+    assert popped == [19]
+    assert started == []
+
+
+def test_repeated_host_crash_releases_playout_without_consuming_item():
+    worker, started, popped = _host_worker(
+        {
+            "running": True,
+            "program_running": False,
+            "producer_eof": False,
+            "active_input_uri": "E:/Host/show.mp3",
+            "branch_health": {"icecast": True},
+            "required_outputs": {"icecast": True},
+        }
+    )
+    states = []
+    worker._host_retry_allowed = lambda _item_id: True
+    worker._record_host_retry_failure = lambda _item_id: False
+    worker._set_playout_state = lambda *args, **kwargs: states.append((args, kwargs))
+
+    assert worker._advance_host_track() is True
+    assert popped == []
+    assert started == []
+    assert states[-1][0] == ("none", None)
+    assert states[-1][1]["reason"] == "host_retry_cooldown"
+
+
 def test_continuity_fallback_helper_starts_configured_audio():
     started = []
     state = []

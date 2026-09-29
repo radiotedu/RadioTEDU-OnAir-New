@@ -70,6 +70,13 @@ def _mark_song_ad_bootstrapped(station_id: int) -> None:
 _show_notification_sent: dict[tuple, float] = {}
 _SHOW_QUEUE_LOW_DEBOUNCE_SEC = 60.0
 _AD_BREAK_UPCOMING_DEBOUNCE_SEC = 60.0
+_MAX_SHOW_AUDIO_RETRIES = 2
+_SHOW_AUDIO_RETRY_LOCK = threading.Lock()
+_SHOW_AUDIO_RETRIES: dict[tuple[int, int, str], int] = {}
+_MAX_HOST_RETRIES_BEFORE_BACKOFF = 3
+_HOST_RETRY_BACKOFF_SEC = 30.0
+_HOST_RETRY_LOCK = threading.Lock()
+_HOST_RETRIES: dict[tuple[int, int], dict[str, float | int]] = {}
 # Compatibility state for bounded restart suppression. The clean runtime's
 # output-recovery registry owns retry timing, while older guard paths and their
 # regression suite still clear this station/item map between runs.
@@ -729,24 +736,52 @@ class StationWorker:
         # accidentally mark a song done and cut it short.
         if self.queue_repo.current_playing(self.station_id):
             return {"source": "playing", "reason": "waiting_for_track_boundary"}
+        if not self.runtime_registry:
+            return {"source": "host", "reason": "runtime_unavailable"}
+        if not self._host_retry_allowed(host_item_id):
+            return {"source": "host", "reason": "retry_cooldown"}
         self._set_playout_state("host", host_item_id, reason="host_start")
         track_uri, stream_title, stream_artist, stream_album, track_type = self._track_runtime_fields(
             track_id
         )
         if not track_uri:
+            self._clear_host_retry(host_item_id)
             self.program_queue_repo.pop_item(host_item_id)
             self._set_playout_state("none", None, reason="host_track_missing")
             return {"source": "host", "reason": "track_missing"}
         if self.runtime_registry:
-            self._start_runtime_station(
-                self.station_id,
-                track_uri,
-                stream_title=stream_title,
-                stream_artist=stream_artist,
-                stream_album=stream_album,
-                track_type=track_type,
-                crossfade_seconds=self._default_crossfade_seconds(),
-            )
+            try:
+                self._start_runtime_station(
+                    self.station_id,
+                    track_uri,
+                    stream_title=stream_title,
+                    stream_artist=stream_artist,
+                    stream_album=stream_album,
+                    track_type=track_type,
+                    crossfade_seconds=self._default_crossfade_seconds(),
+                )
+            except Exception:
+                # Leave the host item queued and owned; the next worker tick
+                # retries it instead of consuming content that never played.
+                _log.exception(
+                    "Failed to start host source station_id=%s item_id=%s",
+                    self.station_id,
+                    host_item_id,
+                )
+                retry_allowed = self._record_host_retry_failure(host_item_id)
+                self._set_playout_state(
+                    "host" if retry_allowed else "none",
+                    host_item_id if retry_allowed else None,
+                    reason=(
+                        "host_start_retry"
+                        if retry_allowed
+                        else "host_retry_cooldown"
+                    ),
+                )
+                return {
+                    "source": "host",
+                    "reason": "start_retry" if retry_allowed else "retry_cooldown",
+                }
         self._broadcast_worker_state(include_queue=True, include_track=True)
         return {"source": "host", "input_uri": track_uri}
 
@@ -755,19 +790,139 @@ class StationWorker:
         current = self.playout_state.get_current(self.station_id)
         if current["source"] != "host" or current["item_id"] is None:
             return False
-        if self.runtime_registry:
+        item_id = int(current["item_id"])
+        if not self.runtime_registry:
+            # Without producer evidence we cannot consume a host item. Keep it
+            # queued so it can be retried when the runtime becomes available,
+            # but clear stale ownership so other available playout can continue.
+            self._set_playout_state("none", None, reason="host_runtime_unavailable")
+            return True
+
+        items = self.program_queue_repo.list_items(self.station_id)
+        item = next(
+            (row for row in items if int(self._row_value(row, "id", 0) or 0) == item_id),
+            None,
+        )
+        if item is None:
+            # The operator removed this host item while it was selected.
+            self._clear_host_retry(item_id)
+            self._set_playout_state("none", None, reason="host_item_removed")
+            self._broadcast_worker_state(include_queue=True)
+            return True
+        track_id = int(self._row_value(item, "track_id", 0) or 0)
+        track_uri, title, artist, album, track_type = self._track_runtime_fields(
+            track_id
+        )
+        if not track_uri:
+            # A missing source cannot be retried. Drop the invalid queue entry
+            # (without reporting it as played) so the rest of the programme can
+            # continue instead of holding the worker forever.
+            _log.error(
+                "Host item has no resolvable media station_id=%s item_id=%s",
+                self.station_id,
+                item_id,
+            )
+            self._clear_host_retry(item_id)
+            self.program_queue_repo.pop_item(item_id)
+            self._set_playout_state("none", None, reason="host_source_missing")
+            self._broadcast_worker_state(include_queue=True)
+            return True
+
+        try:
             rt_status = self.runtime_registry.status(self.station_id)
-            if not (
-                isinstance(rt_status, dict)
-                and rt_status.get("producer_eof")
-                and not rt_status.get("program_running")
-            ) and self._runtime_playback_alive(rt_status):
-                return False  # still playing
-        # Track finished — pop from host queue and reset state
-        self.program_queue_repo.pop_item(int(current["item_id"]))
-        self._set_playout_state("none", None, reason="host_track_complete")
-        self._broadcast_worker_state(include_queue=True)
-        return True
+        except Exception:
+            _log.debug(
+                "Could not inspect host runtime station_id=%s item_id=%s",
+                self.station_id,
+                item_id,
+                exc_info=True,
+            )
+            return False
+
+        if self._runtime_source_finished_naturally(rt_status, track_uri):
+            # Only a clean EOF for this exact source consumes a host item.
+            self.program_queue_repo.pop_item(item_id)
+            self._clear_host_retry(item_id)
+            self._set_playout_state("none", None, reason="host_track_complete")
+            self._broadcast_worker_state(include_queue=True)
+            return True
+
+        if self._runtime_playback_matches(rt_status, track_uri):
+            self._clear_host_retry(item_id)
+            return False
+
+        # A dead or replaced producer is a crash/mismatch, not completion. Retry
+        # this same item from the beginning and retain it until clean EOF. After
+        # repeated failed restarts, release playout ownership briefly so fallback
+        # or other available programming can continue; the host item stays queued.
+        if not self._host_retry_allowed(item_id):
+            self._set_playout_state("none", None, reason="host_retry_cooldown")
+            return True
+        if not self._record_host_retry_failure(item_id):
+            self._set_playout_state("none", None, reason="host_retry_cooldown")
+            return True
+        try:
+            self._start_runtime_station(
+                self.station_id,
+                track_uri,
+                stream_title=title,
+                stream_artist=artist,
+                stream_album=album,
+                track_type=track_type,
+                crossfade_seconds=0.0,
+                start_offset_seconds=0.0,
+            )
+            reason = "host_runtime_recovered"
+        except Exception:
+            _log.exception(
+                "Failed to retry host source station_id=%s item_id=%s",
+                self.station_id,
+                item_id,
+            )
+            reason = "host_source_retry"
+        self._set_playout_state("host", item_id, reason=reason)
+        self._broadcast_worker_state(include_queue=True, include_track=True)
+        return False
+
+    def _host_retry_allowed(self, item_id: int) -> bool:
+        key = (int(self.station_id), int(item_id))
+        now = time.monotonic()
+        with _HOST_RETRY_LOCK:
+            state = _HOST_RETRIES.get(key)
+            if not state:
+                return True
+            retry_after = float(state.get("retry_after") or 0.0)
+            if retry_after and now < retry_after:
+                return False
+            if retry_after:
+                state["attempts"] = 0
+                state["retry_after"] = 0.0
+            return True
+
+    def _record_host_retry_failure(self, item_id: int) -> bool:
+        """Count a failed host producer and open a short retry backoff if needed."""
+        key = (int(self.station_id), int(item_id))
+        now = time.monotonic()
+        with _HOST_RETRY_LOCK:
+            state = _HOST_RETRIES.setdefault(
+                key, {"attempts": 0, "retry_after": 0.0}
+            )
+            retry_after = float(state.get("retry_after") or 0.0)
+            if retry_after and now < retry_after:
+                return False
+            attempts = int(state.get("attempts") or 0) + 1
+            if attempts >= _MAX_HOST_RETRIES_BEFORE_BACKOFF:
+                state["attempts"] = 0
+                state["retry_after"] = now + _HOST_RETRY_BACKOFF_SEC
+                return False
+            state["attempts"] = attempts
+            state["retry_after"] = 0.0
+            return True
+
+    def _clear_host_retry(self, item_id: int) -> None:
+        key = (int(self.station_id), int(item_id))
+        with _HOST_RETRY_LOCK:
+            _HOST_RETRIES.pop(key, None)
 
     def _start_continuity_fallback(
         self, *, reason: str, failed_source: str
@@ -876,6 +1031,13 @@ class StationWorker:
     def _runtime_playback_alive(rt_status: dict | None) -> bool:
         if not isinstance(rt_status, dict):
             return False
+        # Sink/branch health means the output connection is alive; it does not
+        # mean a media producer is still feeding programme audio. Prefer the
+        # explicit producer state whenever the runtime exposes it.
+        if "program_running" in rt_status:
+            return bool(rt_status.get("program_running", False))
+        if bool(rt_status.get("producer_eof", False)):
+            return False
         branch_health = rt_status.get("branch_health")
         if isinstance(branch_health, dict):
             required_outputs = rt_status.get("required_outputs")
@@ -889,8 +1051,6 @@ class StationWorker:
                     return True
             elif any(bool(value) for value in branch_health.values()):
                 return True
-        if "program_running" in rt_status:
-            return bool(rt_status.get("program_running", False))
         return bool(rt_status.get("running", False))
 
     @staticmethod
@@ -925,6 +1085,8 @@ class StationWorker:
     ) -> bool:
         """Check whether a clean EOF already queued this source's complete audio."""
         if not isinstance(rt_status, dict) or not bool(rt_status.get("producer_eof")):
+            return False
+        if bool(rt_status.get("program_running", False)):
             return False
         active_uri = str(rt_status.get("active_input_uri") or "").strip()
         return bool(active_uri and self._same_runtime_uri(active_uri, expected_uri))
@@ -2531,8 +2693,36 @@ class StationWorker:
         # "live" and "preparing" fall through to normal processing
         return None
 
+    def _hold_for_active_ad(self) -> dict | None:
+        """Keep show lifecycle transitions behind a currently playing ad."""
+        current_playing = getattr(self.ad_repo, "current_playing", None)
+        if not callable(current_playing):
+            return None
+        playing = current_playing(self.station_id)
+        if not playing:
+            return None
+        try:
+            self._advance_playing_ad_item()
+        except Exception:
+            _log.exception(
+                "Could not advance active ad before show transition station_id=%s",
+                self.station_id,
+            )
+        playing = current_playing(self.station_id)
+        if not playing:
+            return None
+        return {
+            "source": "show_hold",
+            "reason": "waiting_for_ad",
+            "item_id": int(self._row_value(playing, "id", 0) or 0),
+        }
+
     def _handle_going_live(self, session: dict) -> dict | None:
         """Wait for current track to finish, then play intro."""
+        ad_hold = self._hold_for_active_ad()
+        if ad_hold is not None:
+            return ad_hold
+
         # Check if a queue item is still playing; advance happens in process_once
         playing = self.queue_repo.current_playing(self.station_id)
         if playing:
@@ -2554,18 +2744,99 @@ class StationWorker:
 
     def _handle_show_audio_state(self, session: dict) -> dict | None:
         """Check if show audio finished. If still playing, hold. If done, transition."""
-        if self.runtime_registry:
-            rt_status = self.runtime_registry.status(self.station_id)
-            producer_finished = bool(
-                isinstance(rt_status, dict)
-                and rt_status.get("producer_eof")
-                and not rt_status.get("program_running")
-            )
-            if not producer_finished and self._runtime_playback_alive(rt_status):
-                return {"source": f"show_{session['status']}", "reason": "audio_in_progress"}
-
         status = session["status"]
         show = ShowRepository(self.conn).get(int(session["show_id"]))
+        ad_hold = self._hold_for_active_ad()
+        if ad_hold is not None:
+            return ad_hold
+
+        audio_field = {
+            "intro_playing": "intro_path",
+            "break_outro": "break_outro_path",
+            "break_intro": "break_intro_path",
+            "outro_playing": "outro_path",
+        }.get(status)
+        audio_path = str((show or {}).get(audio_field) or "") if audio_field else ""
+        expected_uri = resolve_runtime_media_path(audio_path) if audio_path else ""
+        source_name = {
+            "intro_playing": "show_intro",
+            "break_outro": "show_break_outro",
+            "break_intro": "show_break_intro",
+            "outro_playing": "show_outro",
+        }.get(status, f"show_{status}")
+
+        if self.runtime_registry:
+            try:
+                rt_status = self.runtime_registry.status(self.station_id)
+            except Exception:
+                _log.debug(
+                    "Could not inspect show audio runtime station_id=%s status=%s",
+                    self.station_id,
+                    status,
+                    exc_info=True,
+                )
+                return {"source": source_name, "reason": "audio_status_retry"}
+
+            retry_key = (
+                int(self.station_id),
+                int(session["id"]),
+                str(status),
+            )
+            clean_eof = bool(
+                expected_uri
+                and self._runtime_source_finished_naturally(rt_status, expected_uri)
+            )
+            matching_source = bool(
+                expected_uri
+                and self._runtime_playback_matches(rt_status, expected_uri)
+            )
+            explicit_producer_state = isinstance(rt_status, dict) and (
+                "program_running" in rt_status or "producer_eof" in rt_status
+            )
+
+            if clean_eof:
+                with _SHOW_AUDIO_RETRY_LOCK:
+                    _SHOW_AUDIO_RETRIES.pop(retry_key, None)
+            elif matching_source:
+                with _SHOW_AUDIO_RETRY_LOCK:
+                    _SHOW_AUDIO_RETRIES.pop(retry_key, None)
+                return {"source": source_name, "reason": "audio_in_progress"}
+            elif explicit_producer_state:
+                # An explicit stopped producer without a matching clean EOF is
+                # a crash/mismatch. Retry the same show file a bounded number
+                # of times; then advance lifecycle so a broken optional ID
+                # cannot leave the station waiting forever.
+                with _SHOW_AUDIO_RETRY_LOCK:
+                    attempts = _SHOW_AUDIO_RETRIES.get(retry_key, 0)
+                    if attempts < _MAX_SHOW_AUDIO_RETRIES:
+                        attempts += 1
+                        _SHOW_AUDIO_RETRIES[retry_key] = attempts
+                        retry_now = True
+                    else:
+                        _SHOW_AUDIO_RETRIES.pop(retry_key, None)
+                        retry_now = False
+                if retry_now:
+                    if audio_path:
+                        self._play_show_audio(audio_path, source_name)
+                    _log.warning(
+                        "Retrying failed show audio station_id=%s session_id=%s "
+                        "status=%s attempt=%s",
+                        self.station_id,
+                        int(session["id"]),
+                        status,
+                        attempts,
+                    )
+                    return {"source": source_name, "reason": "audio_retrying"}
+                _log.error(
+                    "Show audio retries exhausted station_id=%s session_id=%s status=%s",
+                    self.station_id,
+                    int(session["id"]),
+                    status,
+                )
+            elif self._runtime_playback_alive(rt_status):
+                # Compatibility for older runtime adapters without producer
+                # EOF fields. Their running state remains the best evidence.
+                return {"source": source_name, "reason": "audio_in_progress"}
 
         if status == "intro_playing":
             self._update_show_session_status(session["id"], "live")
@@ -2590,6 +2861,10 @@ class StationWorker:
     def _handle_on_break(self, session: dict) -> dict | None:
         """During ad break: if ads remain, fall through to ad pipeline.
         If no more ads, play break intro and return to live."""
+        ad_hold = self._hold_for_active_ad()
+        if ad_hold is not None:
+            return ad_hold
+
         due_ad = self._next_due_ad_if_allowed()
         if due_ad:
             return None  # Fall through — ad pipeline will handle
@@ -2724,6 +2999,7 @@ class StationWorker:
             show_result is not None
             and show_session is not None
             and str(show_session.get("status") or "") == "going_live"
+            and show_result.get("reason") == "waiting_for_track"
         ):
             # A show waiting for the current song must still advance that song
             # when its duration/EOF boundary is reached. Otherwise the early
@@ -2874,7 +3150,14 @@ class StationWorker:
             # control path above.
             schedule_ready=bool(ready_schedule) and not bool(playing),
             fallback_ready=bool(self.fallback_uri) and not bool(playing),
-            host_count=1 if host_pending and not playing else 0,
+            host_count=(
+                1
+                if host_pending
+                and not playing
+                and self.runtime_registry
+                and self._host_retry_allowed(int(host_pending["id"]))
+                else 0
+            ),
         )
         if source == "host" and host_pending:
             host_item_id = int(host_pending["id"])

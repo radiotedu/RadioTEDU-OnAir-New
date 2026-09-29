@@ -3,6 +3,7 @@
 from datetime import datetime, timedelta, timezone
 
 from app.db import get_connection, init_db
+from app.engine import station_worker as worker_module
 from app.engine.station_worker import StationWorker
 from app.repositories.queue_repo import QueueRepository
 from app.repositories.show_repo import ShowRepository
@@ -175,6 +176,128 @@ def test_process_once_going_live_advances_clean_eof_track(tmp_path, monkeypatch)
     assert session["status"] == "live"
     assert playing is None
     assert result.get("reason") != "waiting_for_track"
+
+
+def _insert_playing_ad(conn, station_id):
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO ad_break_items "
+        "(station_id, track_id, due_at, status, priority, started_at) "
+        "VALUES (?, 1, CURRENT_TIMESTAMP, 'playing', 0, CURRENT_TIMESTAMP)",
+        (station_id,),
+    )
+    conn.commit()
+
+
+def _make_active_ad_runtime(runtime):
+    runtime.status = lambda _station_id: {
+        "running": True,
+        "program_running": True,
+        "producer_eof": False,
+        "active_input_uri": "test.mp3",
+        "branch_health": {"icecast": True},
+        "required_outputs": {"icecast": True},
+    }
+
+
+def test_going_live_waits_for_active_ad_before_starting_show_intro(tmp_path, monkeypatch):
+    station_id = _setup(tmp_path, monkeypatch)
+    runtime = _FakeRuntimeRegistry()
+    worker = _make_worker(station_id, runtime)
+    worker._ads_enabled = lambda: True
+    worker._track_runtime_fields = lambda _track_id: (
+        "test.mp3", "Ad", "Artist", "", "ad"
+    )
+
+    conn = get_connection()
+    intro = tmp_path / "intro.mp3"
+    intro.write_bytes(b"fake audio")
+    _create_show_with_session(
+        conn, station_id, status="going_live", intro_path=str(intro)
+    )
+    _insert_playing_ad(conn, station_id)
+    conn.close()
+    _make_active_ad_runtime(runtime)
+
+    result = worker.process_once()
+
+    assert result == {
+        "source": "show_hold",
+        "reason": "waiting_for_ad",
+        "item_id": 1,
+    }
+    assert runtime.started == []
+    conn = get_connection()
+    session = ShowSessionRepository(conn).get_active_for_station(station_id)
+    conn.close()
+    assert session["status"] == "going_live"
+
+
+def test_on_break_waits_for_active_ad_before_starting_break_intro(tmp_path, monkeypatch):
+    station_id = _setup(tmp_path, monkeypatch)
+    runtime = _FakeRuntimeRegistry()
+    worker = _make_worker(station_id, runtime)
+    worker._ads_enabled = lambda: True
+    worker._track_runtime_fields = lambda _track_id: (
+        "test.mp3", "Ad", "Artist", "", "ad"
+    )
+
+    conn = get_connection()
+    break_intro = tmp_path / "break_intro.mp3"
+    break_intro.write_bytes(b"fake audio")
+    show_id, _session_id = _create_show_with_session(
+        conn, station_id, status="on_break"
+    )
+    ShowRepository(conn).update(show_id, break_intro_path=str(break_intro))
+    _insert_playing_ad(conn, station_id)
+    conn.close()
+    _make_active_ad_runtime(runtime)
+
+    result = worker.process_once()
+
+    assert result["reason"] == "waiting_for_ad"
+    assert runtime.started == []
+    conn = get_connection()
+    session = ShowSessionRepository(conn).get_active_for_station(station_id)
+    conn.close()
+    assert session["status"] == "on_break"
+
+
+def test_show_audio_crash_retries_then_continues_without_false_eof(tmp_path, monkeypatch):
+    station_id = _setup(tmp_path, monkeypatch)
+    runtime = _FakeRuntimeRegistry()
+    worker = _make_worker(station_id, runtime)
+
+    intro = tmp_path / "crashed_intro.mp3"
+    intro.write_bytes(b"fake audio")
+    conn = get_connection()
+    _create_show_with_session(
+        conn, station_id, status="intro_playing", intro_path=str(intro)
+    )
+    session = ShowSessionRepository(conn).get_active_for_station(station_id)
+    conn.close()
+    runtime.status = lambda _station_id: {
+        "running": True,
+        "program_running": False,
+        "producer_eof": False,
+        "active_input_uri": str(intro),
+        "branch_health": {"icecast": True},
+        "required_outputs": {"icecast": True},
+    }
+    monkeypatch.setattr(worker_module, "_SHOW_AUDIO_RETRIES", {})
+
+    first = worker._handle_show_audio_state(session)
+    second = worker._handle_show_audio_state(session)
+    third = worker._handle_show_audio_state(session)
+
+    assert first["reason"] == "audio_retrying"
+    assert second["reason"] == "audio_retrying"
+    assert third is None
+    assert [row["input_uri"] for row in runtime.started] == [str(intro), str(intro)]
+    conn = get_connection()
+    updated = ShowSessionRepository(conn).get_active_for_station(station_id)
+    conn.close()
+    assert updated["status"] == "live"
 
 
 def test_process_once_going_live_plays_intro_when_idle(tmp_path, monkeypatch):

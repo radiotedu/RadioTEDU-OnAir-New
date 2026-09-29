@@ -195,6 +195,27 @@ class MultiQualityRuntimeTests(unittest.TestCase):
             )
         )
 
+    def test_slow_primary_queue_does_not_pause_quality_mount_fanout(self):
+        cfg = _cfg()
+        self.runtime._ensure_icecast_sink(cfg)
+        self.runtime._ensure_extra_icecast_sinks(cfg)
+        primary = self.runtime._icecast_sink
+        primary.health_snapshot = lambda: {
+            "process_running": True,
+            "mount_healthy": True,
+            "queued_pcm_bytes": 9 * 48_000 * 2 * 2,
+        }
+
+        self.runtime._icecast_pipe_loop(
+            _FinishedPcmProducer(b"programme-frame"),
+            primary,
+            self.runtime._current_playout_generation(),
+        )
+
+        self.assertTrue(
+            all(sink.chunks == [b"programme-frame"] for sink in _FakeSink.instances)
+        )
+
     def test_pcm_pipe_phase_locks_after_small_startup_reserve(self):
         class ChunkedStdout:
             def __init__(self):

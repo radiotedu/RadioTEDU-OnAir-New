@@ -42,10 +42,6 @@ _SILENCE_FLOOR_CHUNK_BYTES = 4096
 # and the destructive full-queue resynchronisations caused by clock drift.
 _ICECAST_PIPE_TARGET_RESERVE_BYTES = 6 * _PCM_BYTES_PER_SECOND
 _ICECAST_PIPE_LOW_WATER_BYTES = 5 * _PCM_BYTES_PER_SECOND
-_ICECAST_PIPE_HIGH_WATER_BYTES = 8 * _PCM_BYTES_PER_SECOND
-# One blocked source must not starve sibling mounts. After this long above the
-# high-water mark, resume fan-out so healthy FLAC/low branches keep programme PCM.
-_ICECAST_PIPE_HIGH_WATER_MAX_STALL_SECONDS = 10.0
 _ICECAST_PIPE_SERVO_MAX_CORRECTION = 0.04
 _SILENCE_FLOOR_INTERVAL_SECONDS = (
     _SILENCE_FLOOR_CHUNK_BYTES / _PCM_BYTES_PER_SECOND
@@ -1331,37 +1327,10 @@ class StationRuntime:
                 not self._icecast_pipe_stop.is_set()
                 and self._generation_is_current(generation)
             ):
-                # If an encoder/source reconnects, stop filling this bounded
-                # queue before it can reach the destructive full condition.
-                # FFmpeg remains blocked on its pipe and catches up after the
-                # sink has consumed the preserved programme reserve.
-                # Escape after a bounded stall so a single wedged origin write
-                # cannot freeze programme delivery to every other mount.
-                reserve_bytes = observed_queue_bytes()
-                high_water_since = (
-                    time.monotonic()
-                    if pcm_clock_started
-                    and reserve_bytes is not None
-                    and reserve_bytes > _ICECAST_PIPE_HIGH_WATER_BYTES
-                    else None
-                )
-                while (
-                    pcm_clock_started
-                    and reserve_bytes is not None
-                    and reserve_bytes > _ICECAST_PIPE_HIGH_WATER_BYTES
-                    and (
-                        high_water_since is None
-                        or (
-                            time.monotonic() - high_water_since
-                            < _ICECAST_PIPE_HIGH_WATER_MAX_STALL_SECONDS
-                        )
-                    )
-                ):
-                    if self._icecast_pipe_stop.wait(0.05):
-                        return
-                    if not self._generation_is_current(generation):
-                        return
-                    reserve_bytes = observed_queue_bytes()
+                # Do not gate the shared programme clock on the primary mount's
+                # queue depth. A slow primary must not stop PCM fan-out to the
+                # other quality mounts. Each sink owns its bounded queue and
+                # applies lossless backpressure at its own capacity boundary.
                 chunk = stdout.read(_LIVE_MIX_CHUNK_BYTES)
                 if not chunk:
                     if producer.poll() is not None:
