@@ -4,18 +4,31 @@ import datetime
 import unittest
 
 from app.engine.station_worker import StationWorker
+from app.engine import station_worker as station_worker_module
 
 
 class _QueueRepo:
     def __init__(self, playing, pending):
         self.playing = playing
         self.pending = pending
+        self.failed = []
 
     def current_playing(self, _station_id):
         return self.playing
 
     def next_pending(self, _station_id):
         return self.pending
+
+    def mark_failed(self, item_id):
+        self.failed.append(int(item_id))
+
+
+class _PlayoutState:
+    def __init__(self):
+        self.values = []
+
+    def set_current(self, station_id, source, item_id, **_kwargs):
+        self.values.append((int(station_id), str(source), item_id))
 
 
 class _RuntimeRegistry:
@@ -32,13 +45,29 @@ class _RuntimeRegistry:
 class _AdRepo:
     def __init__(self, due):
         self.due = due
+        self.playing = due
+        self.done = []
+        self.failed = []
 
     def next_due(self, _station_id):
         return self.due
 
+    def current_playing(self, _station_id):
+        return self.playing
+
+    def mark_playing(self, item_id):
+        return None
+
+    def mark_done(self, item_id):
+        self.done.append(int(item_id))
+
+    def mark_failed(self, item_id):
+        self.failed.append(int(item_id))
+
 
 class DueAdMusicBoundaryTests(unittest.TestCase):
     def _worker(self, due_ad):
+        station_worker_module._RESTART_SUPPRESSION.clear()
         worker = StationWorker.__new__(StationWorker)
         worker.station_id = 4
         now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
@@ -64,6 +93,7 @@ class DueAdMusicBoundaryTests(unittest.TestCase):
             }
         )
         worker.ad_repo = _AdRepo(due_ad)
+        worker.playout_state = _PlayoutState()
         worker._ads_enabled = lambda: True
         worker._default_crossfade_seconds = lambda: 3.0
         worker._cached_track_duration = (
@@ -78,6 +108,7 @@ class DueAdMusicBoundaryTests(unittest.TestCase):
         )
         worker.completed = []
         worker._complete_queue_item = lambda item: worker.completed.append(item["id"])
+        worker._broadcast_worker_state = lambda **_kwargs: None
         return worker
 
     def test_due_campaign_ad_keeps_current_song_until_its_real_end(self):
@@ -143,6 +174,232 @@ class DueAdMusicBoundaryTests(unittest.TestCase):
         self.assertFalse(advanced)
         self.assertEqual(worker.completed, [])
         self.assertEqual(retries, [(12, 0.0)])
+
+    def test_max_timeout_with_live_mismatched_source_retries_song(self):
+        worker = self._worker({"id": 23})
+        started_at = datetime.datetime.now(datetime.timezone.utc).replace(
+            tzinfo=None
+        ) - datetime.timedelta(seconds=2400)
+        worker.queue_repo.playing["started_at"] = started_at.strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        worker.runtime_registry._status = {
+            "running": True,
+            "program_running": True,
+            "producer_eof": False,
+            "active_input_uri": "test://unexpected-source",
+        }
+        retries = []
+        worker._restart_playing_queue_item_if_runtime_mismatched = (
+            lambda item, *, start_offset_seconds: retries.append(
+                (item["id"], start_offset_seconds)
+            )
+            or False
+        )
+
+        advanced = worker._advance_playing_queue_item()
+
+        self.assertFalse(advanced)
+        self.assertEqual(worker.completed, [])
+        self.assertEqual(retries, [(12, 0.0)])
+
+    def test_restart_limit_keeps_current_queue_item_for_later_retry(self):
+        worker = self._worker({"id": 23})
+        playing = worker.queue_repo.playing
+        worker._track_runtime_fields = lambda _track_id: (
+            "test://unfinished-song",
+            "Unfinished Song",
+            "Artist",
+            "",
+            "music",
+        )
+        station_worker_module._RESTART_SUPPRESSION[(4, "manual", 12)] = {
+            "attempts": station_worker_module._MAX_RESTART_ATTEMPTS_PER_ITEM,
+            "next_allowed": 0.0,
+            "reason": "",
+        }
+
+        recovered = worker._restart_playing_queue_item_if_runtime_mismatched(playing)
+
+        self.assertFalse(recovered)
+        self.assertIs(worker.queue_repo.playing, playing)
+        self.assertEqual(worker.queue_repo.failed, [])
+        self.assertEqual(
+            station_worker_module._RESTART_SUPPRESSION[(4, "manual", 12)]["attempts"],
+            0,
+        )
+
+    def test_dead_matching_runtime_is_restarted(self):
+        worker = self._worker({"id": 23})
+        worker.runtime_registry._status = {
+            "running": False,
+            "program_running": False,
+            "producer_eof": False,
+            "active_input_uri": "test://unfinished-song",
+        }
+        worker._track_runtime_fields = lambda _track_id: (
+            "test://unfinished-song",
+            "Unfinished Song",
+            "Artist",
+            "",
+            "music",
+        )
+        starts = []
+        worker._start_runtime_station = (
+            lambda *_args, **_kwargs: starts.append("restarted")
+        )
+
+        recovered = worker._restart_playing_queue_item_if_runtime_mismatched(
+            worker.queue_repo.playing
+        )
+
+        self.assertTrue(recovered)
+        self.assertEqual(starts, ["restarted"])
+        self.assertEqual(worker.queue_repo.failed, [])
+
+    def test_transient_restart_failure_keeps_current_queue_item_playing(self):
+        worker = self._worker({"id": 23})
+        playing = worker.queue_repo.playing
+        worker._track_runtime_fields = lambda _track_id: (
+            "test://unfinished-song",
+            "Unfinished Song",
+            "Artist",
+            "",
+            "music",
+        )
+
+        def fail_transiently(*_args, **_kwargs):
+            raise RuntimeError("temporary source restart failure")
+
+        worker._start_runtime_station = fail_transiently
+
+        recovered = worker._restart_playing_queue_item_if_runtime_mismatched(playing)
+
+        self.assertFalse(recovered)
+        self.assertIs(worker.queue_repo.playing, playing)
+        self.assertEqual(worker.queue_repo.failed, [])
+        self.assertEqual(worker.playout_state.values[-1], (4, "manual", 12))
+
+    def test_failed_ad_runtime_recovery_retains_ad_ownership(self):
+        worker = self._worker({
+            "id": 23,
+            "track_id": 711,
+            "started_at": datetime.datetime.now(datetime.timezone.utc)
+            .replace(tzinfo=None)
+            .strftime("%Y-%m-%d %H:%M:%S"),
+            "duration": 20.0,
+        })
+        worker.runtime_registry._status["active_input_uri"] = "test://other-source"
+        worker._track_runtime_fields = lambda _track_id: (
+            "test://powerapp-ad",
+            "PowerApp",
+            "RadioTEDU",
+            "",
+            "ad",
+        )
+        worker._start_runtime_station = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("transient output failure")
+        )
+
+        recovered = worker._restart_playing_ad_item_if_runtime_mismatched(
+            worker.ad_repo.playing
+        )
+
+        self.assertFalse(recovered)
+        self.assertEqual(worker.ad_repo.failed, [])
+        self.assertEqual(worker.playout_state.values[-1], (4, "ads", 23))
+
+    def test_elapsed_time_without_runtime_does_not_consume_ad(self):
+        worker = self._worker(None)
+        started_at = datetime.datetime.now(datetime.timezone.utc).replace(
+            tzinfo=None
+        ) - datetime.timedelta(seconds=45)
+        worker.ad_repo.playing = {
+            "id": 23,
+            "track_id": 711,
+            "started_at": started_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "duration": 20.0,
+        }
+        worker.runtime_registry = None
+        worker._track_runtime_fields = lambda _track_id: (
+            "test://powerapp-ad",
+            "PowerApp",
+            "RadioTEDU",
+            "",
+            "ad",
+        )
+
+        completed = worker._advance_playing_ad_item()
+
+        self.assertFalse(completed)
+        self.assertEqual(worker.ad_repo.done, [])
+        self.assertEqual(worker.ad_repo.failed, [])
+
+    def test_short_jingle_uri_mismatch_retries_without_clean_eof(self):
+        worker = self._worker(None)
+        started_at = datetime.datetime.now(datetime.timezone.utc).replace(
+            tzinfo=None
+        ) - datetime.timedelta(seconds=0.5)
+        worker.queue_repo.playing.update(
+            started_at=started_at.strftime("%Y-%m-%d %H:%M:%S"),
+            duration=1.0,
+            track_type="jingle",
+        )
+        worker.runtime_registry._status.update(
+            running=True,
+            program_running=True,
+            producer_eof=False,
+            active_input_uri="test://other-source",
+        )
+        worker._track_runtime_fields = lambda _track_id: (
+            "test://sweeper",
+            "TEDU Sweeper",
+            "RadioTEDU",
+            "",
+            "jingle",
+        )
+        retries = []
+        worker._restart_playing_queue_item_if_runtime_mismatched = (
+            lambda item, *, start_offset_seconds: retries.append(
+                (item["id"], start_offset_seconds)
+            )
+            or False
+        )
+
+        advanced = worker._advance_playing_queue_item()
+
+        self.assertFalse(advanced)
+        self.assertEqual(worker.completed, [])
+        self.assertEqual(retries, [(12, 0.0)])
+
+    def test_short_jingle_completes_only_after_clean_eof(self):
+        worker = self._worker(None)
+        started_at = datetime.datetime.now(datetime.timezone.utc).replace(
+            tzinfo=None
+        ) - datetime.timedelta(seconds=2)
+        worker.queue_repo.playing.update(
+            started_at=started_at.strftime("%Y-%m-%d %H:%M:%S"),
+            duration=1.0,
+            track_type="jingle",
+        )
+        worker.runtime_registry._status.update(
+            running=True,
+            program_running=False,
+            producer_eof=True,
+            active_input_uri="test://current-song",
+        )
+        worker._track_runtime_fields = lambda _track_id: (
+            "test://current-song",
+            "TEDU Sweeper",
+            "RadioTEDU",
+            "",
+            "jingle",
+        )
+
+        advanced = worker._advance_playing_queue_item()
+
+        self.assertTrue(advanced)
+        self.assertEqual(worker.completed, [12])
 
 
 if __name__ == "__main__":

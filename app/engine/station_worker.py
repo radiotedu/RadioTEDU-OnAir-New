@@ -322,8 +322,13 @@ _RESTART_SUPPRESSION: dict[
     tuple[int, str, int],
     dict[str, float | int | str],
 ] = {}
+_RECOVERY_FAILURE_LOG_LOCK = threading.Lock()
+_RECOVERY_FAILURE_LOG_TIMES: dict[tuple[int, str, int], float] = {}
 _MAX_RESTART_ATTEMPTS_PER_ITEM = 3
-_RESTART_COOLDOWN_SEC = 180.0
+# Retry a source failure quickly enough to avoid multi-minute dead air while
+# still preventing a tight process-spawn loop when the failure is persistent.
+_RESTART_COOLDOWN_SEC = 5.0
+_RECOVERY_FAILURE_LOG_INTERVAL_SEC = 60.0
 _TRANSIENT_OUTPUT_FAILURE_MARKERS = (
     "error number -10054",
     "error number -10053",
@@ -925,6 +930,16 @@ class StationWorker:
         *,
         auto_done: bool = True,
     ) -> dict:
+        if not self.runtime_registry:
+            # Do not consume an advertisement or announcement when there is no
+            # output runtime capable of carrying it. Keep the database row
+            # pending so it can be retried when the station runtime returns.
+            self._restore_managed_item_pending(source, item_id)
+            self._set_playout_state(
+                "none", None, reason=f"{source}_runtime_unavailable"
+            )
+            return {"source": source, "reason": "runtime_unavailable"}
+
         mark_playing(item_id)
         self._set_playout_state(source, item_id, reason=f"{source}_start")
         track_uri, stream_title, stream_artist, stream_album, track_type = self._track_runtime_fields(track_id)
@@ -937,14 +952,13 @@ class StationWorker:
 
         # ── AI Host: Play announcement before track ──
         try:
-            if self.runtime_registry:
-                self._start_runtime_station(
-                    self.station_id, track_uri,
-                    stream_title=stream_title, stream_artist=stream_artist,
-                    stream_album=stream_album,
-                    track_type=track_type,
-                    crossfade_seconds=self._default_crossfade_seconds(),
-                )
+            self._start_runtime_station(
+                self.station_id, track_uri,
+                stream_title=stream_title, stream_artist=stream_artist,
+                stream_album=stream_album,
+                track_type=track_type,
+                crossfade_seconds=self._default_crossfade_seconds(),
+            )
             self._record_ai_broadcast(track_id, "broadcast_started")
             self._broadcast_worker_state(include_queue=True, include_track=True)
             if auto_done:
@@ -1428,7 +1442,11 @@ class StationWorker:
             # FFmpeg decoded the complete spot into the sink queue. Restarting
             # it while that reserve drains would replay its trailing audio.
             return False
-        if track_uri and self._runtime_playback_matches(status, track_uri):
+        if (
+            track_uri
+            and self._runtime_playback_alive(status)
+            and self._runtime_playback_matches(status, track_uri)
+        ):
             return False
         allowed, suppression_reason = self._restart_attempt_allowed(
             "ads", item_id
@@ -1466,15 +1484,34 @@ class StationWorker:
             self.ad_repo.mark_playing(item_id)
             self._set_playout_state("ads", item_id, reason="ad_runtime_recovered")
             self._broadcast_worker_state(include_queue=True, include_track=True)
-        except Exception:
-            self.ad_repo.mark_failed(item_id)
+        except Exception as exc:
+            # A failed source restart is not proof that the ad finished. Keep
+            # ownership in the ad queue; process_once will retry after the
+            # bounded restart cooldown instead of allowing music to replace it.
             self._set_playout_state(
-                "none", None, reason="ad_runtime_recovery_failed"
+                "ads", item_id, reason="ad_runtime_recovery_retry"
             )
-            self._start_continuity_fallback(
-                reason="source_start_failed", failed_source="ads"
-            )
+            self._log_recovery_failure("ads", item_id, exc)
+            return False
         return True
+
+    def _log_recovery_failure(self, source: str, item_id: int, error: Exception) -> None:
+        key = (int(self.station_id), str(source), int(item_id))
+        now = time.monotonic()
+        with _RECOVERY_FAILURE_LOG_LOCK:
+            previous = _RECOVERY_FAILURE_LOG_TIMES.get(key, 0.0)
+            should_log = now - previous >= _RECOVERY_FAILURE_LOG_INTERVAL_SEC
+            if should_log:
+                _RECOVERY_FAILURE_LOG_TIMES[key] = now
+        if should_log:
+            _log.warning(
+                "Could not recover %s runtime for station_id=%s item_id=%s; "
+                "retaining item for retry: %s",
+                source,
+                self.station_id,
+                item_id,
+                error,
+            )
 
     def _advance_playing_ad_item(self) -> bool:
         current_playing = getattr(self.ad_repo, "current_playing", None)
@@ -1551,20 +1588,18 @@ class StationWorker:
             # Reaching the expected duration while the source is still active
             # must never cut it. If it switched away before a clean EOF, restore
             # the current spot and keep it owned by the ad queue.
-            if track_uri and self._runtime_playback_matches(
-                runtime_status, track_uri
+            if (
+                track_uri
+                and self._runtime_playback_alive(runtime_status)
+                and self._runtime_playback_matches(runtime_status, track_uri)
             ):
                 return False
             self._restart_playing_ad_item_if_runtime_mismatched(playing)
             return False
 
-        item_id = int(self._row_value(playing, "id", 0) or 0)
-        self.ad_repo.mark_done(item_id)
-        if track_id > 0 and getattr(self, "conn", None) is not None:
-            TrackRepository(self.conn).mark_played(track_id)
-        self._set_playout_state("none", None, reason="ad_complete")
-        self._broadcast_worker_state(include_track=True)
-        return True
+        # Without a runtime there is no clean EOF or output evidence. Keep the
+        # ad owned by its queue so elapsed database time cannot consume it.
+        return False
 
     def _advance_playing_schedule_item(self) -> bool:
         """Keep a scheduled programme item on air until its source reaches EOF."""
@@ -1606,7 +1641,9 @@ class StationWorker:
             self._broadcast_worker_state(include_queue=True, include_track=True)
             return False
 
-        if self._runtime_playback_matches(status, track_uri):
+        if self._runtime_playback_alive(status) and self._runtime_playback_matches(
+            status, track_uri
+        ):
             return True
 
         # start_station marks the schedule active before FFmpeg has opened a
@@ -1728,9 +1765,10 @@ class StationWorker:
             return True, ""
         if int(state.get("attempts") or 0) >= _MAX_RESTART_ATTEMPTS_PER_ITEM:
             state["reason"] = "restart_limit_reached"
-            if str(source or "") == "ads":
-                # Keep an ad queued across repeated transient mismatches. Start a
-                # fresh recovery cycle after a longer backoff instead of dropping it.
+            if str(source or "") in {"ads", "manual"}:
+                # Keep the active broadcast item queued across repeated transient
+                # mismatches. Start a fresh recovery cycle after a longer backoff
+                # instead of letting a due ad or sweeper replace unfinished audio.
                 state["attempts"] = 0
                 state["next_allowed"] = now + max(_RESTART_COOLDOWN_SEC * 2, 5.0)
                 return False, "restart_cooldown_active"
@@ -1759,7 +1797,9 @@ class StationWorker:
             self._set_playout_state("none", None, reason="manual_track_missing")
             return True
         status = self.runtime_registry.status(self.station_id)
-        if self._runtime_playback_matches(status, track_uri):
+        if self._runtime_playback_alive(status) and self._runtime_playback_matches(
+            status, track_uri
+        ):
             return False
         allowed, suppression_reason = self._restart_attempt_allowed(
             "manual", item_id
@@ -1797,17 +1837,15 @@ class StationWorker:
             )
             self._broadcast_worker_state(include_queue=True, include_track=True)
             return True
-        except Exception:
-            self.queue_repo.mark_failed(item_id)
+        except Exception as exc:
+            # A failed restart does not prove that this song reached clean EOF.
+            # Keep ownership of the playing queue row so due ads and sweepers
+            # cannot take over after a transient process or sink failure.
             self._set_playout_state(
-                "none", None, reason="manual_runtime_recovery_failed"
+                "manual", item_id, reason="manual_runtime_recovery_retry"
             )
-            _log.exception(
-                "Failed to recover station_id=%s queue item %s",
-                self.station_id,
-                item_id,
-            )
-            return True
+            self._log_recovery_failure("manual", item_id, exc)
+            return False
 
     def _advance_playing_queue_item(self) -> bool:
         """Check if current playing queue item's duration has elapsed.
@@ -1893,12 +1931,9 @@ class StationWorker:
         # a stale queue transition. Process liveness alone must not freeze the
         # queue indefinitely; reconcile its active URI with the playing row.
         #
-        # Only treat a divergent active URI as a fault while the track should
-        # still be playing. Short jingles (e.g. the 1s sweeper) finish between
-        # worker polls; once elapsed time has passed the track's natural end
-        # (advance_at) the runtime correctly moves on, so a URI "mismatch" is
-        # expected and the item must be allowed to complete rather than being
-        # restarted/failed.
+        # A divergent active URI is not proof that the queue-owned item reached
+        # clean EOF. This applies to short sweepers too: if the worker missed the
+        # handoff window, retry the same row instead of silently consuming it.
         if self.runtime_registry:
             rt_status = self.runtime_registry.status(self.station_id)
             track_uri, _title, _artist, _album, _track_type = self._track_runtime_fields(
@@ -1918,14 +1953,6 @@ class StationWorker:
                 and self._runtime_playback_alive(rt_status)
                 and not self._runtime_playback_matches(rt_status, track_uri)
             ):
-                if current_type == "jingle" and duration <= 3.0:
-                    # A very short station ID can finish between worker polls.
-                    _log.info(
-                        "Completing short jingle queue item %s after runtime advanced",
-                        int(playing["id"]),
-                    )
-                    self._complete_queue_item(playing)
-                    return True
                 return self._restart_playing_queue_item_if_runtime_mismatched(
                     playing,
                     start_offset_seconds=0.0,
@@ -1986,17 +2013,16 @@ class StationWorker:
                         int(playing["id"]),
                     )
                     return False
-                if not self._runtime_playback_alive(rt_status):
-                    return self._restart_playing_queue_item_if_runtime_mismatched(
-                        playing, start_offset_seconds=0.0
-                    )
-            _log.warning(
-                "Track exceeded max allowed time (%.1f/%.1fs), "
-                "force-advancing queue item %d",
-                elapsed, _max, int(playing["id"]),
-            )
-            self._complete_queue_item(playing)
-            return True
+                # The safety timer is not proof that the complete item was
+                # delivered. Restart the same row rather than allowing an ad or
+                # another queue item to preempt its unverified tail.
+                return self._restart_playing_queue_item_if_runtime_mismatched(
+                    playing, start_offset_seconds=0.0
+                )
+            else:
+                # Without runtime EOF evidence, keep any queue item owned instead
+                # of force-completing it from catalog time alone.
+                return False
 
         if elapsed >= advance_at:
             music_crossfade_due = (
@@ -2013,41 +2039,28 @@ class StationWorker:
                     self._complete_queue_item(playing)
                     return True
                 if self._runtime_playback_alive(rt_status):
-                    # Only wait if the runtime is still rendering THIS track.
-                    # A jingle that has finished is immediately followed by the
-                    # next item, so the runtime stays alive; if it is playing a
-                    # different source the current item has run its course and
-                    # must be completed rather than hanging in "playing" forever.
-                    if current_track_uri and self._runtime_playback_matches(
-                        rt_status, current_track_uri
+                    if (
+                        current_track_uri
+                        and self._runtime_playback_alive(rt_status)
+                        and self._runtime_playback_matches(
+                            rt_status, current_track_uri
+                        )
                     ):
                         return False
-                    if (
-                        current_type == "music"
-                        and current_track_uri
-                        and self._runtime_playback_alive(rt_status)
-                    ):
-                        return self._restart_playing_queue_item_if_runtime_mismatched(
-                            playing,
-                            start_offset_seconds=0.0,
-                        )
-                else:
-                    # Reaching the catalog boundary does not prove a complete
-                    # song reached the output queue. If the decoder died
-                    # without matching clean EOF, recover the same queue item
-                    # instead of marking it done and letting an ad or jingle
-                    # take over before the missing tail is rendered.
-                    _log.warning(
-                        "Runtime ended without clean EOF at track boundary; "
-                        "retrying station_id=%s queue_item_id=%s",
-                        self.station_id,
-                        int(playing["id"]),
-                    )
-                    self._restart_playing_queue_item_if_runtime_mismatched(
-                        playing,
-                        start_offset_seconds=0.0,
-                    )
-                    return False
+                # Reaching the catalog boundary does not prove a complete item
+                # reached every output queue. Recover the same row whenever the
+                # matching clean EOF evidence is absent.
+                _log.debug(
+                    "Runtime has no matching clean EOF at track boundary; "
+                    "retrying station_id=%s queue_item_id=%s",
+                    self.station_id,
+                    int(playing["id"]),
+                )
+                self._restart_playing_queue_item_if_runtime_mismatched(
+                    playing,
+                    start_offset_seconds=0.0,
+                )
+                return False
             elif self.runtime_registry and music_crossfade_due:
                 rt_status = self.runtime_registry.status(self.station_id)
                 current_track_uri, _, _, _, _ = self._track_runtime_fields(
@@ -2077,6 +2090,9 @@ class StationWorker:
                     # emits the first sample. Never use that earlier clock to
                     # begin the overlap while this exact source is still short.
                     return False
+            else:
+                # A missing runtime cannot prove EOF or carry out a crossfade.
+                return False
             self._complete_queue_item(playing)
             return True
 
@@ -2091,13 +2107,6 @@ class StationWorker:
                 if self._runtime_source_finished_naturally(
                     rt_status, current_track_uri
                 ):
-                    self._complete_queue_item(playing)
-                    return True
-                if current_type == "jingle" and duration <= 3.0:
-                    _log.info(
-                        "Completing short jingle queue item %s after runtime ended",
-                        int(playing["id"]),
-                    )
                     self._complete_queue_item(playing)
                     return True
                 _log.warning(

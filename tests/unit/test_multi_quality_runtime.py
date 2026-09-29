@@ -222,11 +222,11 @@ class MultiQualityRuntimeTests(unittest.TestCase):
             )
         )
 
-    def test_clean_eof_requires_primary_mount_to_accept_every_frame(self):
+    def test_clean_eof_requires_all_mounts_to_accept_every_frame(self):
         cfg = _cfg()
         self.runtime._ensure_icecast_sink(cfg)
         self.runtime._ensure_extra_icecast_sinks(cfg)
-        self.runtime._icecast_sink.accept = False
+        self.runtime._extra_icecast_sinks["icecast:/lofi-low"].accept = False
 
         self.runtime._icecast_pipe_loop(
             _FinishedPcmProducer(b"authoritative-timeline"),
@@ -235,12 +235,13 @@ class MultiQualityRuntimeTests(unittest.TestCase):
         )
 
         self.assertFalse(self.runtime._producer_exit_pcm_accepted)
-        self.assertTrue(
-            all(
-                sink.chunks == []
-                for branch, sink in self.runtime._icecast_output_targets()
-                if branch == "icecast"
-            )
+        self.assertEqual(self.runtime._icecast_sink.chunks, [b"authoritative-timeline"])
+        self.assertEqual(
+            self.runtime._extra_icecast_sinks["icecast:/lofi-low"].chunks, []
+        )
+        self.assertEqual(
+            self.runtime._extra_icecast_sinks["icecast:/lofi-flac"].chunks,
+            [b"authoritative-timeline"],
         )
 
     def test_high_reported_primary_backlog_does_not_hide_quality_acceptance(self):

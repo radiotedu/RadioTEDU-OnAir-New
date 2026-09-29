@@ -1384,15 +1384,13 @@ class StationRuntime:
                 if not self._generation_is_current(generation):
                     break
                 output_targets = self._icecast_output_targets()
+                # Producer EOF is used as proof that the complete source was
+                # accepted by every configured Icecast output queue. Requiring
+                # only the primary mount can mark an ad/sweeper complete even
+                # when an auxiliary listener mount missed part of the source.
                 required_branches = {
-                    branch
-                    for branch, _target in output_targets
-                    if branch == "icecast"
+                    branch for branch, _target in output_targets
                 }
-                if not required_branches:
-                    required_branches = {
-                        branch for branch, _target in output_targets
-                    }
                 chunk_accepted = self._write_pcm_chunk_to_targets(
                     chunk,
                     output_targets,
