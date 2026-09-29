@@ -7,10 +7,10 @@ def choose_source(
 ) -> str:
     if host_count > 0:
         return "host"
-    if manual_count > 0:
-        return "manual"
     if ad_due:
         return "ads"
+    if manual_count > 0:
+        return "manual"
     if schedule_ready:
         return "schedule"
     if fallback_ready:

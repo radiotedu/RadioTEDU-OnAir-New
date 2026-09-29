@@ -1,8 +1,11 @@
 import logging
 import hashlib
 import json
+import os
 import threading
 import time
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import unquote
@@ -42,6 +45,241 @@ _log = logging.getLogger("cleanroom.worker")
 _SCHEDULER_TRIGGER_LOCK = threading.Lock()
 _SONG_AD_BOOTSTRAP_STATIONS: set[int] = set()
 _SWEEPER_LAST_QUEUE_ITEM: dict[int, int] = {}
+_DURATION_PROBE_LOCK = threading.Lock()
+_DURATION_PROBE_CACHE: OrderedDict[
+    tuple,
+    tuple[float, float, tuple[int, int, int, int] | None, float],
+] = OrderedDict()
+_DURATION_PROBE_PENDING: set[tuple] = set()
+_DURATION_PROBE_CACHE_LIMIT = 4096
+_DURATION_PROBE_PENDING_LIMIT = 32
+_DURATION_PROBE_CACHE_TTL_SECONDS = 3600.0
+_DURATION_PROBE_FAILURE_RETRY_SECONDS = 60.0
+_DURATION_PROBE_IDENTITY_TTL_SECONDS = 5.0
+_DURATION_PROBE_EXECUTOR = ThreadPoolExecutor(
+    max_workers=2,
+    thread_name_prefix="track-duration-probe",
+)
+_AUDIO_PREFETCH_LOCK = threading.Lock()
+_AUDIO_PREFETCH_PENDING: set[int] = set()
+_AUDIO_PREFETCH_PENDING_LIMIT = 32
+_AUDIO_PREFETCH_EXECUTOR = ThreadPoolExecutor(
+    max_workers=1,
+    thread_name_prefix="station-audio-prefetch",
+)
+_UNKNOWN_AUTOFILL_DURATION_SECONDS = 180.0
+
+
+def _duration_probe_request_key(track_id: int, file_path: str) -> tuple | None:
+    raw_path = str(file_path or "").strip()
+    if not raw_path or "://" in raw_path:
+        return None
+    try:
+        normalized_path = os.path.normcase(os.path.normpath(raw_path))
+    except (OSError, ValueError):
+        normalized_path = raw_path.casefold()
+    return (int(track_id), normalized_path)
+
+
+def _schedule_track_duration_probe(track_id: int, file_path: str) -> tuple | None:
+    """Queue file resolution and probing away from the StationWorker thread."""
+
+    raw_path = str(file_path or "").strip()
+    key = _duration_probe_request_key(track_id, raw_path)
+    if key is None:
+        return None
+    now = time.monotonic()
+
+    with _DURATION_PROBE_LOCK:
+        cached = _DURATION_PROBE_CACHE.get(key)
+        if cached:
+            duration, checked_at, _identity, identity_checked_at = cached
+            ttl = (
+                _DURATION_PROBE_CACHE_TTL_SECONDS
+                if duration > 0.0
+                else _DURATION_PROBE_FAILURE_RETRY_SECONDS
+            )
+            identity_is_fresh = (
+                duration <= 0.0
+                or now - identity_checked_at < _DURATION_PROBE_IDENTITY_TTL_SECONDS
+            )
+            if now - checked_at < ttl and identity_is_fresh:
+                return key
+        if key in _DURATION_PROBE_PENDING:
+            return key
+        if len(_DURATION_PROBE_PENDING) >= _DURATION_PROBE_PENDING_LIMIT:
+            return key
+        _DURATION_PROBE_PENDING.add(key)
+        cached_at_schedule = cached
+
+    def probe() -> None:
+        duration = 0.0
+        identity: tuple[int, int, int, int] | None = None
+        cache_result = True
+        try:
+            # These path checks may hit a disconnected drive or slow network
+            # volume, so they must run only in this bounded background worker.
+            resolved = resolve_runtime_media_path(raw_path)
+            if not resolved or "://" in resolved:
+                return
+            candidate = Path(resolved)
+            before = candidate.stat()
+            if not candidate.is_file():
+                return
+            identity = (
+                int(before.st_size),
+                int(getattr(before, "st_mtime_ns", int(before.st_mtime * 1_000_000_000))),
+                int(getattr(before, "st_ctime_ns", int(before.st_ctime * 1_000_000_000))),
+                int(getattr(before, "st_ino", 0) or 0),
+            )
+
+            if cached_at_schedule:
+                old_duration, old_checked_at, old_identity, _old_identity_checked_at = (
+                    cached_at_schedule
+                )
+                if (
+                    old_duration > 0.0
+                    and old_identity == identity
+                    and time.monotonic() - old_checked_at
+                    < _DURATION_PROBE_CACHE_TTL_SECONDS
+                ):
+                    duration = old_duration
+
+            from app.audio import audio_processing
+
+            if duration <= 0.0:
+                duration = float(
+                    audio_processing.probe_duration(
+                        str(candidate),
+                        timeout_seconds=5.0,
+                    )
+                    or 0.0
+                )
+            if duration > 0.0:
+                after = candidate.stat()
+                after_identity = (
+                    int(after.st_size),
+                    int(getattr(after, "st_mtime_ns", int(after.st_mtime * 1_000_000_000))),
+                    int(getattr(after, "st_ctime_ns", int(after.st_ctime * 1_000_000_000))),
+                    int(getattr(after, "st_ino", 0) or 0),
+                )
+                if after_identity != identity:
+                    # The media changed while ffprobe was reading it. Do not
+                    # publish or persist a duration for a different file state.
+                    cache_result = False
+                    return
+                identity = after_identity
+                probe_conn = None
+                try:
+                    probe_conn = get_connection()
+                    probe_conn.execute(
+                        "UPDATE tracks SET duration=? WHERE id=? AND file_path=?",
+                        (duration, int(track_id), raw_path),
+                    )
+                    probe_conn.commit()
+                except Exception:
+                    _log.debug(
+                        "Could not persist background duration for track_id=%d",
+                        int(track_id),
+                        exc_info=True,
+                    )
+                finally:
+                    if probe_conn is not None:
+                        try:
+                            probe_conn.close()
+                        except Exception:
+                            pass
+        except Exception:
+            _log.debug(
+                "Background duration probe failed for track_id=%d",
+                int(track_id),
+                exc_info=True,
+            )
+        finally:
+            checked_at = time.monotonic()
+            with _DURATION_PROBE_LOCK:
+                _DURATION_PROBE_PENDING.discard(key)
+                if cache_result:
+                    _DURATION_PROBE_CACHE[key] = (
+                        max(0.0, duration),
+                        checked_at,
+                        identity,
+                        checked_at,
+                    )
+                    _DURATION_PROBE_CACHE.move_to_end(key)
+                    while len(_DURATION_PROBE_CACHE) > _DURATION_PROBE_CACHE_LIMIT:
+                        _DURATION_PROBE_CACHE.popitem(last=False)
+                else:
+                    # In particular, never leave the previously validated
+                    # duration eligible after detecting a mid-probe change.
+                    _DURATION_PROBE_CACHE.pop(key, None)
+
+    try:
+        _DURATION_PROBE_EXECUTOR.submit(probe)
+    except RuntimeError:
+        with _DURATION_PROBE_LOCK:
+            _DURATION_PROBE_PENDING.discard(key)
+    return key
+
+
+def _schedule_upcoming_audio_prefetch(station_id: int, limit: int = 3) -> None:
+    """Load queue rows and warm media in a bounded background task."""
+
+    sid = int(station_id)
+    with _AUDIO_PREFETCH_LOCK:
+        if sid in _AUDIO_PREFETCH_PENDING:
+            return
+        if len(_AUDIO_PREFETCH_PENDING) >= _AUDIO_PREFETCH_PENDING_LIMIT:
+            return
+        _AUDIO_PREFETCH_PENDING.add(sid)
+
+    def prefetch() -> None:
+        conn = None
+        try:
+            conn = get_connection()
+            rows = conn.execute(
+                "SELECT t.id AS track_id, t.file_path, q.status "
+                "FROM queue_items q "
+                "JOIN tracks t ON t.id=q.track_id "
+                "WHERE q.station_id=? AND q.status IN ('playing','pending') "
+                "ORDER BY CASE q.status WHEN 'playing' THEN 0 ELSE 1 END, "
+                "q.position, q.id LIMIT ?",
+                (sid, max(1, min(5, int(limit)))),
+            ).fetchall()
+            for row in rows:
+                raw_path = str(row["file_path"] or "")
+                _schedule_track_duration_probe(int(row["track_id"]), raw_path)
+                if str(row["status"] or "").lower() != "pending":
+                    continue
+                try:
+                    uri = resolve_runtime_media_path(raw_path)
+                    prefetch_fast_cached_uri(uri)
+                except Exception:
+                    _log.debug(
+                        "Could not prefetch upcoming media for station_id=%s",
+                        sid,
+                        exc_info=True,
+                    )
+        except Exception:
+            _log.debug(
+                "Could not read upcoming media for station_id=%s",
+                sid,
+                exc_info=True,
+            )
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            with _AUDIO_PREFETCH_LOCK:
+                _AUDIO_PREFETCH_PENDING.discard(sid)
+
+    try:
+        _AUDIO_PREFETCH_EXECUTOR.submit(prefetch)
+    except RuntimeError:
+        with _AUDIO_PREFETCH_LOCK:
+            _AUDIO_PREFETCH_PENDING.discard(sid)
 
 
 def _sweeper_boundary_changed(station_id: int, queue_item_id: int) -> bool:
@@ -300,41 +538,37 @@ class StationWorker:
         except Exception:
             _log.warning("AI prefetch health check failed", exc_info=True)
 
-    def _probe_and_store_track_duration(self, track_id: int) -> float:
-        cur = self.conn.cursor()
-        cur.execute(
-            "SELECT COALESCE(file_path, '') AS file_path, COALESCE(duration, 0.0) AS duration "
-            "FROM tracks WHERE id=? LIMIT 1",
-            (int(track_id),),
-        )
-        row = cur.fetchone()
-        if not row:
+    def _cached_track_duration(self, track_id: int, file_path: str) -> float:
+        cache_key = _schedule_track_duration_probe(int(track_id), file_path)
+        if cache_key is None:
             return 0.0
-        current_duration = float(row["duration"] or 0.0)
-        if current_duration > 0.0:
-            return current_duration
-        resolved = resolve_runtime_media_path(str(row["file_path"] or "").strip())
-        if not resolved or "://" in resolved:
-            return 0.0
-        candidate = Path(resolved)
-        if not candidate.is_file():
-            return 0.0
-        try:
-            from app.audio import audio_processing
-
-            duration = float(
-                audio_processing.probe_duration(
-                    str(candidate),
-                    timeout_seconds=5.0,
-                )
+        now = time.monotonic()
+        with _DURATION_PROBE_LOCK:
+            if cache_key not in _DURATION_PROBE_CACHE:
+                # A boundary check must never wait for ffprobe. The upcoming
+                # track was scheduled during queue prefetch; until that worker
+                # finishes, disable overlap and let the decoder reach clean EOF.
+                return 0.0
+            duration, checked_at, identity, identity_checked_at = _DURATION_PROBE_CACHE[
+                cache_key
+            ]
+            ttl = (
+                _DURATION_PROBE_CACHE_TTL_SECONDS
+                if duration > 0.0
+                else _DURATION_PROBE_FAILURE_RETRY_SECONDS
             )
-        except Exception:
-            _log.warning("Could not probe duration for track %d", int(track_id), exc_info=True)
-            return 0.0
+            if (
+                now - checked_at >= ttl
+                or (duration > 0.0 and identity is None)
+                or (
+                    duration > 0.0
+                    and now - identity_checked_at >= _DURATION_PROBE_IDENTITY_TTL_SECONDS
+                )
+            ):
+                return 0.0
+            duration = float(duration or 0.0)
         if duration <= 0.0:
             return 0.0
-        cur.execute("UPDATE tracks SET duration=? WHERE id=?", (duration, int(track_id)))
-        self.conn.commit()
         return duration
 
     def _queue_has_dedupe_key(self, dedupe_key: str) -> bool:
@@ -1620,8 +1854,39 @@ class StationWorker:
                 except (KeyError, IndexError):
                     next_type = "music"
                 if current_type == "music" and next_type == "music":
-                    # Station IDs start at a song boundary; only songs overlap.
-                    crossfade = self._default_crossfade_seconds()
+                    # Do not shorten this song for a queued successor when a
+                    # due campaign ad will actually take the next boundary.
+                    # The regular selector gives that ad priority after the
+                    # current item finishes; crossfade must use the same plan.
+                    campaign_ad_due = False
+                    if self._ads_enabled():
+                        try:
+                            campaign_ad_due = bool(
+                                self.ad_repo.next_due(self.station_id)
+                            )
+                        except Exception:
+                            # If the due-ad state cannot be read, keep the
+                            # current song whole and defer the transition.
+                            campaign_ad_due = True
+                    if not campaign_ad_due:
+                        # Station IDs start at a song boundary; only songs overlap.
+                        crossfade = self._default_crossfade_seconds()
+                        verified_duration = self._cached_track_duration(
+                            int(playing["track_id"] or 0),
+                            str(self._row_value(playing, "file_path", "") or ""),
+                        )
+                        if verified_duration > 0.0:
+                            duration = verified_duration
+                        else:
+                            # Unknown/remote files cannot safely be advanced
+                            # from catalog time. With crossfade disabled, the
+                            # active decoder must reach clean EOF first.
+                            crossfade = 0.0
+                            _log.debug(
+                                "Deferring music overlap because duration could not be verified "
+                                "for track_id=%s",
+                                int(playing["track_id"] or 0),
+                            )
         advance_at = max(0.0, duration - crossfade)
 
         # A healthy encoder process can still be rendering the wrong file after
@@ -1757,6 +2022,44 @@ class StationWorker:
                         rt_status, current_track_uri
                     ):
                         return False
+                    if (
+                        current_type == "music"
+                        and current_track_uri
+                        and self._runtime_playback_alive(rt_status)
+                    ):
+                        return self._restart_playing_queue_item_if_runtime_mismatched(
+                            playing,
+                            start_offset_seconds=0.0,
+                        )
+            elif self.runtime_registry and music_crossfade_due:
+                rt_status = self.runtime_registry.status(self.station_id)
+                current_track_uri, _, _, _, _ = self._track_runtime_fields(
+                    int(playing["track_id"] or 0)
+                )
+                if self._runtime_source_finished_naturally(
+                    rt_status, current_track_uri
+                ):
+                    self._complete_queue_item(playing)
+                    return True
+                if (
+                    not self._runtime_playback_alive(rt_status)
+                    or not self._runtime_playback_matches(
+                        rt_status, current_track_uri
+                    )
+                ):
+                    return self._restart_playing_queue_item_if_runtime_mismatched(
+                        playing,
+                        start_offset_seconds=0.0,
+                    )
+                try:
+                    source_elapsed = float(rt_status.get("elapsed") or 0.0)
+                except (TypeError, ValueError):
+                    source_elapsed = 0.0
+                if source_elapsed > 0.0 and source_elapsed < advance_at:
+                    # Queue wall time starts before the decoder necessarily
+                    # emits the first sample. Never use that earlier clock to
+                    # begin the overlap while this exact source is still short.
+                    return False
             self._complete_queue_item(playing)
             return True
 
@@ -2294,7 +2597,8 @@ class StationWorker:
             where.append(f"id NOT IN ({placeholders})")
             params.extend(blocked)
         select = (
-            "SELECT id, COALESCE(duration, 0.0) AS duration, "
+            "SELECT id, COALESCE(file_path, '') AS file_path, "
+            "COALESCE(duration, 0.0) AS duration, "
             "COALESCE(play_count, 0) AS play_count, COALESCE(bpm, 0.0) AS bpm "
             "FROM tracks WHERE "
         )
@@ -2373,7 +2677,11 @@ class StationWorker:
         track_id = int(row["id"])
         duration = float(row["duration"] or 0.0)
         if duration <= 0.0:
-            duration = self._probe_and_store_track_duration(track_id)
+            _schedule_track_duration_probe(
+                track_id,
+                str(row["file_path"] or ""),
+            )
+            duration = _UNKNOWN_AUTOFILL_DURATION_SECONDS
         return {"track_id": track_id, "duration": duration}
 
     def _autofill_queue(self) -> int:
@@ -2511,29 +2819,9 @@ class StationWorker:
         return added
 
     def _prefetch_upcoming_audio(self, limit: int = 3) -> None:
-        """Warm the next few H:/network tracks before a transition.
+        """Schedule upcoming media work without touching slow storage inline."""
 
-        The decoder must never perform a cold-volume copy on the handoff
-        thread.  ``prefetch_fast_cached_uri`` is asynchronous and atomic, so
-        this stays cheap even when the cache is already warm.
-        """
-
-        try:
-            rows = self.conn.execute(
-                "SELECT t.file_path FROM queue_items q "
-                "JOIN tracks t ON t.id=q.track_id "
-                "WHERE q.station_id=? AND q.status='pending' "
-                "ORDER BY q.position, q.id LIMIT ?",
-                (self.station_id, max(1, min(5, int(limit)))),
-            ).fetchall()
-        except Exception:
-            return
-        for row in rows:
-            try:
-                uri = resolve_runtime_media_path(str(row["file_path"] or ""))
-                prefetch_fast_cached_uri(uri)
-            except Exception:
-                continue
+        _schedule_upcoming_audio_prefetch(self.station_id, limit)
 
     def _count_pending_music_since_jingle(self) -> int:
         """Count music tracks at the end of pending queue since last jingle."""
@@ -3124,9 +3412,9 @@ class StationWorker:
         if queue_source == "host":
             host_pending = self.program_queue_repo.next_pending(self.station_id)
 
-        # A due advertisement must wait for the active queue item to finish.
-        # Otherwise choose_source prioritizes ads over manual playback and cuts
-        # the current song or sweeper as soon as its cadence becomes due.
+        # A due advertisement waits until the active item finishes. At that
+        # safe boundary it takes precedence over auto-filled pending music, so
+        # the cadence cannot be starved by a queue that is always replenished.
         manual_count = 1 if pending and not playing else 0
         # Suppress ad auto-fire during all active show states EXCEPT 'preparing' and 'on_break'.
         # 'preparing': normal automation, DJ hasn't gone live yet.

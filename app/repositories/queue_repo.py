@@ -223,6 +223,7 @@ class QueueRepository:
         cur.execute(
             "SELECT q.id, q.station_id, q.track_id, q.position, q.status, "
             "q.started_at, COALESCE(t.duration, 0.0) AS duration, "
+            "COALESCE(t.file_path, '') AS file_path, "
             "COALESCE(t.title, '') AS title, COALESCE(t.artist, '') AS artist, "
             "COALESCE(t.track_type, 'music') AS track_type "
             "FROM queue_items q "

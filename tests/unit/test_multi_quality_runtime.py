@@ -17,6 +17,9 @@ class _FakeSink:
 
     def __init__(self, *_args, **_kwargs):
         self.cfg = None
+        self.decouple_input_backpressure = bool(
+            _kwargs.get("decouple_input_backpressure", False)
+        )
         self.running = False
         self.accept = True
         self.chunks: list[bytes] = []
@@ -124,6 +127,7 @@ class MultiQualityRuntimeTests(unittest.TestCase):
             },
         )
         self.assertEqual(len(_FakeSink.instances), 3)
+        self.assertTrue(self.runtime._icecast_sink.decouple_input_backpressure)
         self.assertTrue(
             all(sink.chunks == [b"same-program-pcm"] for sink in _FakeSink.instances)
         )
@@ -180,6 +184,25 @@ class MultiQualityRuntimeTests(unittest.TestCase):
         self.assertFalse(branches["icecast:/lofi-low"])
         self.assertTrue(branches["icecast:/lofi-flac"])
 
+    def test_primary_rejection_is_not_hidden_by_a_sibling_mount_acceptance(self):
+        cfg = _cfg()
+        self.runtime._ensure_icecast_sink(cfg)
+        self.runtime._ensure_extra_icecast_sinks(cfg)
+        self.runtime._icecast_sink.accept = False
+
+        primary_accepted = self.runtime._write_pcm_chunk_to_targets(
+            b"pcm",
+            self.runtime._icecast_output_targets(),
+            required_branches={"icecast"},
+        )
+
+        self.assertFalse(primary_accepted)
+        self.assertEqual(self.runtime._icecast_sink.chunks, [])
+        self.assertEqual(
+            self.runtime._extra_icecast_sinks["icecast:/lofi-low"].chunks,
+            [b"pcm"],
+        )
+
     def test_pcm_pipe_reads_once_and_fans_out_the_same_program_bytes(self):
         cfg = _cfg()
         self.runtime._ensure_icecast_sink(cfg)
@@ -199,7 +222,28 @@ class MultiQualityRuntimeTests(unittest.TestCase):
             )
         )
 
-    def test_slow_primary_queue_does_not_pause_quality_mount_fanout(self):
+    def test_clean_eof_requires_primary_mount_to_accept_every_frame(self):
+        cfg = _cfg()
+        self.runtime._ensure_icecast_sink(cfg)
+        self.runtime._ensure_extra_icecast_sinks(cfg)
+        self.runtime._icecast_sink.accept = False
+
+        self.runtime._icecast_pipe_loop(
+            _FinishedPcmProducer(b"authoritative-timeline"),
+            self.runtime._icecast_sink,
+            self.runtime._current_playout_generation(),
+        )
+
+        self.assertFalse(self.runtime._producer_exit_pcm_accepted)
+        self.assertTrue(
+            all(
+                sink.chunks == []
+                for branch, sink in self.runtime._icecast_output_targets()
+                if branch == "icecast"
+            )
+        )
+
+    def test_high_reported_primary_backlog_does_not_hide_quality_acceptance(self):
         cfg = _cfg()
         self.runtime._ensure_icecast_sink(cfg)
         self.runtime._ensure_extra_icecast_sinks(cfg)

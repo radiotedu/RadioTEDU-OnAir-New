@@ -493,10 +493,12 @@ class StationRuntime:
         *,
         program_data: bool = True,
         generation: int | None = None,
+        required_branches: set[str] | None = None,
     ) -> bool:
         if not self._generation_is_current(generation):
             return False
         wrote_any = False
+        branch_acceptance: dict[str, bool] = {}
         with self._pcm_write_lock:
             if not self._generation_is_current(generation):
                 return False
@@ -515,11 +517,13 @@ class StationRuntime:
                     )
                     self._router.set_branch_health(branch, healthy)
                     wrote_any = wrote_any or accepted
+                    branch_acceptance[branch] = healthy
                     continue
                 stdin = getattr(sink, "stdin", None)
                 is_running = getattr(sink, "is_running", None)
                 if stdin is None or not callable(is_running) or not is_running():
                     self._router.set_branch_health(branch, False)
+                    branch_acceptance[branch] = False
                     continue
                 try:
                     stdin.write(chunk)
@@ -528,8 +532,10 @@ class StationRuntime:
                         flush()
                     self._router.set_branch_health(branch, True)
                     wrote_any = True
+                    branch_acceptance[branch] = True
                 except Exception:
                     self._router.set_branch_health(branch, False)
+                    branch_acceptance[branch] = False
         # Programme generation is authoritative even while every remote mount
         # is reconnecting.  Do not let an origin outage look like a decoder
         # stall and trigger a destructive whole-station restart.
@@ -552,6 +558,11 @@ class StationRuntime:
                     program_recording_service.publish_pcm(station_id, chunk)
                 except Exception:
                     pass
+        if required_branches is not None:
+            return bool(required_branches) and all(
+                branch_acceptance.get(branch, False)
+                for branch in required_branches
+            )
         return wrote_any
 
     def _silence_floor_loop(self) -> None:
@@ -958,6 +969,10 @@ class StationRuntime:
                     mount_probe=None,
                     initial_connect_spread_sec=30.0,
                     drop_on_backpressure=False,
+                    # Stage short source-write stalls in a primary-local FIFO.
+                    # It is bounded; sustained backpressure still propagates
+                    # once this dispatch reserve fills.
+                    decouple_input_backpressure=True,
                 )
         try:
             if preserve_pcm:
@@ -1368,10 +1383,21 @@ class StationRuntime:
                 self._last_program_pcm_monotonic = time.monotonic()
                 if not self._generation_is_current(generation):
                     break
+                output_targets = self._icecast_output_targets()
+                required_branches = {
+                    branch
+                    for branch, _target in output_targets
+                    if branch == "icecast"
+                }
+                if not required_branches:
+                    required_branches = {
+                        branch for branch, _target in output_targets
+                    }
                 chunk_accepted = self._write_pcm_chunk_to_targets(
                     chunk,
-                    self._icecast_output_targets(),
+                    output_targets,
                     generation=generation,
+                    required_branches=required_branches,
                 )
                 pcm_seen = True
                 pcm_accepted = chunk_accepted and pcm_accepted

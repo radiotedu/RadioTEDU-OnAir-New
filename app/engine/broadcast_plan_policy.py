@@ -175,7 +175,7 @@ def resolve_song_ad_plans(conn, station_id: int, now: datetime | None = None) ->
 
 
 def song_ad_progress(conn, plan: dict, station_id: int) -> dict:
-    """Report completed music since plan creation and whether this cycle is due."""
+    """Report completed music and hold cadence at the oldest unfinished ad cycle."""
     plan_id = int(plan["plan_id"])
     sid = int(station_id)
     interval = max(1, int(plan.get("interval") or 10))
@@ -188,8 +188,8 @@ def song_ad_progress(conn, plan: dict, station_id: int) -> dict:
         (sid, str(plan.get("created_at") or "1970-01-01 00:00:00")),
     ).fetchone()
     music_count = int(row["amount"] or 0)
-    cycle = music_count // interval
-    if cycle < 1:
+    completed_song_cycles = music_count // interval
+    if completed_song_cycles < 1:
         return {
             "music_count": music_count,
             "remaining_songs": interval - music_count,
@@ -198,30 +198,43 @@ def song_ad_progress(conn, plan: dict, station_id: int) -> dict:
             "item_status": "",
         }
 
-    dedupe_key = f"broadcast-plan:{plan_id}:song:{sid}:{cycle}"
-    item = conn.execute(
-        "SELECT status FROM ad_break_items WHERE station_id=? AND dedupe_key=? "
-        "ORDER BY id DESC LIMIT 1",
-        (sid, dedupe_key),
-    ).fetchone()
-    status = str(item["status"] or "") if item else ""
-    if status in {"pending", "playing"}:
-        return {
-            "music_count": music_count, "remaining_songs": 0, "cycle": cycle,
-            "due": True, "item_status": status,
-        }
-    if status in {"done", "failed"}:
-        remainder = music_count % interval
-        return {
-            "music_count": music_count,
-            "remaining_songs": interval - remainder if remainder else interval,
-            "cycle": cycle + 1,
-            "due": False,
-            "item_status": status,
-        }
+    key_prefix = f"broadcast-plan:{plan_id}:song:{sid}:"
+    rows = conn.execute(
+        "SELECT id, dedupe_key, status FROM ad_break_items "
+        "WHERE station_id=? AND dedupe_key LIKE ? ORDER BY id DESC",
+        (sid, f"{key_prefix}%"),
+    ).fetchall()
+    latest_by_cycle: dict[int, str] = {}
+    for item in rows:
+        key = str(item["dedupe_key"] or "")
+        try:
+            item_cycle = int(key.rsplit(":", 1)[1])
+        except (IndexError, ValueError):
+            continue
+        latest_by_cycle.setdefault(item_cycle, str(item["status"] or ""))
+
+    # A failed spot is not a delivered spot. Work through overdue cycles in
+    # order so a later cadence never hides an interrupted earlier campaign.
+    # Missing rows are also due: this covers the first materialization and
+    # repairs any cycle previously skipped by older versions of this policy.
+    for cycle in range(1, completed_song_cycles + 1):
+        status = latest_by_cycle.get(cycle, "")
+        if status != "done":
+            return {
+                "music_count": music_count,
+                "remaining_songs": 0,
+                "cycle": cycle,
+                "due": True,
+                "item_status": status,
+            }
+
+    remainder = music_count % interval
     return {
-        "music_count": music_count, "remaining_songs": 0, "cycle": cycle,
-        "due": True, "item_status": status,
+        "music_count": music_count,
+        "remaining_songs": interval - remainder if remainder else interval,
+        "cycle": completed_song_cycles + 1,
+        "due": False,
+        "item_status": "done",
     }
 
 
@@ -231,7 +244,7 @@ def materialize_song_cadence_ads(conn, station_id: int) -> int:
     plans = resolve_song_ad_plans(conn, sid)
     if not plans:
         return 0
-    due_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    now = datetime.now(timezone.utc)
     inserted = 0
     for plan in plans:
         progress = song_ad_progress(conn, plan, sid)
@@ -246,6 +259,21 @@ def materialize_song_cadence_ads(conn, station_id: int) -> int:
         ).fetchone()
         if existing:
             continue
+        key_prefix = f"broadcast-plan:{int(plan['plan_id'])}:song:{sid}:{cycle}"
+        failed_attempts = conn.execute(
+            "SELECT COUNT(*) AS amount FROM ad_break_items "
+            "WHERE station_id=? AND dedupe_key=? AND status='failed'",
+            (sid, key_prefix),
+        ).fetchone()
+        retry_number = int(failed_attempts["amount"] or 0)
+        retry_delay_seconds = (
+            min(300, 5 * (2 ** min(retry_number - 1, 6)))
+            if retry_number
+            else 0
+        )
+        due_at = (now + timedelta(seconds=retry_delay_seconds)).replace(
+            microsecond=0
+        ).isoformat()
         conn.execute(
             "INSERT INTO ad_break_items "
             "(station_id, track_id, due_at, status, priority, dedupe_key) "

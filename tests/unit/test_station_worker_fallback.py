@@ -1,5 +1,6 @@
 import json
 import hashlib
+import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -771,7 +772,7 @@ def test_worker_prefers_matching_prefetched_provider(tmp_path, monkeypatch):
     assert announcement.audio_path == str(omni_audio)
 
 
-def test_worker_autofill_backfills_zero_duration_track_before_queueing(
+def test_worker_autofill_probes_zero_duration_track_off_the_playout_thread(
     tmp_path, monkeypatch
 ):
     monkeypatch.setenv("CLEANROOM_DB_PATH", str(tmp_path / "cleanroom.db"))
@@ -801,10 +802,27 @@ def test_worker_autofill_backfills_zero_duration_track_before_queueing(
     worker = StationWorker(station_id=1)
     selected = worker._select_random_music_track(set())
 
-    assert selected == {"track_id": track_id, "duration": 321.5}
-    row = conn.cursor().execute("SELECT duration FROM tracks WHERE id=?", (track_id,)).fetchone()
+    assert selected == {"track_id": track_id, "duration": 180.0}
+    deadline = time.monotonic() + 2.0
+    row = None
+    while time.monotonic() < deadline:
+        row = conn.cursor().execute(
+            "SELECT duration FROM tracks WHERE id=?", (track_id,)
+        ).fetchone()
+        if row is not None and float(row["duration"] or 0.0) == 321.5:
+            break
+        time.sleep(0.01)
     assert row is not None
     assert float(row["duration"] or 0.0) == 321.5
+    deadline = time.monotonic() + 2.0
+    cached_duration = 0.0
+    while time.monotonic() < deadline and cached_duration <= 0.0:
+        cached_duration = worker._cached_track_duration(track_id, str(audio_file))
+        if cached_duration <= 0.0:
+            time.sleep(0.01)
+    assert cached_duration == 321.5
+    worker.conn.close()
+    conn.close()
 
 
 def test_worker_shuffle_seed_is_reproducible_within_least_played_tier(

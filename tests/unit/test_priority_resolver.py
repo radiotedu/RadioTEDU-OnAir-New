@@ -1,11 +1,18 @@
 from app.engine.priority import choose_source
 
 
-def test_manual_queue_has_highest_priority():
+def test_manual_queue_precedes_schedule_and_fallback():
     src = choose_source(
         manual_count=1, ad_due=False, schedule_ready=True, fallback_ready=True
     )
     assert src == "manual"
+
+
+def test_due_ad_is_selected_before_auto_filled_pending_music():
+    src = choose_source(
+        manual_count=1, ad_due=True, schedule_ready=False, fallback_ready=True
+    )
+    assert src == "ads"
 
 
 def test_fallback_used_when_nothing_else_available():
