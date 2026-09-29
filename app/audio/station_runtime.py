@@ -22,7 +22,7 @@ from app.audio.ffmpeg_pipeline import (
     release_fast_cached_uri,
 )
 from app.audio.gst_pipeline import StationPipelineConfig, build_gst_pipeline
-from app.audio.icecast_audio_sink import IcecastAudioSink, probe_icecast_mount
+from app.audio.icecast_audio_sink import IcecastAudioSink
 from app.audio.shoutcast_audio_sink import ShoutcastAudioSink
 from app.audio.live_audio_mixer import LiveAudioMixer
 from app.audio.local_audio_sink import LocalAudioSink
@@ -284,6 +284,9 @@ class StationRuntime:
         self._active_cfg = None
         self._active_started_monotonic = None
         self._playout_generation = 0
+        self._producer_exit_generation = None
+        self._producer_exit_code = None
+        self._producer_exit_pcm_accepted = False
         self._transition_until_monotonic = None
         self._last_transition_mode = "none"
         self.station_id = int(station_id) if station_id is not None else None
@@ -494,13 +497,13 @@ class StationRuntime:
         *,
         program_data: bool = True,
         generation: int | None = None,
-    ) -> None:
+    ) -> bool:
         if not self._generation_is_current(generation):
-            return
+            return False
         wrote_any = False
         with self._pcm_write_lock:
             if not self._generation_is_current(generation):
-                return
+                return False
             for branch, sink in targets:
                 queued_writer = getattr(sink, "write_pcm", None)
                 if callable(queued_writer):
@@ -553,6 +556,7 @@ class StationRuntime:
                     program_recording_service.publish_pcm(station_id, chunk)
                 except Exception:
                     pass
+        return wrote_any
 
     def _silence_floor_loop(self) -> None:
         silence = b"\x00" * _SILENCE_FLOOR_CHUNK_BYTES
@@ -799,6 +803,9 @@ class StationRuntime:
         started_monotonic: float | None = None,
     ) -> None:
         self._next_playout_generation()
+        self._producer_exit_generation = None
+        self._producer_exit_code = None
+        self._producer_exit_pcm_accepted = False
         self._active_signature = target_signature
         self._active_cfg = cfg
         self._active_started_monotonic = (
@@ -807,6 +814,27 @@ class StationRuntime:
         # Each new producer gets a bounded grace window in which to emit its
         # first decoded PCM, independent of any previous track or recovery.
         self._last_program_pcm_monotonic = time.monotonic()
+
+    def _record_producer_exit(
+        self, producer, generation: int, *, pcm_accepted: bool
+    ) -> None:
+        """Record a current producer's exit so EOF is not mistaken for a stall.
+
+        File decoders seed the Icecast PCM queue ahead of its real-time writer.
+        A clean FFmpeg EOF therefore means the complete track is already queued,
+        even though the worker's wall clock has not reached the track duration.
+        """
+        if not self._generation_is_current(generation):
+            return
+        return_code = getattr(producer, "returncode", None)
+        if return_code is None:
+            poll = getattr(producer, "poll", None)
+            return_code = poll() if callable(poll) else None
+        if return_code is None:
+            return
+        self._producer_exit_generation = int(generation)
+        self._producer_exit_code = int(return_code)
+        self._producer_exit_pcm_accepted = bool(pcm_accepted)
 
     def _clear_transition_window(self) -> None:
         self._transition_until_monotonic = None
@@ -902,7 +930,9 @@ class StationRuntime:
             self._router.set_branch_health("local", False)
             return False
 
-    def _ensure_icecast_sink(self, cfg: StationPipelineConfig) -> bool:
+    def _ensure_icecast_sink(
+        self, cfg: StationPipelineConfig, *, preserve_pcm: bool = False
+    ) -> bool:
         if not cfg.icecast_enabled or not self.ffmpeg_bin:
             return False
         protocol = str(getattr(cfg, "source_protocol", "icecast") or "icecast").strip().lower()
@@ -926,15 +956,18 @@ class StationRuntime:
                 self._icecast_sink = IcecastAudioSink(
                     self.ffmpeg_bin,
                     self._spawn_process,
-                    # Probe listener availability for truthful delivery health;
-                    # repeated failures only reconnect this source branch after
-                    # a long threshold and never stop station playout.
-                    mount_probe=probe_icecast_mount,
+                    # Source-write telemetry is cheaper and more useful than
+                    # repeatedly polling listener HTTP headers, which do not
+                    # prove that decoded programme audio is reaching listeners.
+                    mount_probe=None,
                     initial_connect_spread_sec=30.0,
                     drop_on_backpressure=False,
                 )
         try:
-            self._icecast_sink.ensure_started(cfg)
+            if preserve_pcm:
+                self._icecast_sink.ensure_started(cfg, preserve_pcm=True)
+            else:
+                self._icecast_sink.ensure_started(cfg)
             self._router.set_branch_health("icecast", True)
             return True
         except (FileNotFoundError, RuntimeError) as exc:
@@ -990,7 +1023,7 @@ class StationRuntime:
                         sink = IcecastAudioSink(
                             self.ffmpeg_bin,
                             self._spawn_process,
-                            mount_probe=probe_icecast_mount,
+                            mount_probe=None,
                             reconnect_failure_threshold=4,
                             initial_connect_spread_sec=30.0,
                             drop_on_backpressure=False,
@@ -1291,6 +1324,8 @@ class StationRuntime:
         next_delivery = time.monotonic()
         bytes_written = 0
         last_log = time.monotonic()
+        pcm_accepted = True
+        pcm_seen = False
         try:
             while (
                 not self._icecast_pipe_stop.is_set()
@@ -1330,6 +1365,11 @@ class StationRuntime:
                 chunk = stdout.read(_LIVE_MIX_CHUNK_BYTES)
                 if not chunk:
                     if producer.poll() is not None:
+                        self._record_producer_exit(
+                            producer,
+                            generation,
+                            pcm_accepted=pcm_seen and pcm_accepted,
+                        )
                         break
                     time.sleep(0.01)
                     continue
@@ -1359,11 +1399,13 @@ class StationRuntime:
                 self._last_program_pcm_monotonic = time.monotonic()
                 if not self._generation_is_current(generation):
                     break
-                self._write_pcm_chunk_to_targets(
+                chunk_accepted = self._write_pcm_chunk_to_targets(
                     chunk,
                     self._icecast_output_targets(),
                     generation=generation,
                 )
+                pcm_seen = True
+                pcm_accepted = chunk_accepted and pcm_accepted
                 bytes_written += len(chunk)
                 delivered_at = time.monotonic()
                 frame_seconds = len(chunk) / _PCM_BYTES_PER_SECOND
@@ -2000,7 +2042,26 @@ class StationRuntime:
                 try:
                     self._start_crossfade(transition_cfg)
                     return
-                except Exception:
+                except Exception as exc:
+                    # _start_crossfade validates and prewarms its replacement
+                    # before retiring the current producer. If that phase
+                    # fails, keep the current track on air and let the worker
+                    # retry the pending successor when this finite source ends.
+                    # Restarting immediately here discarded the still-healthy
+                    # producer and exposed encoder startup latency as dead air.
+                    current_process = self._process
+                    if (
+                        current_process is not None
+                        and current_process.poll() is None
+                    ):
+                        self._last_transition_mode = "deferred"
+                        _log.warning(
+                            "crossfade deferred until current source finishes; error_type=%s",
+                            type(exc).__name__,
+                        )
+                        raise RuntimeError(
+                            "crossfade deferred until the current source finishes"
+                        ) from exc
                     self._restart_with(
                         cfg,
                         start_offset_seconds=start_offset_seconds,
@@ -2055,11 +2116,11 @@ class StationRuntime:
             self._icecast_sink = None
             self._router.set_branch_health("icecast", False)
             if sink is not None:
-                sink.stop()
+                sink.stop(preserve_pcm=True)
             time.sleep(_ORIGIN_SOURCE_RELEASE_SECONDS)
             if sink is not None:
                 self._icecast_sink = sink
-            self._ensure_icecast_sink(cfg)
+            self._ensure_icecast_sink(cfg, preserve_pcm=True)
 
         desired = self._extra_output_configs(cfg)
         for branch, output_cfg in desired.items():
@@ -2067,12 +2128,12 @@ class StationRuntime:
                 sink = self._extra_icecast_sinks.pop(branch, None)
             self._router.set_branch_health(branch, False)
             if sink is not None:
-                sink.stop()
+                sink.stop(preserve_pcm=True)
             time.sleep(_ORIGIN_SOURCE_RELEASE_SECONDS)
             if sink is None:
                 continue
             try:
-                sink.ensure_started(output_cfg)
+                sink.ensure_started(output_cfg, preserve_pcm=True)
                 healthy = bool(sink.is_running())
             except Exception as exc:
                 healthy = False
@@ -2101,11 +2162,11 @@ class StationRuntime:
         self._icecast_sink = None
         self._router.set_branch_health("icecast", False)
         if sink is not None:
-            sink.stop()
+            sink.stop(preserve_pcm=True)
         time.sleep(_ORIGIN_STALE_SOURCE_RELEASE_SECONDS)
         if sink is not None:
             self._icecast_sink = sink
-        self._ensure_icecast_sink(cfg)
+        self._ensure_icecast_sink(cfg, preserve_pcm=True)
         return self.status()
 
     def stop(self) -> None:
@@ -2301,6 +2362,9 @@ class StationRuntime:
                     branch_health.get(branch)
                     and dict(item.get("health") or {}).get("mount_healthy") is True
                 )
+        producer_exit_current = (
+            self._producer_exit_generation == self._playout_generation
+        )
         return {
             "running": output_feed_active,
             "program_running": program_running,
@@ -2323,6 +2387,14 @@ class StationRuntime:
             ),
             "local_sink_running": self._local_sink_running(),
             "backend": str(self._backend or "none"),
+            "producer_eof": bool(
+                producer_exit_current
+                and self._producer_exit_code == 0
+                and self._producer_exit_pcm_accepted
+            ),
+            "producer_exit_code": (
+                self._producer_exit_code if producer_exit_current else None
+            ),
             "transition_mode": str(self._last_transition_mode or "none"),
             "transition_active": self._is_transition_active(),
             "branch_health": branch_health,

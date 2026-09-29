@@ -102,10 +102,19 @@ def station_has_planned_ad(conn, station_id: int) -> bool:
     cur = conn.cursor()
     cur.execute(
         "SELECT 1 FROM ad_break_items a "
-        "JOIN broadcast_plan_occurrences o ON o.target_kind='ad' AND o.target_item_id=a.id "
-        "JOIN broadcast_plans p ON p.id=o.plan_id "
         "WHERE a.station_id=? AND a.status IN ('pending','playing') "
-        "AND p.plan_type='ad' AND p.enabled=1 LIMIT 1",
+        "AND (EXISTS ("
+        "  SELECT 1 FROM broadcast_plan_occurrences o "
+        "  JOIN broadcast_plans p ON p.id=o.plan_id "
+        "  WHERE o.target_kind='ad' AND o.target_item_id=a.id "
+        "  AND p.plan_type='ad' AND p.enabled=1"
+        ") OR EXISTS ("
+        "  SELECT 1 FROM broadcast_plans p "
+        "  JOIN broadcast_plan_targets t ON t.plan_id=p.id "
+        "  WHERE p.plan_type='ad' AND p.cadence_mode='songs' AND p.enabled=1 "
+        "  AND t.enabled=1 AND t.station_id=a.station_id AND t.track_id=a.track_id "
+        "  AND a.dedupe_key LIKE 'broadcast-plan:' || p.id || ':song:' || a.station_id || ':%'"
+        ")) LIMIT 1",
         (sid,),
     )
     result = cur.fetchone() is not None

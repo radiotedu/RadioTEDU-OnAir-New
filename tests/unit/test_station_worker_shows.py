@@ -144,6 +144,39 @@ def test_process_once_going_live_holds_when_playing(tmp_path, monkeypatch):
     assert result.get("reason") == "waiting_for_track"
 
 
+def test_process_once_going_live_advances_clean_eof_track(tmp_path, monkeypatch):
+    """A finished queue row must not keep a going-live session in dead air."""
+    station_id = _setup(tmp_path, monkeypatch)
+    runtime = _FakeRuntimeRegistry()
+    worker = _make_worker(station_id, runtime)
+
+    conn = get_connection()
+    _create_show_with_session(conn, station_id, status="going_live")
+    queue = QueueRepository(conn)
+    item_id = queue.enqueue(station_id, 1, "finished-track")
+    queue.mark_playing(item_id)
+    conn.commit()
+    conn.close()
+
+    runtime.running[station_id] = False
+    runtime.status = lambda _station_id: {
+        "running": False,
+        "program_running": False,
+        "producer_eof": True,
+        "active_input_uri": "test.mp3",
+    }
+
+    result = worker.process_once()
+
+    conn = get_connection()
+    session = ShowSessionRepository(conn).get_active_for_station(station_id)
+    playing = QueueRepository(conn).current_playing(station_id)
+    conn.close()
+    assert session["status"] == "live"
+    assert playing is None
+    assert result.get("reason") != "waiting_for_track"
+
+
 def test_process_once_going_live_plays_intro_when_idle(tmp_path, monkeypatch):
     """When going_live and no track playing, should start intro."""
     station_id = _setup(tmp_path, monkeypatch)

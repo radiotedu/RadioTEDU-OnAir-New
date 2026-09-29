@@ -596,9 +596,11 @@ def run_station_worker_process() -> int:
                 backoff_seconds = _failure_backoff_seconds(
                     failure_count, interval_sec
                 )
-                logger.warning(
-                    "worker tick failed code=%s failure_count=%d",
+                logger.exception(
+                    "worker tick failed station_id=%s code=%s message=%s failure_count=%d",
+                    station_id,
                     error_code,
+                    str(exc)[:500],
                     failure_count,
                 )
             finally:

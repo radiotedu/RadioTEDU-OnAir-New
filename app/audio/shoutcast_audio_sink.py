@@ -316,7 +316,16 @@ class ShoutcastAudioSink:
         self._writer_thread.start()
         self._network_thread.start()
 
-    def ensure_started(self, cfg: StationPipelineConfig):
+    def ensure_started(
+        self,
+        cfg: StationPipelineConfig,
+        *,
+        preserve_pcm: bool = False,
+    ):
+        # Shoutcast writes directly to its encoder pipe and has no PCM FIFO to
+        # preserve. Keep the shared sink API compatible so station recovery can
+        # request preservation without failing on protocol-specific outputs.
+        del preserve_pcm
         signature = self._cfg_signature(cfg)
         if self.is_running() and self._signature == signature:
             return self._process
@@ -378,8 +387,14 @@ class ShoutcastAudioSink:
             self.stop()
             raise
 
-    def stop(self, *, preserve_probe_state: bool = False) -> None:
+    def stop(
+        self,
+        *,
+        preserve_probe_state: bool = False,
+        preserve_pcm: bool = False,
+    ) -> None:
         del preserve_probe_state
+        del preserve_pcm
         self._stop_event.set()
         source_socket = self._socket
         self._socket = None

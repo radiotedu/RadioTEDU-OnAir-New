@@ -1,6 +1,7 @@
 import logging
 import hashlib
 import json
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -13,6 +14,7 @@ from app.engine.lease import LeaseService
 from app.engine.ad_policy import ads_enabled_from_settings, station_ads_enabled
 from app.engine.broadcast_plan_policy import (
     materialize_song_cadence_ads,
+    resolve_song_ad_plans,
     resolve_sweeper_plan,
     station_has_planned_ad,
 )
@@ -32,6 +34,36 @@ from app.services.dayparting import active_daypart
 from app.services.track_naming import clean_album_metadata
 
 _log = logging.getLogger("cleanroom.worker")
+
+# Workers are recreated on every scheduler tick, so keep boundary-triggered
+# work in process memory. The station child process is the lifetime boundary:
+# a restart performs one startup reconciliation, then work runs only when a
+# queue item changes instead of rescanning playback history every second.
+_SCHEDULER_TRIGGER_LOCK = threading.Lock()
+_SONG_AD_BOOTSTRAP_STATIONS: set[int] = set()
+_SWEEPER_LAST_QUEUE_ITEM: dict[int, int] = {}
+
+
+def _sweeper_boundary_changed(station_id: int, queue_item_id: int) -> bool:
+    sid = int(station_id)
+    item_id = max(0, int(queue_item_id or 0))
+    with _SCHEDULER_TRIGGER_LOCK:
+        previous = _SWEEPER_LAST_QUEUE_ITEM.get(sid)
+        if previous == item_id:
+            return False
+        _SWEEPER_LAST_QUEUE_ITEM[sid] = item_id
+        return True
+
+
+def _song_ad_refresh_due(station_id: int, queue_advanced: bool) -> bool:
+    sid = int(station_id)
+    with _SCHEDULER_TRIGGER_LOCK:
+        return bool(queue_advanced or sid not in _SONG_AD_BOOTSTRAP_STATIONS)
+
+
+def _mark_song_ad_bootstrapped(station_id: int) -> None:
+    with _SCHEDULER_TRIGGER_LOCK:
+        _SONG_AD_BOOTSTRAP_STATIONS.add(int(station_id))
 
 # Module-level debounce state for show notifications (keyed by 3-tuple).
 # Prevents broadcast storms when worker fires every second.
@@ -54,6 +86,8 @@ _TRANSIENT_OUTPUT_FAILURE_MARKERS = (
     "error submitting a packet to the muxer",
     "error muxing a packet",
     "transition input unavailable",
+    "crossfade deferred",
+    "crossfade decoder failed",
     "no such file",
     "file not found",
     "cannot open",
@@ -690,7 +724,11 @@ class StationWorker:
             raise
 
     def _play_host_track(self, host_item_id: int, track_id: int) -> dict:
-        self._finish_playing_queue_item()  # preempt current automation track
+        # Host audio may take ownership only at a track boundary. Keep this
+        # guard here as well as in process_once so direct callers cannot
+        # accidentally mark a song done and cut it short.
+        if self.queue_repo.current_playing(self.station_id):
+            return {"source": "playing", "reason": "waiting_for_track_boundary"}
         self._set_playout_state("host", host_item_id, reason="host_start")
         track_uri, stream_title, stream_artist, stream_album, track_type = self._track_runtime_fields(
             track_id
@@ -719,12 +757,56 @@ class StationWorker:
             return False
         if self.runtime_registry:
             rt_status = self.runtime_registry.status(self.station_id)
-            if self._runtime_playback_alive(rt_status):
+            if not (
+                isinstance(rt_status, dict)
+                and rt_status.get("producer_eof")
+                and not rt_status.get("program_running")
+            ) and self._runtime_playback_alive(rt_status):
                 return False  # still playing
         # Track finished — pop from host queue and reset state
         self.program_queue_repo.pop_item(int(current["item_id"]))
         self._set_playout_state("none", None, reason="host_track_complete")
         self._broadcast_worker_state(include_queue=True)
+        return True
+
+    def _start_continuity_fallback(
+        self, *, reason: str, failed_source: str
+    ) -> bool:
+        """Start configured continuity audio after an ad cannot safely play."""
+        if not self.runtime_registry or not self.fallback_uri:
+            _log.error(
+                "No continuity fallback is configured station_id=%s reason=%s source=%s",
+                self.station_id,
+                reason,
+                failed_source,
+            )
+            return False
+        fallback_title = (
+            f"{self._station_name()} Continuity"
+            if is_silence_input_uri(self.fallback_uri)
+            else (
+                self._fallback_title_from_uri(self.fallback_uri)
+                or f"{self._station_name()} Continuity"
+            )
+        )
+        try:
+            self.runtime_registry.start_station(
+                self.station_id,
+                self.fallback_uri,
+                stream_title=fallback_title,
+                stream_artist="",
+                track_type="announcement",
+                crossfade_seconds=0.0,
+            )
+        except Exception:
+            _log.exception(
+                "Continuity fallback start failed station_id=%s reason=%s source=%s",
+                self.station_id,
+                reason,
+                failed_source,
+            )
+            return False
+        self._set_playout_state("fallback", None, reason=f"{failed_source}_{reason}")
         return True
 
     def _complete_queue_item(self, playing) -> None:
@@ -838,6 +920,15 @@ class StationWorker:
             return True
         return self._same_runtime_uri(active_uri, expected_uri)
 
+    def _runtime_source_finished_naturally(
+        self, rt_status: dict | None, expected_uri: str
+    ) -> bool:
+        """Check whether a clean EOF already queued this source's complete audio."""
+        if not isinstance(rt_status, dict) or not bool(rt_status.get("producer_eof")):
+            return False
+        active_uri = str(rt_status.get("active_input_uri") or "").strip()
+        return bool(active_uri and self._same_runtime_uri(active_uri, expected_uri))
+
     @staticmethod
     def _runtime_program_running(rt_status: dict | None) -> bool:
         if not isinstance(rt_status, dict):
@@ -937,12 +1028,20 @@ class StationWorker:
         track_id = int(self._row_value(playing, "track_id", 0) or 0)
         track_uri, title, artist, album, track_type = self._track_runtime_fields(track_id)
         status = self.runtime_registry.status(self.station_id)
+        if self._runtime_source_finished_naturally(status, track_uri):
+            # FFmpeg decoded the complete spot into the sink queue. Restarting
+            # it while that reserve drains would replay its trailing audio.
+            return False
         if track_uri and self._runtime_playback_matches(status, track_uri):
             return False
         allowed, suppression_reason = self._restart_attempt_allowed(
             "ads", item_id
         )
         if not allowed:
+            if suppression_reason == "restart_cooldown_active":
+                # A transient runtime status lag is not proof that the ad failed.
+                # Keep it active and let the next worker tick verify/recover it.
+                return False
             self.ad_repo.mark_failed(item_id)
             self._set_playout_state(
                 "none", None, reason=f"ad_{suppression_reason}"
@@ -1013,21 +1112,157 @@ class StationWorker:
             datetime.now(timezone.utc).replace(tzinfo=None) - started_at
         ).total_seconds()
         duration = float(self._row_value(playing, "duration", 0.0) or 0.0)
+
+        # The database duration is an estimate, not proof that the spot reached
+        # the programme output. FFmpeg can start late or report a shorter
+        # container duration than the decoded audio. Only a clean EOF for this
+        # exact file proves that the complete spot has been queued to the
+        # persistent output sink; its FIFO then drains the remaining tail before
+        # any later source becomes audible.
+        track_id = int(self._row_value(playing, "track_id", 0) or 0)
+        track_uri, _title, _artist, _album, _track_type = self._track_runtime_fields(
+            track_id
+        )
+        runtime_status = None
+        if self.runtime_registry and track_uri:
+            try:
+                runtime_status = self.runtime_registry.status(self.station_id)
+            except Exception:
+                _log.debug(
+                    "Could not inspect active ad runtime for station_id=%s",
+                    self.station_id,
+                    exc_info=True,
+                )
+                return False
+            if self._runtime_source_finished_naturally(runtime_status, track_uri):
+                item_id = int(self._row_value(playing, "id", 0) or 0)
+                self.ad_repo.mark_done(item_id)
+                if track_id > 0 and getattr(self, "conn", None) is not None:
+                    TrackRepository(self.conn).mark_played(track_id)
+                self._set_playout_state("none", None, reason="ad_complete")
+                self._broadcast_worker_state(include_track=True)
+                return True
+
         if duration > 0 and elapsed < duration:
             if elapsed >= 2.0:
                 self._restart_playing_ad_item_if_runtime_mismatched(playing)
             return False
         if duration <= 0 and elapsed < 90.0 and self.runtime_registry:
-            status = self.runtime_registry.status(self.station_id)
-            if self._runtime_playback_alive(status):
+            if self._runtime_playback_alive(runtime_status):
                 return False
+
+        if self.runtime_registry:
+            # Reaching the expected duration while the source is still active
+            # must never cut it. If it switched away before a clean EOF, restore
+            # the current spot and keep it owned by the ad queue.
+            if track_uri and self._runtime_playback_matches(
+                runtime_status, track_uri
+            ):
+                return False
+            self._restart_playing_ad_item_if_runtime_mismatched(playing)
+            return False
+
         item_id = int(self._row_value(playing, "id", 0) or 0)
-        track_id = int(self._row_value(playing, "track_id", 0) or 0)
         self.ad_repo.mark_done(item_id)
         if track_id > 0 and getattr(self, "conn", None) is not None:
             TrackRepository(self.conn).mark_played(track_id)
         self._set_playout_state("none", None, reason="ad_complete")
         self._broadcast_worker_state(include_track=True)
+        return True
+
+    def _advance_playing_schedule_item(self) -> bool:
+        """Keep a scheduled programme item on air until its source reaches EOF."""
+        current_playing = getattr(self.schedule_repo, "current_playing", None)
+        item = current_playing(self.station_id) if callable(current_playing) else None
+        if not item:
+            return False
+        if not self.runtime_registry:
+            return True
+
+        item_id = int(self._row_value(item, "id", 0) or 0)
+        track_id = int(self._row_value(item, "track_id", 0) or 0)
+        track_uri, title, artist, album, track_type = self._track_runtime_fields(
+            track_id
+        )
+        if not track_uri:
+            self.schedule_repo.mark_failed(item_id)
+            self._set_playout_state("none", None, reason="schedule_track_missing")
+            self._broadcast_worker_state(include_queue=True, include_track=True)
+            return False
+
+        try:
+            status = self.runtime_registry.status(self.station_id)
+        except Exception:
+            _log.debug(
+                "Could not inspect scheduled runtime for station_id=%s item_id=%s",
+                self.station_id,
+                item_id,
+                exc_info=True,
+            )
+            return True
+
+        if self._runtime_source_finished_naturally(status, track_uri):
+            # The complete decoded programme is already behind the current
+            # frames in each sink's FIFO. Mark it done and let the next source
+            # append after that tail instead of timing it from database start.
+            self.schedule_repo.mark_done(item_id)
+            self._set_playout_state("none", None, reason="schedule_complete")
+            self._broadcast_worker_state(include_queue=True, include_track=True)
+            return False
+
+        if self._runtime_playback_matches(status, track_uri):
+            return True
+
+        # start_station marks the schedule active before FFmpeg has opened a
+        # cold file. Give that producer time to report its URI before repairing
+        # it, or a slow storage read would cause repeated source restarts.
+        started_raw = self._row_value(item, "playout_started_at", "")
+        if started_raw:
+            try:
+                started_at = datetime.strptime(
+                    str(started_raw), "%Y-%m-%d %H:%M:%S"
+                )
+            except (TypeError, ValueError):
+                try:
+                    started_at = datetime.fromisoformat(str(started_raw))
+                except (TypeError, ValueError):
+                    started_at = None
+            if started_at is not None:
+                elapsed = (
+                    datetime.now(timezone.utc).replace(tzinfo=None) - started_at
+                ).total_seconds()
+                if elapsed < 5.0:
+                    return True
+
+        allowed, reason = self._restart_attempt_allowed("schedule", item_id)
+        if not allowed:
+            if reason == "restart_cooldown_active":
+                return True
+            self.schedule_repo.mark_failed(item_id)
+            self._set_playout_state("none", None, reason="schedule_restart_limit")
+            self._broadcast_worker_state(include_queue=True, include_track=True)
+            return False
+
+        try:
+            self._start_runtime_station(
+                self.station_id,
+                track_uri,
+                stream_title=title,
+                stream_artist=artist,
+                stream_album=album,
+                track_type=track_type,
+                crossfade_seconds=0.0,
+            )
+            self._set_playout_state(
+                "schedule", item_id, reason="schedule_runtime_recovered"
+            )
+            self._broadcast_worker_state(include_queue=True, include_track=True)
+        except Exception:
+            _log.exception(
+                "Could not recover scheduled item station_id=%s item_id=%s",
+                self.station_id,
+                item_id,
+            )
         return True
 
     @staticmethod
@@ -1097,6 +1332,12 @@ class StationWorker:
             return True, ""
         if int(state.get("attempts") or 0) >= _MAX_RESTART_ATTEMPTS_PER_ITEM:
             state["reason"] = "restart_limit_reached"
+            if str(source or "") == "ads":
+                # Keep an ad queued across repeated transient mismatches. Start a
+                # fresh recovery cycle after a longer backoff instead of dropping it.
+                state["attempts"] = 0
+                state["next_allowed"] = now + max(_RESTART_COOLDOWN_SEC * 2, 5.0)
+                return False, "restart_cooldown_active"
             return False, "restart_limit_reached"
         if now < float(state.get("next_allowed") or 0.0):
             state["reason"] = "restart_cooldown_active"
@@ -1231,12 +1472,21 @@ class StationWorker:
         # (advance_at) the runtime correctly moves on, so a URI "mismatch" is
         # expected and the item must be allowed to complete rather than being
         # restarted/failed.
-        if self.runtime_registry and elapsed < advance_at:
+        if self.runtime_registry:
             rt_status = self.runtime_registry.status(self.station_id)
             track_uri, _title, _artist, _album, _track_type = self._track_runtime_fields(
                 int(playing["track_id"] or 0)
             )
+            if self._runtime_source_finished_naturally(rt_status, track_uri):
+                # The complete decoded file is already in the persistent sink
+                # FIFO. Mark the source complete so the next item can be queued
+                # behind its tail instead of publishing silence until stale
+                # duration metadata expires.
+                self._complete_queue_item(playing)
+                return True
             if (
+                elapsed < advance_at
+                and
                 track_uri
                 and self._runtime_playback_alive(rt_status)
                 and not self._runtime_playback_matches(rt_status, track_uri)
@@ -1251,10 +1501,7 @@ class StationWorker:
                     return True
                 return self._restart_playing_queue_item_if_runtime_mismatched(
                     playing,
-                    start_offset_seconds=min(
-                        max(0.0, elapsed),
-                        max(0.0, duration - 0.25),
-                    ),
+                    start_offset_seconds=0.0,
                 )
 
         # ── Safety: absolute max timeout per track ────────────
@@ -1271,7 +1518,51 @@ class StationWorker:
             )
         else:
             _max = 1800.0
+        if duration <= 0:
+            # Unknown duration must not turn a decoder crash into a skipped
+            # track. A clean EOF completes only after its decoded tail drains;
+            # an unexpected exit retries from the beginning because wall time
+            # is not evidence of how much audio reached listeners.
+            if self.runtime_registry:
+                rt_status = self.runtime_registry.status(self.station_id)
+                track_uri, _, _, _, _ = self._track_runtime_fields(
+                    int(playing["track_id"] or 0)
+                )
+                if self._runtime_source_finished_naturally(rt_status, track_uri):
+                    self._complete_queue_item(playing)
+                    return True
+                if not self._runtime_playback_alive(rt_status):
+                    return self._restart_playing_queue_item_if_runtime_mismatched(
+                        playing, start_offset_seconds=0.0
+                    )
+            return False
+
         if elapsed >= _max:
+            if self.runtime_registry:
+                rt_status = self.runtime_registry.status(self.station_id)
+                current_uri, _, _, _, _ = self._track_runtime_fields(
+                    int(playing["track_id"] or 0)
+                )
+                if self._runtime_source_finished_naturally(rt_status, current_uri):
+                    self._complete_queue_item(playing)
+                    return True
+                if self._runtime_playback_alive(rt_status) and self._runtime_playback_matches(
+                    rt_status, current_uri
+                ):
+                    # A live decoder wins over a metadata-based safety timer.
+                    # Never truncate healthy media because stored duration is
+                    # wrong.
+                    _log.warning(
+                        "Track exceeded metadata safety time but is still producing audio; "
+                        "keeping it on air station_id=%s queue_item_id=%s",
+                        self.station_id,
+                        int(playing["id"]),
+                    )
+                    return False
+                if not self._runtime_playback_alive(rt_status):
+                    return self._restart_playing_queue_item_if_runtime_mismatched(
+                        playing, start_offset_seconds=0.0
+                    )
             _log.warning(
                 "Track exceeded max allowed time (%.1f/%.1fs), "
                 "force-advancing queue item %d",
@@ -1279,16 +1570,6 @@ class StationWorker:
             )
             self._complete_queue_item(playing)
             return True
-
-        if duration <= 0:
-            # Unknown duration — check if the runtime process has already
-            # exited.  If so, mark done to avoid getting stuck forever.
-            if self.runtime_registry:
-                rt_status = self.runtime_registry.status(self.station_id)
-                if not self._runtime_playback_alive(rt_status):
-                    self._complete_queue_item(playing)
-                    return True
-            return False
 
         if elapsed >= advance_at:
             music_crossfade_due = (
@@ -1298,15 +1579,18 @@ class StationWorker:
             )
             if self.runtime_registry and not music_crossfade_due:
                 rt_status = self.runtime_registry.status(self.station_id)
+                current_track_uri, _, _, _, _ = self._track_runtime_fields(
+                    int(playing["track_id"] or 0)
+                )
+                if self._runtime_source_finished_naturally(rt_status, current_track_uri):
+                    self._complete_queue_item(playing)
+                    return True
                 if self._runtime_playback_alive(rt_status):
                     # Only wait if the runtime is still rendering THIS track.
                     # A jingle that has finished is immediately followed by the
                     # next item, so the runtime stays alive; if it is playing a
                     # different source the current item has run its course and
                     # must be completed rather than hanging in "playing" forever.
-                    current_track_uri, _, _, _, _ = self._track_runtime_fields(
-                        int(playing["track_id"] or 0)
-                    )
                     if current_track_uri and self._runtime_playback_matches(
                         rt_status, current_track_uri
                     ):
@@ -1319,6 +1603,14 @@ class StationWorker:
         if self.runtime_registry:
             rt_status = self.runtime_registry.status(self.station_id)
             if not self._runtime_playback_alive(rt_status):
+                current_track_uri, _, _, _, _ = self._track_runtime_fields(
+                    int(playing["track_id"] or 0)
+                )
+                if self._runtime_source_finished_naturally(
+                    rt_status, current_track_uri
+                ):
+                    self._complete_queue_item(playing)
+                    return True
                 if current_type == "jingle" and duration <= 3.0:
                     _log.info(
                         "Completing short jingle queue item %s after runtime ended",
@@ -1332,10 +1624,7 @@ class StationWorker:
                 )
                 self._restart_playing_queue_item_if_runtime_mismatched(
                     playing,
-                    start_offset_seconds=min(
-                        max(0.0, elapsed),
-                        max(0.0, duration - 0.25),
-                    ),
+                    start_offset_seconds=0.0,
                 )
                 return False
 
@@ -1577,6 +1866,12 @@ class StationWorker:
 
     def _pick_random_ad(self) -> dict | None:
         """Pick the next active global ad deterministically for this station."""
+        # Planned spots have their own ad-break queue. The legacy sweeper path
+        # must not add extra ads between those scheduled song boundaries.
+        if resolve_song_ad_plans(self.conn, self.station_id):
+            return None
+        if not station_ads_enabled(self.conn, self.station_id):
+            return None
         cur = self.conn.cursor()
         cur.execute(
             "SELECT id FROM tracks "
@@ -1590,6 +1885,32 @@ class StationWorker:
         )
         row = cur.fetchone()
         return {"track_id": int(row["id"])} if row else None
+
+    def _remove_unplanned_pending_ads(self) -> int:
+        """Retire legacy sweeper ads when only planned spots are authorized."""
+        if station_ads_enabled(self.conn, self.station_id) and not resolve_song_ad_plans(
+            self.conn, self.station_id
+        ):
+            return 0
+        cur = self.conn.cursor()
+        cur.execute(
+            "UPDATE queue_items SET status='failed', finished_at=CURRENT_TIMESTAMP "
+            "WHERE station_id=? AND status='pending' AND dedupe_key LIKE 'ad:%' "
+            "AND track_id IN (SELECT id FROM tracks WHERE track_type='ad')",
+            (self.station_id,),
+        )
+        removed = int(cur.rowcount or 0)
+        # sqlite3 opens an implicit write transaction even when this UPDATE
+        # matches no rows. Close it immediately so every station worker does
+        # not hold the shared WAL writer lock while it prepares the next item.
+        self.conn.commit()
+        if removed:
+            _log.info(
+                "Retired %d legacy pending ads for station_id=%s",
+                removed,
+                self.station_id,
+            )
+        return removed
 
     def _remove_pending_jingles(self) -> int:
         """Remove all pending jingle items from the queue."""
@@ -1632,10 +1953,10 @@ class StationWorker:
             return False
         return str(row["track_type"] or "music").strip().lower() == "jingle"
 
-    def _maybe_insert_sweeper_jingle(self) -> bool:
+    def _maybe_insert_sweeper_jingle(self, sweeper_settings: dict | None = None) -> bool:
         """If sweeper is enabled and interval reached, insert a jingle
         at the front of the pending queue. Returns True if a jingle was inserted."""
-        sweeper = self._get_sweeper_settings()
+        sweeper = sweeper_settings or self._get_sweeper_settings()
         if not sweeper["enabled"]:
             return False
 
@@ -2235,7 +2556,12 @@ class StationWorker:
         """Check if show audio finished. If still playing, hold. If done, transition."""
         if self.runtime_registry:
             rt_status = self.runtime_registry.status(self.station_id)
-            if self._runtime_playback_alive(rt_status):
+            producer_finished = bool(
+                isinstance(rt_status, dict)
+                and rt_status.get("producer_eof")
+                and not rt_status.get("program_running")
+            )
+            if not producer_finished and self._runtime_playback_alive(rt_status):
                 return {"source": f"show_{session['status']}", "reason": "audio_in_progress"}
 
         status = session["status"]
@@ -2394,8 +2720,41 @@ class StationWorker:
         # ── Show lifecycle check ──────────────────────────────
         show_session = self._get_active_show_session()
         show_result = self._process_show_lifecycle(show_session)
+        if (
+            show_result is not None
+            and show_session is not None
+            and str(show_session.get("status") or "") == "going_live"
+        ):
+            # A show waiting for the current song must still advance that song
+            # when its duration/EOF boundary is reached. Otherwise the early
+            # lifecycle return can hold a stale `playing` row forever.
+            if self._advance_playing_queue_item():
+                show_result = self._process_show_lifecycle(show_session)
         if show_result is not None:
             return show_result
+
+        # A failed music crossfade can be deferred while the current decoder
+        # finishes naturally. Keep that producer alive and let the pending
+        # successor retry at EOF; processing an ad or another source here would
+        # cut the current song and recreate the audible gap.
+        if self.runtime_registry:
+            try:
+                runtime_status = self.runtime_registry.status(self.station_id)
+                transition_mode = str(runtime_status.get("transition_mode") or "")
+                if (
+                    transition_mode == "deferred"
+                    and self.runtime_registry.is_process_running(self.station_id)
+                ):
+                    return {
+                        "source": "playing",
+                        "reason": "waiting_for_current_track_boundary",
+                    }
+            except Exception:
+                _log.debug(
+                    "Could not inspect deferred transition state for station_id=%s",
+                    self.station_id,
+                    exc_info=True,
+                )
 
         # On first tick after startup, insert the startup sound at front of queue
         self._maybe_insert_startup_sound()
@@ -2403,6 +2762,7 @@ class StationWorker:
         # A station is an isolation boundary. Repair legacy/corrupt queue rows
         # before measuring, filling, or selecting the next item.
         self._fail_cross_station_queue_items()
+        self._remove_unplanned_pending_ads()
 
         # Auto-fill queue BEFORE advance check so that crossfade timing
         # can see the next pending track when deciding when to advance.
@@ -2419,7 +2779,12 @@ class StationWorker:
         if not sweeper["enabled"]:
             self._remove_pending_jingles()
         else:
-            self._maybe_insert_sweeper_jingle()
+            current_for_sweeper = self.queue_repo.current_playing(self.station_id)
+            current_sweeper_id = int(
+                self._row_value(current_for_sweeper, "id", 0) or 0
+            )
+            if _sweeper_boundary_changed(self.station_id, current_sweeper_id):
+                self._maybe_insert_sweeper_jingle(sweeper)
 
         # Prepare queue-native AI announcements before the next song when due.
         self._maybe_prepare_ai_queue()
@@ -2427,20 +2792,35 @@ class StationWorker:
         # Background prefetch owns upcoming intro generation. Doing that work
         # inline here blocks the worker loop and stalls playback on cold cache.
 
-        # Advance the currently-playing queue item if its duration has elapsed
-        self._advance_playing_queue_item()
-
-        # Ad rows are policy-gated and remain playing until their audio ends.
+        # An active ad owns playout until its full duration has elapsed. Advance it
+        # before touching the music queue: starting the next song here used to
+        # replace the ad source, make both recovery paths fight, then fail the ad.
         self._advance_playing_ad_item()
-        try:
-            # Song-cadence ads are materialized only after completed music
-            # items, so a due spot never shortens the song currently on air.
-            materialize_song_cadence_ads(self.conn, self.station_id)
-        except Exception:
-            _log.exception(
-                "Could not materialize song-cadence ads for station_id=%s",
-                self.station_id,
-            )
+        active_ad = self.ad_repo.current_playing(self.station_id)
+        if active_ad:
+            return {
+                "source": "playing",
+                "reason": "ad_in_progress",
+                "item_id": int(self._row_value(active_ad, "id", 0) or 0),
+            }
+
+        if self._advance_playing_schedule_item():
+            return {"source": "playing", "reason": "schedule_in_progress"}
+
+        # Advance music only when no advertisement owns the programme output.
+        queue_advanced = self._advance_playing_queue_item()
+        if _song_ad_refresh_due(self.station_id, queue_advanced):
+            try:
+                # Reconcile once at worker start, then only when a queue item
+                # advances. The progress query counts the station's complete
+                # history, so repeating it on every poll starves live audio.
+                materialize_song_cadence_ads(self.conn, self.station_id)
+                _mark_song_ad_bootstrapped(self.station_id)
+            except Exception:
+                _log.exception(
+                    "Could not materialize song-cadence ads for station_id=%s",
+                    self.station_id,
+                )
         self._fail_disabled_active_ads()
         self._ensure_hourly_ad_break()
 
@@ -2468,8 +2848,9 @@ class StationWorker:
         if queue_source == "host":
             host_pending = self.program_queue_repo.next_pending(self.station_id)
 
-        # While a queue item is playing, suppress manual count so ads/schedule
-        # can still fire; the next queue item waits until the current finishes.
+        # A due advertisement must wait for the active queue item to finish.
+        # Otherwise choose_source prioritizes ads over manual playback and cuts
+        # the current song or sweeper as soon as its cadence becomes due.
         manual_count = 1 if pending and not playing else 0
         # Suppress ad auto-fire during all active show states EXCEPT 'preparing' and 'on_break'.
         # 'preparing': normal automation, DJ hasn't gone live yet.
@@ -2486,10 +2867,14 @@ class StationWorker:
             manual_count = 0
         source = choose_source(
             manual_count=manual_count,
-            ad_due=False if ad_suppressed else bool(due_ad),
-            schedule_ready=bool(ready_schedule),
+            ad_due=False if (ad_suppressed or playing) else bool(due_ad),
+            # Timed items wait for the current programme item to finish. A
+            # schedule tick must not mark a full music track done and replace it
+            # mid-song; show lifecycle transitions have their own explicit
+            # control path above.
+            schedule_ready=bool(ready_schedule) and not bool(playing),
             fallback_ready=bool(self.fallback_uri) and not bool(playing),
-            host_count=1 if host_pending else 0,
+            host_count=1 if host_pending and not playing else 0,
         )
         if source == "host" and host_pending:
             host_item_id = int(host_pending["id"])
@@ -2508,7 +2893,6 @@ class StationWorker:
                 auto_done=False,  # keep as 'playing' until duration expires
             )
         if source == "ads" and due_ad:
-            self._finish_playing_queue_item()  # preempt queue track for ad
             item_id = int(due_ad["id"])
             track_id = int(due_ad["track_id"])
             return self._play_managed_item(
@@ -2521,7 +2905,6 @@ class StationWorker:
                 auto_done=False,
             )
         if source == "schedule" and ready_schedule:
-            self._finish_playing_queue_item()  # preempt queue track for schedule
             item_id = int(ready_schedule["id"])
             track_id = int(ready_schedule["track_id"])
             return self._play_managed_item(
@@ -2531,6 +2914,7 @@ class StationWorker:
                 mark_playing=self.schedule_repo.mark_playing,
                 mark_done=self.schedule_repo.mark_done,
                 mark_failed=self.schedule_repo.mark_failed,
+                auto_done=not bool(self.runtime_registry),
             )
         if source == "fallback" and self.runtime_registry and self.fallback_uri:
             fallback_title = (

@@ -119,7 +119,7 @@ def test_startup_sound_does_not_duplicate_preserved_front_jingle(
     assert settings["_startup_sound_pending"] == "false"
 
 
-def test_worker_process_once_autofills_empty_queue_and_starts_first_track(
+def test_worker_retries_crashed_unknown_duration_track_from_start(
     tmp_path, monkeypatch
 ):
     monkeypatch.setenv("CLEANROOM_DB_PATH", str(tmp_path / "cleanroom.db"))
@@ -178,15 +178,16 @@ def test_worker_process_once_autofills_empty_queue_and_starts_first_track(
 
     runtime.running[1] = False
     third = worker.process_once()
-    assert third["source"] == "manual"
-    assert third["input_uri"] == "C:/music/busy.mp3"
+    assert third == {"source": "playing", "reason": "track_in_progress"}
     assert len(runtime.started) == 2
+    assert runtime.started[-1]["input_uri"] == "C:/music/fresh.mp3"
+    assert runtime.started[-1]["start_offset_seconds"] == 0.0
     rows = conn.cursor().execute(
         "SELECT track_id, status FROM queue_items WHERE station_id=1 ORDER BY position ASC, id ASC"
     ).fetchall()
     assert [(int(row["track_id"]), str(row["status"])) for row in rows] == [
-        (fresh_track_id, "done"),
-        (busy_track_id, "playing"),
+        (fresh_track_id, "playing"),
+        (busy_track_id, "pending"),
     ]
     counts = conn.cursor().execute(
         "SELECT id, play_count FROM tracks WHERE id IN (?, ?) ORDER BY id ASC",
@@ -194,7 +195,7 @@ def test_worker_process_once_autofills_empty_queue_and_starts_first_track(
     ).fetchall()
     assert [(int(row["id"]), int(row["play_count"])) for row in counts] == [
         (busy_track_id, 4),
-        (fresh_track_id, 1),
+        (fresh_track_id, 0),
     ]
 
 
@@ -397,7 +398,21 @@ def test_worker_process_once_queues_ai_intro_before_music_track(tmp_path, monkey
     assert second["source"] == "playing"
     assert second["reason"] == "track_in_progress"
 
+    # Simulate the producer finishing the complete intro. A failed runtime
+    # status by itself is not enough to discard this queued item.
     runtime.running[1] = False
+    conn.execute(
+        "UPDATE queue_items SET started_at=datetime('now', '-5 seconds') "
+        "WHERE station_id=1 AND status='playing'"
+    )
+    conn.commit()
+    runtime.status = lambda _station_id: {
+        "station_id": 1,
+        "running": False,
+        "program_running": False,
+        "producer_eof": True,
+        "active_input_uri": str(intro_path),
+    }
     third = worker.process_once()
     assert third["source"] == "manual"
     assert third["input_uri"] == "C:/music/fresh.mp3"
@@ -409,7 +424,7 @@ def test_worker_process_once_queues_ai_intro_before_music_track(tmp_path, monkey
     ).fetchall()
     announcement_track_id = int(rows[0]["track_id"])
     assert [(int(row["track_id"]), str(row["status"]), str(row["track_type"])) for row in rows] == [
-        (announcement_track_id, "failed", "announcement"),
+        (announcement_track_id, "done", "announcement"),
         (music_track_id, "playing", "music"),
     ]
 

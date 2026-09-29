@@ -8,6 +8,8 @@ from app.repositories.schedule_repo import ScheduleRepository
 class _FakeRuntimeRegistry:
     def __init__(self):
         self.starts = []
+        self.active_input_uri = {}
+        self.finished_inputs = set()
 
     def start_station(
         self,
@@ -19,10 +21,21 @@ class _FakeRuntimeRegistry:
         crossfade_seconds: float = 0.0,
     ):
         self.starts.append((station_id, input_uri))
+        self.active_input_uri[int(station_id)] = str(input_uri)
+        self.finished_inputs.discard(str(input_uri))
         return {"station_id": station_id, "running": True}
 
     def status(self, station_id: int):
-        return {"station_id": int(station_id), "running": True}
+        sid = int(station_id)
+        uri = self.active_input_uri.get(sid, "")
+        eof = uri in self.finished_inputs
+        return {
+            "station_id": sid,
+            "running": True,
+            "program_running": not eof,
+            "producer_eof": eof,
+            "active_input_uri": uri,
+        }
 
 
 def test_worker_follows_manual_ads_schedule_fallback_priority(tmp_path, monkeypatch):
@@ -69,13 +82,26 @@ def test_worker_follows_manual_ads_schedule_fallback_priority(tmp_path, monkeypa
     )
 
     out1 = worker.process_once()
-    out2 = worker.process_once()
-    out3 = worker.process_once()
-    out4 = worker.process_once()
-
+    while_song_plays = worker.process_once()
     assert out1["source"] == "manual"
+
+    # A due ad and schedule wait instead of replacing the current song.
+    assert while_song_plays == {
+        "source": "playing",
+        "reason": "track_in_progress",
+    }
+    current_song = QueueRepository(conn).current_playing(9)
+    QueueRepository(conn).mark_done(int(current_song["id"]))
+
+    out2 = worker.process_once()
     assert out2["source"] == "ads"
+    fake_runtime.finished_inputs.add("C:/music/ad.mp3")
+
+    out3 = worker.process_once()
     assert out3["source"] == "schedule"
+    fake_runtime.finished_inputs.add("C:/music/schedule.mp3")
+
+    out4 = worker.process_once()
     assert out4["source"] == "fallback"
     assert fake_runtime.starts == [
         (9, "C:/music/manual.mp3"),

@@ -1,6 +1,8 @@
 import time
 import threading
 
+import pytest
+
 import app.audio.station_runtime as runtime_module
 from app.audio.gst_pipeline import StationPipelineConfig
 from app.audio.station_runtime import StationRuntime
@@ -130,6 +132,25 @@ def _make_cfg(
     )
 
 
+def _allow_fake_transition_paths(monkeypatch):
+    real_isfile = runtime_module.os.path.isfile
+    monkeypatch.setattr(
+        runtime_module.os.path,
+        "isfile",
+        lambda path: str(path).startswith("C:/") or real_isfile(path),
+    )
+
+
+def _advance_fake_clock_on_sleep(monkeypatch, clock):
+    real_sleep = time.sleep
+
+    def sleep(seconds):
+        clock["value"] += seconds
+        real_sleep(0.001)  # Yield so connector/encoder test threads can run.
+
+    monkeypatch.setattr(runtime_module.time, "sleep", sleep)
+
+
 def test_runtime_start_stop_and_branch_health():
     launched = []
     fake_proc = _FakeProcess()
@@ -233,7 +254,7 @@ def test_recover_outputs_reconnects_sinks_without_restarting_programme(monkeypat
     calls = []
 
     class Sink:
-        def stop(self):
+        def stop(self, **_kwargs):
             calls.append("stop-primary")
 
     runtime._icecast_sink = Sink()
@@ -244,7 +265,7 @@ def test_recover_outputs_reconnects_sinks_without_restarting_programme(monkeypat
     monkeypatch.setattr(
         runtime,
         "_ensure_icecast_sink",
-        lambda _cfg: calls.append("start-primary") or True,
+        lambda _cfg, **_kwargs: calls.append("start-primary") or True,
     )
     monkeypatch.setattr(
         runtime,
@@ -269,7 +290,7 @@ def test_recover_primary_output_uses_long_release_without_stopping_programme(mon
     calls = []
 
     class Sink:
-        def stop(self):
+        def stop(self, **_kwargs):
             calls.append("stop-primary")
 
     runtime._icecast_sink = Sink()
@@ -280,7 +301,7 @@ def test_recover_primary_output_uses_long_release_without_stopping_programme(mon
     monkeypatch.setattr(
         runtime,
         "_ensure_icecast_sink",
-        lambda _cfg: calls.append("start-primary") or True,
+        lambda _cfg, **_kwargs: calls.append("start-primary") or True,
     )
     monkeypatch.setattr(runtime, "status", lambda: {"running": True})
 
@@ -375,7 +396,8 @@ def test_runtime_restarts_when_input_changes():
     assert len(launched) == 2
 
 
-def test_runtime_uses_crossfade_path_for_music_to_music():
+def test_runtime_uses_crossfade_path_for_music_to_music(monkeypatch):
+    _allow_fake_transition_paths(monkeypatch)
     launched = []
     procs = [_FakeProcess(), _FakeProcess(), _FakeProcess()]
 
@@ -434,7 +456,8 @@ def test_runtime_keeps_hard_cut_for_music_to_ads():
     assert sum("-filter_complex" in cmd for cmd in launched) == 0
 
 
-def test_runtime_uses_short_crossfade_for_music_to_jingle():
+def test_runtime_uses_short_crossfade_for_music_to_jingle(monkeypatch):
+    _allow_fake_transition_paths(monkeypatch)
     launched = []
     procs = [_FakeProcess(), _FakeProcess(), _FakeProcess()]
 
@@ -525,6 +548,7 @@ def test_runtime_disables_crossfade_when_seconds_are_zero():
 
 
 def test_runtime_uses_ffmpeg_transition_for_music_to_music_when_supported(monkeypatch):
+    _allow_fake_transition_paths(monkeypatch)
     launched = []
     procs = [_FakeProcess(), _FakeProcess(), _FakeProcess()]
     clock = {"value": 100.0}
@@ -534,6 +558,7 @@ def test_runtime_uses_ffmpeg_transition_for_music_to_music_when_supported(monkey
         return procs[len(launched) - 1]
 
     monkeypatch.setattr(runtime_module.time, "monotonic", lambda: clock["value"])
+    _advance_fake_clock_on_sleep(monkeypatch, clock)
     runtime = StationRuntime(process_factory=_factory)
     runtime.ffmpeg_bin = "ffmpeg.exe"
 
@@ -563,14 +588,16 @@ def test_runtime_uses_ffmpeg_transition_for_music_to_music_when_supported(monkey
     # so FFmpeg owns only the original and transition PCM producers.
     assert len(ffmpeg_cmds) == 2
     assert "-ss" in transition_cmd
-    assert "5.000" in " ".join(transition_cmd)
+    transition_offset = float(transition_cmd[transition_cmd.index("-ss") + 1])
+    assert 0.0 < transition_offset <= 5.0
     assert procs[0].terminated is True
     assert procs[1].terminated is False
     assert runtime.is_running() is True
     assert runtime._last_transition_mode == "crossfade"
 
 
-def test_runtime_falls_back_to_restart_when_transition_setup_fails(monkeypatch):
+def test_runtime_defers_failed_transition_without_killing_current_source(monkeypatch):
+    _allow_fake_transition_paths(monkeypatch)
     launched = []
     procs = [_FakeProcess(), _FakeProcess(), _FakeProcess()]
     clock = {"value": 10.0}
@@ -597,21 +624,21 @@ def test_runtime_falls_back_to_restart_when_transition_setup_fails(monkeypatch):
         )
     )
     clock["value"] = 14.0
-    runtime.start(
-        _make_cfg(
-            input_uri="C:/music/b.mp3",
-            track_type="music",
-            crossfade_seconds=3.0,
-            local_output_enabled=False,
+    with pytest.raises(RuntimeError, match="crossfade deferred"):
+        runtime.start(
+            _make_cfg(
+                input_uri="C:/music/b.mp3",
+                track_type="music",
+                crossfade_seconds=3.0,
+                local_output_enabled=False,
+            )
         )
-    )
 
-    assert [cmd[0] for cmd in launched] == ["ffmpeg.exe"] * 3
+    assert [cmd[0] for cmd in launched] == ["ffmpeg.exe"] * 2
     assert "-filter_complex" in launched[1]
-    assert procs[0].terminated is True
-    assert procs[1].terminated is False
+    assert procs[0].terminated is False
     assert runtime.is_running() is True
-    assert runtime._last_transition_mode == "restart"
+    assert runtime._last_transition_mode == "deferred"
 
 
 def test_runtime_falls_back_to_restart_when_local_transition_backend_is_missing(monkeypatch):
@@ -653,6 +680,7 @@ def test_runtime_falls_back_to_restart_when_local_transition_backend_is_missing(
 
 
 def test_runtime_does_not_chain_crossfade_during_active_transition(monkeypatch):
+    _allow_fake_transition_paths(monkeypatch)
     launched = []
     procs = [_FakeProcess(), _FakeProcess(), _FakeProcess(), _FakeProcess()]
     clock = {"value": 20.0}
@@ -662,6 +690,7 @@ def test_runtime_does_not_chain_crossfade_during_active_transition(monkeypatch):
         return procs[len(launched) - 1]
 
     monkeypatch.setattr(runtime_module.time, "monotonic", lambda: clock["value"])
+    _advance_fake_clock_on_sleep(monkeypatch, clock)
     runtime = StationRuntime(process_factory=_factory)
     runtime.ffmpeg_bin = "ffmpeg.exe"
 
@@ -762,10 +791,12 @@ def test_runtime_local_only_track_change_reuses_persistent_sink_when_gst_is_miss
 def test_runtime_local_only_crossfade_reuses_persistent_sink_when_gst_is_missing(
     monkeypatch,
 ):
+    _allow_fake_transition_paths(monkeypatch)
     launched, ffmpeg_procs, ffplay_procs, factory = _make_gst_missing_factory()
     clock = {"value": 50.0}
 
     monkeypatch.setattr(runtime_module.time, "monotonic", lambda: clock["value"])
+    _advance_fake_clock_on_sleep(monkeypatch, clock)
     runtime = StationRuntime(process_factory=factory)
     runtime.ffmpeg_bin = "ffmpeg.exe"
     runtime.ffplay_bin = "ffplay.exe"
@@ -902,10 +933,12 @@ def test_runtime_icecast_only_track_change_reuses_persistent_sink_when_gst_is_mi
 def test_runtime_icecast_only_crossfade_reuses_persistent_sink_when_gst_is_missing(
     monkeypatch,
 ):
+    _allow_fake_transition_paths(monkeypatch)
     launched, ffmpeg_procs, ffplay_procs, factory = _make_gst_missing_factory()
     clock = {"value": 80.0}
 
     monkeypatch.setattr(runtime_module.time, "monotonic", lambda: clock["value"])
+    _advance_fake_clock_on_sleep(monkeypatch, clock)
     runtime = StationRuntime(process_factory=factory)
     runtime.ffmpeg_bin = "ffmpeg.exe"
     runtime.ffplay_bin = None
@@ -1055,7 +1088,7 @@ def test_primary_source_does_not_start_recurring_listener_probes(monkeypatch):
         def __init__(self, *_args, **kwargs):
             captured.update(kwargs)
 
-        def ensure_started(self, cfg):
+        def ensure_started(self, cfg, **_kwargs):
             captured["cfg"] = cfg
 
     monkeypatch.setattr(runtime_module, "IcecastAudioSink", Sink)

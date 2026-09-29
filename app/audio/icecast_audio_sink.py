@@ -241,11 +241,13 @@ class IcecastAudioSink:
         )
         self._pcm_dispatch_stop = threading.Event()
         self._pcm_dispatch_thread = None
+        self._pcm_dispatch_pending_chunk = None
         self._pcm_dispatch_backpressured = False
         self._pcm_dispatch_backpressure_started_monotonic = None
         self._writer_stop = threading.Event()
         self._writer_thread = None
         self._writer_lock = threading.Lock()
+        self._writer_pending_chunk = None
         self._writer_failed = False
         self._writer_backpressured = False
         self._writer_backpressure_started_monotonic = None
@@ -389,17 +391,22 @@ class IcecastAudioSink:
         if not self._decouple_input_backpressure:
             return
         self._pcm_dispatch_stop.clear()
-        self._clear_pcm_dispatch_queue()
 
         def run() -> None:
             while not self._pcm_dispatch_stop.is_set():
-                try:
-                    payload = self._pcm_dispatch_queue.get(timeout=0.05)
-                except queue.Empty:
-                    continue
+                payload = self._pcm_dispatch_pending_chunk
+                if payload is None:
+                    try:
+                        payload = self._pcm_dispatch_queue.get(timeout=0.05)
+                    except queue.Empty:
+                        continue
+                    self._pcm_dispatch_pending_chunk = payload
                 # This worker may wait for its own encoder/network branch. The
                 # primary mount and other auxiliary mounts keep receiving PCM.
-                self._write_pcm_blocking(payload)
+                if self._write_pcm_blocking(payload):
+                    self._pcm_dispatch_pending_chunk = None
+                elif self._pcm_dispatch_stop.is_set():
+                    break
 
         self._pcm_dispatch_thread = threading.Thread(
             target=run,
@@ -638,7 +645,6 @@ class IcecastAudioSink:
 
     def _start_writer_worker(self) -> None:
         self._writer_stop.clear()
-        self._clear_pcm_queue()
         with self._writer_lock:
             self._writer_failed = False
             self._writer_backpressured = False
@@ -655,7 +661,7 @@ class IcecastAudioSink:
             programme_started = False
             initial_grace_deadline = None
             first_programme_queued_at = None
-            pending_chunk = None
+            pending_chunk = self._writer_pending_chunk
             failed_stdin = None
             while not self._writer_stop.is_set():
                 # Never remove programme audio while the encoder/source is
@@ -761,6 +767,7 @@ class IcecastAudioSink:
                         try:
                             chunk = self._pcm_queue.get_nowait()
                             silence = False
+                            self._writer_pending_chunk = chunk
                         except queue.Empty:
                             chunk = silence_chunk
                             silence = True
@@ -776,6 +783,8 @@ class IcecastAudioSink:
                         flush()
                     if pending_chunk is not None and chunk is pending_chunk:
                         pending_chunk = None
+                    if not silence and self._writer_pending_chunk is chunk:
+                        self._writer_pending_chunk = None
                     failed_stdin = None
                     with self._writer_lock:
                         self._writer_failed = False
@@ -799,6 +808,7 @@ class IcecastAudioSink:
                         self._writer_failed = True
                     if not silence:
                         pending_chunk = chunk
+                        self._writer_pending_chunk = chunk
                     failed_stdin = stdin
                     output_clock_started = False
                     next_write = time.monotonic()
@@ -1032,11 +1042,16 @@ class IcecastAudioSink:
         )
         self._probe_thread.start()
 
-    def ensure_started(self, cfg: StationPipelineConfig):
+    def ensure_started(
+        self,
+        cfg: StationPipelineConfig,
+        *,
+        preserve_pcm: bool = False,
+    ):
         signature = self._cfg_signature(cfg)
         if self.is_running() and self._signature == signature:
             return self._process
-        self.stop(preserve_probe_state=False)
+        self.stop(preserve_probe_state=False, preserve_pcm=preserve_pcm)
         profile = str(cfg.stream_codec_profile or "").strip().lower()
         queue_capacity = (
             _PCM_FLAC_QUEUE_MAX_CHUNKS
@@ -1075,7 +1090,12 @@ class IcecastAudioSink:
             time.sleep(0.01)
         return self._process
 
-    def stop(self, *, preserve_probe_state: bool = False) -> None:
+    def stop(
+        self,
+        *,
+        preserve_probe_state: bool = False,
+        preserve_pcm: bool = False,
+    ) -> None:
         self._probe_stop.set()
         self._pcm_dispatch_stop.set()
         self._writer_stop.set()
@@ -1099,8 +1119,11 @@ class IcecastAudioSink:
         if self._stderr_thread is not None:
             self._stderr_thread.join(timeout=3.0)
         self._stderr_thread = None
-        self._clear_pcm_queue()
-        self._clear_pcm_dispatch_queue()
+        if not preserve_pcm:
+            self._clear_pcm_queue()
+            self._clear_pcm_dispatch_queue()
+            self._writer_pending_chunk = None
+            self._pcm_dispatch_pending_chunk = None
         if not preserve_probe_state:
             with self._probe_lock:
                 self._mount_healthy = None

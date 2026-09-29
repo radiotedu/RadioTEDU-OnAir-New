@@ -52,6 +52,19 @@ class ScheduleRepository:
         )
         return cur.fetchone()
 
+    def current_playing(self, station_id: int):
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT s.*, p.updated_at AS playout_started_at "
+            "FROM schedule_items s "
+            "LEFT JOIN playout_state p ON p.station_id=s.station_id "
+            "AND p.current_source='schedule' AND p.current_item_id=s.id "
+            "WHERE s.station_id=? AND s.status='playing' "
+            "ORDER BY datetime(s.play_at) ASC, s.id ASC LIMIT 1",
+            (int(station_id),),
+        )
+        return cur.fetchone()
+
     def list_recent(self, station_id: int, limit: int = 20):
         safe_limit = max(1, min(int(limit), 200))
         cur = self.conn.cursor()

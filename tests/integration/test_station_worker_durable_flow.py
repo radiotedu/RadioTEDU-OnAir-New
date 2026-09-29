@@ -29,7 +29,7 @@ class _FakeRuntimeRegistry:
         }
 
 
-def test_worker_claims_item_then_marks_manual_item_done_after_runtime_stops(
+def test_worker_retries_crashed_unknown_duration_item_from_start(
     tmp_path, monkeypatch
 ):
     monkeypatch.setenv("CLEANROOM_DB_PATH", str(tmp_path / "cleanroom.db"))
@@ -59,6 +59,6 @@ def test_worker_claims_item_then_marks_manual_item_done_after_runtime_stops(
 
     runtime.running[1] = False
     third = worker.process_once()
-    assert third["source"] == "none"
+    assert third == {"source": "playing", "reason": "track_in_progress"}
     cur.execute("SELECT status FROM queue_items WHERE station_id=1 ORDER BY id ASC LIMIT 1")
-    assert cur.fetchone()["status"] == "done"
+    assert cur.fetchone()["status"] == "playing"
