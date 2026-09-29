@@ -325,6 +325,10 @@ _RESTART_SUPPRESSION: dict[
 _RECOVERY_FAILURE_LOG_LOCK = threading.Lock()
 _RECOVERY_FAILURE_LOG_TIMES: dict[tuple[int, str, int], float] = {}
 _MAX_RESTART_ATTEMPTS_PER_ITEM = 3
+# Let a newly started decoder open cold media before treating a missing
+# programme signal as a dead producer. Runtime-reported PCM stalls already
+# include their own five-second probe window.
+_PLAYBACK_STARTUP_GRACE_SEC = 5.0
 # Retry a source failure quickly enough to avoid multi-minute dead air while
 # still preventing a tight process-spawn loop when the failure is persistent.
 _RESTART_COOLDOWN_SEC = 5.0
@@ -1298,9 +1302,18 @@ class StationWorker:
             return False
         # Sink/branch health means the output connection is alive; it does not
         # mean a media producer is still feeding programme audio. Prefer the
-        # explicit producer state whenever the runtime exposes it.
+        # explicit producer state and its PCM/output feed signals whenever the
+        # runtime exposes them. A live FFmpeg PID can otherwise hide dead air.
         if "program_running" in rt_status:
-            return bool(rt_status.get("program_running", False))
+            if not bool(rt_status.get("program_running", False)):
+                return False
+            if bool(rt_status.get("program_pcm_stalled", False)):
+                return False
+            if "output_feed_active" in rt_status and not bool(
+                rt_status.get("output_feed_active", False)
+            ):
+                return False
+            return True
         if bool(rt_status.get("producer_eof", False)):
             return False
         branch_health = rt_status.get("branch_health")
@@ -1344,6 +1357,19 @@ class StationWorker:
             # Older runtime adapters do not expose the active URI.
             return True
         return self._same_runtime_uri(active_uri, expected_uri)
+
+    def _can_wait_for_deferred_transition(self, rt_status: dict | None) -> bool:
+        """Only defer a successor while the current queue-owned source is live."""
+        if not isinstance(rt_status, dict):
+            return False
+        playing = self.queue_repo.current_playing(self.station_id)
+        if not playing:
+            return False
+        track_id = int(self._row_value(playing, "track_id", 0) or 0)
+        track_uri, *_ = self._track_runtime_fields(track_id)
+        return bool(
+            track_uri and self._runtime_playback_matches(rt_status, track_uri)
+        )
 
     def _runtime_source_finished_naturally(
         self, rt_status: dict | None, expected_uri: str
@@ -2071,18 +2097,25 @@ class StationWorker:
                 # duration metadata expires.
                 self._complete_queue_item(playing)
                 return True
-            if (
-                elapsed < advance_at
-                and
-                track_uri
-                and self._runtime_playback_alive(rt_status)
-                and not self._runtime_playback_matches(rt_status, track_uri)
-            ):
-                return self._restart_playing_queue_item_if_runtime_mismatched(
-                    playing,
-                    start_offset_seconds=0.0,
+            if elapsed < advance_at and track_uri:
+                playback_alive = self._runtime_playback_alive(rt_status)
+                playback_matches = self._runtime_playback_matches(
+                    rt_status, track_uri
                 )
-
+                if playback_alive and not playback_matches:
+                    return self._restart_playing_queue_item_if_runtime_mismatched(
+                        playing, start_offset_seconds=0.0
+                    )
+                if (
+                    not playback_alive
+                    and elapsed >= _PLAYBACK_STARTUP_GRACE_SEC
+                ):
+                    # A dead/stalled producer before the metadata boundary must
+                    # retry this same row. Waiting for the full song duration
+                    # turns a short PCM stall into minutes of dead air.
+                    return self._restart_playing_queue_item_if_runtime_mismatched(
+                        playing, start_offset_seconds=0.0
+                    )
         # ── Safety: absolute max timeout per track ────────────
         # Prevents tracks from being stuck forever (hung process,
         # wrong metadata, etc.). Music is capped at 30 minutes; known-duration
@@ -3361,7 +3394,8 @@ class StationWorker:
             cur = self.conn.cursor()
             cur.execute(
                 "SELECT * FROM ad_break_items WHERE station_id = ? AND status = 'pending' "
-                "ORDER BY due_at ASC LIMIT 1",
+                "AND (retry_after IS NULL OR datetime(retry_after) <= CURRENT_TIMESTAMP) "
+                "ORDER BY datetime(due_at) ASC LIMIT 1",
                 (self.station_id,),
             )
             row = cur.fetchone()
@@ -3377,8 +3411,10 @@ class StationWorker:
 
             tolerance_until = due_at + datetime.timedelta(minutes=tolerance_minutes)
 
-            # Mark as missed if tolerance window exceeded
-            if now > tolerance_until:
+            # Once a break has been attempted and durably deferred, its
+            # original tolerance must not erase the pending retry.
+            retry_count = int(row["retry_count"] or 0)
+            if now > tolerance_until and retry_count <= 0:
                 cur.execute(
                     "UPDATE ad_break_items SET status='missed' WHERE id = ?",
                     (int(row["id"]),),
@@ -3459,6 +3495,7 @@ class StationWorker:
                 if (
                     transition_mode == "deferred"
                     and self.runtime_registry.is_process_running(self.station_id)
+                    and self._can_wait_for_deferred_transition(runtime_status)
                 ):
                     return {
                         "source": "playing",

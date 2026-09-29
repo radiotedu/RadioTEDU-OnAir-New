@@ -127,7 +127,10 @@ def test_operator_mutations_use_read_back_verification_and_safe_retry():
     assert "async function pickOperatorPath" in javascript
     assert "data-service-path=" in javascript
     assert "database.last_update_at" in javascript
-    assert "if (!state.stationId || (state.busy && !silent)) return;" in javascript
+    assert (
+        "if (!state.stationId || (state.busy && !silent) || stationRefreshInFlight) return false;"
+        in javascript
+    )
     assert "Stop stream — keep playlist" in html
     assert "AI is content-only" in html
 

@@ -126,6 +126,57 @@ class DueAdMusicBoundaryTests(unittest.TestCase):
         worker._broadcast_worker_state = lambda **_kwargs: None
         return worker
 
+    def test_live_process_with_stalled_program_audio_is_not_healthy(self):
+        status = {
+            "program_running": True,
+            "program_pcm_stalled": True,
+            "output_feed_active": False,
+            "active_input_uri": "test://current-song",
+        }
+
+        self.assertFalse(StationWorker._runtime_playback_alive(status))
+
+    def test_stalled_matching_source_retries_before_track_duration(self):
+        worker = self._worker(None)
+        worker.queue_repo.playing["duration"] = 180.0
+        worker._cached_track_duration = lambda *_args, **_kwargs: 180.0
+        worker.runtime_registry._status = {
+            "running": True,
+            "program_running": True,
+            "program_pcm_stalled": True,
+            "output_feed_active": False,
+            "producer_eof": False,
+            "active_input_uri": "test://current-song",
+        }
+        retries = []
+        worker._restart_playing_queue_item_if_runtime_mismatched = (
+            lambda item, *, start_offset_seconds: retries.append(
+                (item["id"], start_offset_seconds)
+            )
+            or True
+        )
+
+        advanced = worker._advance_playing_queue_item()
+
+        self.assertTrue(advanced)
+        self.assertEqual(retries, [(12, 0.0)])
+        self.assertEqual(worker.completed, [])
+
+    def test_deferred_transition_wait_requires_live_matching_pcm_source(self):
+        worker = self._worker(None)
+        status = {
+            "program_running": True,
+            "output_feed_active": True,
+            "program_pcm_stalled": False,
+            "active_input_uri": "test://current-song",
+        }
+
+        self.assertTrue(worker._can_wait_for_deferred_transition(status))
+
+        status["program_pcm_stalled"] = True
+        status["output_feed_active"] = False
+        self.assertFalse(worker._can_wait_for_deferred_transition(status))
+
     def test_due_campaign_ad_keeps_current_song_until_its_real_end(self):
         worker = self._worker({"id": 23})
 

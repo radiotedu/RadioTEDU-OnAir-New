@@ -25,6 +25,41 @@ _RBAC_INTEGRITY_REPAIR_KEY = "__rbac_integrity_repair_v17__"
 _SCHEMA_BACKUP_DIRECTORY = "schema-backups"
 _SCHEMA_BACKUP_LEDGER = "schema-migration-backups.json"
 _DEFAULT_SCHEMA_BACKUP_RETENTION = 8
+_RETRY_COLUMN_DEFINITIONS = {
+    "queue_items": (
+        ("retry_after", "ALTER TABLE queue_items ADD COLUMN retry_after TEXT"),
+        (
+            "retry_count",
+            "ALTER TABLE queue_items ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "last_error",
+            "ALTER TABLE queue_items ADD COLUMN last_error TEXT NOT NULL DEFAULT ''",
+        ),
+    ),
+    "ad_break_items": (
+        ("retry_after", "ALTER TABLE ad_break_items ADD COLUMN retry_after TEXT"),
+        (
+            "retry_count",
+            "ALTER TABLE ad_break_items ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "last_error",
+            "ALTER TABLE ad_break_items ADD COLUMN last_error TEXT NOT NULL DEFAULT ''",
+        ),
+    ),
+    "schedule_items": (
+        ("retry_after", "ALTER TABLE schedule_items ADD COLUMN retry_after TEXT"),
+        (
+            "retry_count",
+            "ALTER TABLE schedule_items ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "last_error",
+            "ALTER TABLE schedule_items ADD COLUMN last_error TEXT NOT NULL DEFAULT ''",
+        ),
+    ),
+}
 
 _LEGACY_ROLE_TEMPLATE_PERMISSIONS = {
     "Legacy Admin": set(GLOBAL_PERMISSION_KEYS),
@@ -208,7 +243,51 @@ def _post_version_repairs_needed(cur) -> bool:
     }
     if not {"cadence_mode", "repeat_every_songs"}.issubset(plan_columns):
         return True
+    retry_columns = {"retry_after", "retry_count", "last_error"}
+    for table_name in ("queue_items", "ad_break_items", "schedule_items"):
+        cur.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,),
+        )
+        if cur.fetchone() is None:
+            return True
+        columns = {
+            str(row[1])
+            for row in cur.execute(f"PRAGMA table_info({table_name})").fetchall()
+        }
+        if not retry_columns.issubset(columns):
+            return True
     return False
+
+
+def _ensure_retry_columns(cur, table_name: str) -> None:
+    """Add retry metadata under a SQLite write lock, rechecking after lock acquisition."""
+    definitions = _RETRY_COLUMN_DEFINITIONS.get(str(table_name or ""))
+    if definitions is None:
+        raise ValueError("unsupported retry metadata table")
+
+    connection = cur.connection
+    owns_transaction = not connection.in_transaction
+    if owns_transaction:
+        # Another service process may have passed the schema fast-path check at
+        # the same time. Reserve the writer slot before reading table_info so a
+        # second migrator observes the first process's committed schema here.
+        cur.execute("BEGIN IMMEDIATE")
+    try:
+        existing = {
+            str(row[1])
+            for row in cur.execute(f"PRAGMA table_info({table_name})").fetchall()
+        }
+        for column_name, statement in definitions:
+            if column_name not in existing:
+                cur.execute(statement)
+                existing.add(column_name)
+        if owns_transaction:
+            connection.commit()
+    except Exception:
+        if owns_transaction:
+            connection.rollback()
+        raise
 
 
 def _mark_schema_bootstrap_applied(cur) -> None:
@@ -501,16 +580,7 @@ def _migrate_queue_items(cur) -> None:
         cur.execute("ALTER TABLE queue_items ADD COLUMN finished_at TEXT")
     if "dedupe_key" not in existing:
         cur.execute("ALTER TABLE queue_items ADD COLUMN dedupe_key TEXT")
-    if "retry_after" not in existing:
-        cur.execute("ALTER TABLE queue_items ADD COLUMN retry_after TEXT")
-    if "retry_count" not in existing:
-        cur.execute(
-            "ALTER TABLE queue_items ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0"
-        )
-    if "last_error" not in existing:
-        cur.execute(
-            "ALTER TABLE queue_items ADD COLUMN last_error TEXT NOT NULL DEFAULT ''"
-        )
+    _ensure_retry_columns(cur, "queue_items")
     cur.execute("UPDATE queue_items SET status='pending' WHERE status IS NULL")
     cur.execute(
         "UPDATE queue_items SET enqueued_at=CURRENT_TIMESTAMP WHERE enqueued_at IS NULL"
@@ -542,16 +612,7 @@ def _migrate_schedule_items(cur) -> None:
         cur.execute(
             "ALTER TABLE schedule_items ADD COLUMN event_name TEXT NOT NULL DEFAULT ''"
         )
-    if "retry_after" not in existing:
-        cur.execute("ALTER TABLE schedule_items ADD COLUMN retry_after TEXT")
-    if "retry_count" not in existing:
-        cur.execute(
-            "ALTER TABLE schedule_items ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0"
-        )
-    if "last_error" not in existing:
-        cur.execute(
-            "ALTER TABLE schedule_items ADD COLUMN last_error TEXT NOT NULL DEFAULT ''"
-        )
+    _ensure_retry_columns(cur, "schedule_items")
 
 
 def _migrate_broadcast_plans(cur) -> None:
@@ -576,16 +637,7 @@ def _migrate_ad_break_items(cur) -> None:
         cur.execute("ALTER TABLE ad_break_items ADD COLUMN finished_at TEXT")
     if "dedupe_key" not in existing:
         cur.execute("ALTER TABLE ad_break_items ADD COLUMN dedupe_key TEXT")
-    if "retry_after" not in existing:
-        cur.execute("ALTER TABLE ad_break_items ADD COLUMN retry_after TEXT")
-    if "retry_count" not in existing:
-        cur.execute(
-            "ALTER TABLE ad_break_items ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0"
-        )
-    if "last_error" not in existing:
-        cur.execute(
-            "ALTER TABLE ad_break_items ADD COLUMN last_error TEXT NOT NULL DEFAULT ''"
-        )
+    _ensure_retry_columns(cur, "ad_break_items")
 
 
 def _migrate_station_outputs(cur) -> None:
