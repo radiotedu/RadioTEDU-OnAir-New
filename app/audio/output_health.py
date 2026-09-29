@@ -8,6 +8,7 @@ _PCM_BYTES_PER_SECOND = 48_000 * 2 * 2
 _FRESH_WRITE_AGE_SECONDS = 5.0
 _SUSTAINED_BACKPRESSURE_SECONDS = 30.0
 _QUEUE_SATURATION_RATIO = 0.9
+ICECAST_MOUNT_PROBE_STARTUP_GRACE_SECONDS = 45.0
 
 
 def _queue_is_sustained_near_capacity(
@@ -70,6 +71,30 @@ def icecast_mount_has_sustained_saturation(health: dict | None) -> bool:
     )
 
 
+def icecast_mount_probe_is_pending(
+    health: dict | None,
+    *,
+    startup_grace_seconds: float = ICECAST_MOUNT_PROBE_STARTUP_GRACE_SECONDS,
+) -> bool:
+    """Return whether the required mount probe is still inside startup grace.
+
+    A missing probe result is not evidence of delivery.  The grace period only
+    prevents reconnect churn while a newly registered source is becoming
+    available; health callers must continue to report the mount as unverified.
+    """
+
+    mount = dict(health or {})
+    if mount.get("remote_mount_verified") is True:
+        return False
+    if mount.get("mount_healthy") is not None:
+        return False
+    try:
+        age = float(mount.get("mount_probe_age_seconds"))
+    except (TypeError, ValueError):
+        return False
+    return 0.0 <= age < max(0.0, float(startup_grace_seconds))
+
+
 def icecast_mount_transport_is_healthy(
     health: dict | None,
     *,
@@ -77,16 +102,21 @@ def icecast_mount_transport_is_healthy(
     require_process: bool = True,
     sink_running: bool | None = None,
     require_network_writer: bool = True,
+    require_remote_mount_verified: bool = False,
 ) -> bool:
     """Check a mount's writer, freshness, and sustained queue pressure."""
 
     mount = dict(health or {})
     if not mount:
         return False
+    if bool(mount.get("delivery_loss_unrecovered")):
+        return False
     mount_health = mount.get("mount_healthy")
     if mount_health is False:
         return False
     if require_mount_healthy and mount_health is not True:
+        return False
+    if require_remote_mount_verified and mount.get("remote_mount_verified") is not True:
         return False
 
     process_evidence = []

@@ -213,6 +213,10 @@ class ProcessIsolatedStationWorkerManager:
         heartbeat_generation = int(heartbeat.get("generation") or 0)
         if expected_generation and heartbeat_generation != expected_generation:
             return False
+        if heartbeat.get("runtime_status_available") is False:
+            # A fresh file timestamp is not proof of healthy audio when the
+            # liveness thread could only reuse an old runtime snapshot.
+            return False
         if bool(heartbeat.get("scheduler_stalled")) and not bool(
             heartbeat.get("transport_healthy")
         ):

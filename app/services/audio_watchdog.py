@@ -101,8 +101,12 @@ class AudioWatchdogService:
                 settings.setdefault(int(row["station_id"]), {})[str(row["key"])] = str(
                     row["value"] or ""
                 )
-            latest = conn.execute("SELECT id FROM broadcast_campaigns ORDER BY id DESC LIMIT 1").fetchone()
-            campaign_id = int(latest["id"]) if latest is not None else 0
+            # Managed campaign profiles only apply while a campaign is active.
+            # Looking at the latest row regardless of its state kept expired or
+            # disabled profile drift marked unhealthy even though reconciliation
+            # correctly refuses to modify those operator-owned settings.
+            active_campaign = BroadcastCampaignService(conn)._active_campaign()
+            campaign_id = int(active_campaign["id"]) if active_campaign is not None else 0
             profile_rows = conn.execute(
                 "SELECT station_id,genre,managed_folder FROM broadcast_campaign_stations "
                 "WHERE campaign_id=? ORDER BY station_id",

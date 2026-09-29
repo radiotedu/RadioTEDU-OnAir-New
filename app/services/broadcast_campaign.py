@@ -219,7 +219,6 @@ class BroadcastCampaignService:
         station_ids = []
         for row in rows:
             station_id = int(row["station_id"])
-            station_ids.append(station_id)
             settings = {
                 "music_library_folder": str(row["managed_folder"] or ""),
                 "library_management_mode": "replace",
@@ -231,7 +230,21 @@ class BroadcastCampaignService:
                 "library_skip_unplayable": "true",
                 "library_profile_label": f"RadioTEDU {str(row['genre'] or '').strip()} playlist",
             }
-            for key, value in settings.items():
+            current = {
+                str(item["key"]): str(item["value"] or "")
+                for item in self.conn.execute(
+                    "SELECT key,value FROM station_settings WHERE station_id=? "
+                    "AND key IN (?, ?, ?, ?, ?, ?)",
+                    (station_id, *settings.keys()),
+                ).fetchall()
+            }
+            changed_settings = {
+                key: value for key, value in settings.items() if current.get(key) != value
+            }
+            if not changed_settings:
+                continue
+            station_ids.append(station_id)
+            for key, value in changed_settings.items():
                 self.conn.execute(
                     "INSERT INTO station_settings (station_id,key,value,updated_at) "
                     "VALUES (?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(station_id,key) DO UPDATE SET "
@@ -244,11 +257,61 @@ class BroadcastCampaignService:
         active = self._active_campaign()
         if active is None:
             return []
+        campaign_id = int(active["id"])
+        profiles = self.conn.execute(
+            "SELECT station_id FROM broadcast_campaign_stations WHERE campaign_id=? ORDER BY station_id",
+            (campaign_id,),
+        ).fetchall()
+        if {int(row["station_id"]) for row in profiles} != set(CAMPAIGN_STATIONS):
+            raise ValueError("campaign managed profiles are incomplete")
+
+        # Watchdog reconciliation runs every five minutes. Avoid opening a
+        # write transaction at all when the active profile already matches;
+        # station schedulers share this SQLite database with the watchdog.
+        settings_by_station = {
+            int(row["station_id"]): {
+                str(item["key"]): str(item["value"] or "")
+                for item in self.conn.execute(
+                    "SELECT key,value FROM station_settings WHERE station_id=? "
+                    "AND key IN ('music_library_folder','library_management_mode',"
+                    "'library_rescan_interval_seconds','library_recursive',"
+                    "'library_skip_unplayable','library_profile_label')",
+                    (int(row["station_id"]),),
+                ).fetchall()
+            }
+            for row in self.conn.execute(
+                "SELECT station_id FROM broadcast_campaign_stations WHERE campaign_id=?",
+                (campaign_id,),
+            ).fetchall()
+        }
+        expected_settings = {
+            int(row["station_id"]): {
+                "music_library_folder": str(row["managed_folder"] or ""),
+                "library_management_mode": "replace",
+                "library_rescan_interval_seconds": "600",
+                "library_recursive": "true",
+                "library_skip_unplayable": "true",
+                "library_profile_label": f"RadioTEDU {str(row['genre'] or '').strip()} playlist",
+            }
+            for row in self.conn.execute(
+                "SELECT station_id,genre,managed_folder FROM broadcast_campaign_stations "
+                "WHERE campaign_id=?",
+                (campaign_id,),
+            ).fetchall()
+        }
+        if all(
+            all(settings_by_station.get(station_id, {}).get(key) == value for key, value in settings.items())
+            for station_id, settings in expected_settings.items()
+        ):
+            return []
+
         self.conn.execute("BEGIN IMMEDIATE")
         try:
-            station_ids = self._upsert_managed_profile_settings(int(active["id"]))
-            if set(station_ids) != set(CAMPAIGN_STATIONS):
-                raise ValueError("campaign managed profiles are incomplete")
+            current_active = self._active_campaign()
+            if current_active is None or int(current_active["id"]) != campaign_id:
+                self.conn.rollback()
+                return []
+            station_ids = self._upsert_managed_profile_settings(campaign_id)
             self.conn.commit()
             return station_ids
         except Exception:

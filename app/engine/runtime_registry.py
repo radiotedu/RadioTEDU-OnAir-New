@@ -10,7 +10,9 @@ from urllib.request import Request, urlopen
 from app.audio.gst_pipeline import StationPipelineConfig
 from app.audio.metadata_policy import icecast_metadata_outputs
 from app.audio.output_health import (
+    ICECAST_MOUNT_PROBE_STARTUP_GRACE_SECONDS,
     icecast_mount_has_sustained_saturation,
+    icecast_mount_probe_is_pending,
     icecast_mount_transport_is_healthy,
 )
 from app.audio.station_runtime import StationRuntime
@@ -33,7 +35,7 @@ _ICECAST_METADATA_REFRESH_SECONDS = 20.0
 _ICECAST_METADATA_BACKOFF_MAX_SECONDS = 300.0
 _OUTPUT_RECOVERY_DELAYS_SECONDS = (1.0, 2.0, 4.0, 8.0, 15.0, 30.0)
 _OUTPUT_MONITOR_RECHECK_SECONDS = 15.0
-_PRIMARY_OUTPUT_MONITOR_RECHECK_SECONDS = 60.0
+_PRIMARY_OUTPUT_MONITOR_RECHECK_SECONDS = _OUTPUT_MONITOR_RECHECK_SECONDS
 _DEFAULT_LIVE_AUDIO_SETTINGS = {
     "program_music_mode": "normal",
     "mic_gain": 1.0,
@@ -1594,12 +1596,28 @@ class StationRuntimeRegistry:
     @staticmethod
     def _output_failure_confirmed(mount: dict | None) -> bool:
         health = dict(mount or {})
+        if not health:
+            # A required configured mount with no sink health object cannot be
+            # delivering. Branch-local recovery is safe and can create it.
+            return True
         if (
             health.get("mount_healthy") is False
             or bool(health.get("writer_failed"))
             or bool(health.get("network_failed"))
             or icecast_mount_has_sustained_saturation(health)
         ):
+            return True
+        if icecast_mount_probe_is_pending(
+            health,
+            startup_grace_seconds=ICECAST_MOUNT_PROBE_STARTUP_GRACE_SECONDS,
+        ):
+            return False
+        if health.get("process_running") is False:
+            return True
+        if health.get("remote_mount_verified") is not True:
+            # A fresh source-side write is not proof that Icecast returned audio
+            # to a listener. Unknown/missing probe evidence is a failed output
+            # once the bounded startup grace above has expired.
             return True
         for key in ("last_write_age_seconds", "last_network_write_age_seconds"):
             try:
@@ -1863,6 +1881,15 @@ class StationRuntimeRegistry:
         mount = status.get("icecast_mount_health")
         if not isinstance(mount, dict):
             return False
+        if mount.get("mount_healthy") is False:
+            # Repeated body-probe failures are confirmed delivery failures. Do
+            # not let source-side writes mask a listener mount that is silent.
+            return False
+        if mount.get("remote_mount_verified") is not True and not icecast_mount_probe_is_pending(
+            mount,
+            startup_grace_seconds=ICECAST_MOUNT_PROBE_STARTUP_GRACE_SECONDS,
+        ):
+            return False
         if "network_writer_running" in mount:
             # A listener probe miss must not reset a source that is actively
             # writing. Thread liveness alone is insufficient: sendall() can be
@@ -1956,6 +1983,13 @@ class StationRuntimeRegistry:
             for item in status.get("extra_icecast_mounts") or ()
             if isinstance(item, dict) and str(item.get("branch") or "")
         }
+        mount_protocols = {
+            str(item.get("branch") or ""): str(
+                item.get("source_protocol") or "icecast"
+            ).strip().lower()
+            for item in status.get("extra_icecast_mounts") or ()
+            if isinstance(item, dict) and str(item.get("branch") or "")
+        }
 
         def branch_is_healthy(branch: str) -> bool:
             branch_health = branches.get(
@@ -1971,11 +2005,24 @@ class StationRuntimeRegistry:
             if branch == "icecast":
                 mount = status.get("icecast_mount_health")
                 if isinstance(mount, dict):
-                    return icecast_mount_transport_is_healthy(mount)
+                    return icecast_mount_transport_is_healthy(
+                        mount,
+                        require_remote_mount_verified=(
+                            str(status.get("source_protocol") or "icecast")
+                            .strip()
+                            .lower()
+                            == "icecast"
+                        ),
+                    )
             elif branch.startswith("icecast:"):
                 mount = mounts.get(branch)
                 if mount:
-                    return icecast_mount_transport_is_healthy(mount)
+                    return icecast_mount_transport_is_healthy(
+                        mount,
+                        require_remote_mount_verified=(
+                            mount_protocols.get(branch, "icecast") == "icecast"
+                        ),
+                    )
             return True
 
         return all(branch_is_healthy(branch) for branch in required_branches)

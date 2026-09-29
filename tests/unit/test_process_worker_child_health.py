@@ -1,9 +1,17 @@
-from app.engine.process_worker_child import _transport_is_healthy
+import json
+
+from app.engine.process_worker_child import (
+    _runtime_status_for_liveness,
+    _transport_health_for_liveness,
+    _transport_is_healthy,
+    _write_heartbeat,
+)
 
 
 def _healthy_mount(*, process_running=None):
     health = {
         "mount_healthy": True,
+        "remote_mount_verified": True,
         "writer_running": True,
         "writer_failed": False,
         "last_write_age_seconds": 0.1,
@@ -114,3 +122,49 @@ def test_transport_is_unhealthy_when_secondary_mount_queue_stays_saturated():
     )
 
     assert _transport_is_healthy(status) is False
+
+
+def test_transport_requires_successful_probe_for_every_required_icecast_mount():
+    status = _healthy_required_outputs_status()
+    status["icecast_mount_health"]["remote_mount_verified"] = False
+
+    assert _transport_is_healthy(status) is False
+
+    status = _healthy_required_outputs_status()
+    status["extra_icecast_mounts"][0]["health"]["remote_mount_verified"] = False
+
+    assert _transport_is_healthy(status) is False
+
+
+def test_liveness_status_read_failure_fails_closed_and_persists_diagnostic(tmp_path):
+    last_status = _healthy_required_outputs_status()
+
+    class BrokenRuntimeRegistry:
+        def status(self, _station_id):
+            raise RuntimeError("status_lock_unavailable")
+
+    status, available, error = _runtime_status_for_liveness(
+        BrokenRuntimeRegistry(), 5, last_status
+    )
+    transport_healthy = _transport_health_for_liveness(status, available)
+    assert status == last_status
+    assert available is False
+    assert error == "RuntimeError"
+    assert transport_healthy is False
+
+    heartbeat_path = tmp_path / "worker.heartbeat.json"
+    _write_heartbeat(
+        {"heartbeat_path": str(heartbeat_path), "station_id": 5},
+        {
+            "runtime_status_available": available,
+            "runtime_status_error": error,
+            "transport_healthy": transport_healthy,
+        },
+        runtime_status=status,
+        running=True,
+    )
+
+    heartbeat = json.loads(heartbeat_path.read_text(encoding="utf-8"))
+    assert heartbeat["runtime_status_available"] is False
+    assert heartbeat["runtime_status_error"] == "RuntimeError"
+    assert heartbeat["transport_healthy"] is False

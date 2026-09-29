@@ -179,12 +179,13 @@ def test_ad_is_not_completed_from_duration_while_its_source_is_still_playing():
     assert done == []
 
 
-def test_ad_completes_after_clean_eof_even_when_database_duration_is_longer():
+def test_ad_completes_at_clean_eof_while_sink_fifo_drains():
     worker, done = _worker_with_playing_ad(
         runtime_status={
             "running": True,
             "program_running": False,
             "producer_eof": True,
+            "producer_draining": True,
             "active_input_uri": "E:/Ads/PowerAPP.mp3",
         }
     )
@@ -380,6 +381,22 @@ def test_host_item_stays_owned_while_encoder_input_fifos_drain():
 
     assert worker._advance_host_track() is False
     assert popped == []
+    assert started == []
+
+
+def test_host_item_releases_at_clean_eof_while_encoder_input_fifos_drain():
+    worker, started, popped = _host_worker(
+        {
+            "running": True,
+            "program_running": False,
+            "producer_eof": True,
+            "producer_draining": True,
+            "active_input_uri": "E:/Host/show.mp3",
+        }
+    )
+
+    assert worker._advance_host_track() is True
+    assert popped == [19]
     assert started == []
 
 

@@ -208,6 +208,10 @@ def _write_heartbeat(
         "pid": os.getpid(),
         "running": bool(running),
         "runtime_status": dict(runtime_status or {}),
+        "runtime_status_available": bool(
+            payload.get("runtime_status_available", True)
+        ),
+        "runtime_status_error": str(payload.get("runtime_status_error") or "")[:80],
         "scheduler_progress_epoch": float(
             payload.get("scheduler_progress_epoch") or time.time()
         ),
@@ -232,13 +236,14 @@ def _icecast_mount_transport_healthy(
     *,
     sink_running: bool | None = None,
     require_process: bool = True,
+    require_remote_mount_verified: bool = True,
 ) -> bool:
     """Require a live writer and recent local/network writes for one mount."""
 
     mount = dict(health or {})
     return icecast_mount_transport_is_healthy(
         mount,
-        require_mount_healthy=False,
+        require_mount_healthy=True,
         sink_running=sink_running,
         require_process=require_process,
         # Older worker snapshots exposed network-write ages before they exposed
@@ -246,6 +251,7 @@ def _icecast_mount_transport_healthy(
         # snapshots when their write timestamps are fresh; current snapshots
         # still require the explicit writer-liveness evidence.
         require_network_writer="network_writer_running" in mount,
+        require_remote_mount_verified=require_remote_mount_verified,
     )
 
 
@@ -273,6 +279,13 @@ def _transport_is_healthy(runtime_status: dict | None) -> bool:
     branches = dict(status.get("branch_health") or {})
     extra_mounts = {
         str(item.get("branch") or ""): dict(item.get("health") or {})
+        for item in status.get("extra_icecast_mounts") or ()
+        if isinstance(item, dict) and str(item.get("branch") or "")
+    }
+    extra_protocols = {
+        str(item.get("branch") or ""): str(
+            item.get("source_protocol") or "icecast"
+        ).strip().lower()
         for item in status.get("extra_icecast_mounts") or ()
         if isinstance(item, dict) and str(item.get("branch") or "")
     }
@@ -312,6 +325,12 @@ def _transport_is_healthy(runtime_status: dict | None) -> bool:
             if not _icecast_mount_transport_healthy(
                 primary_health,
                 sink_running=status.get("icecast_sink_running"),
+                require_remote_mount_verified=(
+                    str(status.get("source_protocol") or "icecast")
+                    .strip()
+                    .lower()
+                    == "icecast"
+                ),
             ):
                 return False
         elif branch == "local":
@@ -321,7 +340,11 @@ def _transport_is_healthy(runtime_status: dict | None) -> bool:
             mount_health = extra_mounts.get(branch)
             if mount_health is not None:
                 if not _icecast_mount_transport_healthy(
-                    mount_health, require_process=False
+                    mount_health,
+                    require_process=False,
+                    require_remote_mount_verified=(
+                        extra_protocols.get(branch, "icecast") == "icecast"
+                    ),
                 ):
                     return False
             elif branch not in delivery or not bool(delivery[branch]):
@@ -340,6 +363,25 @@ def _read_json(path: Path) -> dict:
         return dict(payload) if isinstance(payload, dict) else {}
     except (OSError, ValueError, TypeError):
         return {}
+
+
+def _runtime_status_for_liveness(
+    runtime_registry, station_id: int, last_status: dict
+) -> tuple[dict, bool, str]:
+    """Read current health without upgrading a stale snapshot to green."""
+
+    try:
+        return dict(runtime_registry.status(station_id) or {}), True, ""
+    except Exception as exc:
+        return dict(last_status or {}), False, type(exc).__name__
+
+
+def _transport_health_for_liveness(
+    runtime_status: dict | None, status_available: bool
+) -> bool:
+    """Only report transport healthy when the underlying snapshot is current."""
+
+    return bool(status_available and _transport_is_healthy(runtime_status))
 
 
 def _process_runtime_command(
@@ -564,16 +606,21 @@ def run_station_worker_process() -> int:
                 payload = dict(heartbeat_state["payload"])
                 last_status = dict(heartbeat_state["runtime_status"])
                 progress_epoch = float(heartbeat_state["scheduler_progress_epoch"])
-            try:
-                current_status = runtime_registry.status(station_id)
-            except Exception:
-                current_status = last_status
+            current_status, status_available, status_error = (
+                _runtime_status_for_liveness(
+                    runtime_registry, station_id, last_status
+                )
+            )
             scheduler_age = max(0.0, time.time() - progress_epoch)
             payload["event"] = "liveness"
             payload["scheduler_progress_epoch"] = progress_epoch
             payload["scheduler_tick_age_seconds"] = round(scheduler_age, 3)
             payload["scheduler_stalled"] = scheduler_age >= 60.0
-            payload["transport_healthy"] = _transport_is_healthy(current_status)
+            payload["runtime_status_available"] = status_available
+            payload["runtime_status_error"] = status_error
+            payload["transport_healthy"] = _transport_health_for_liveness(
+                current_status, status_available
+            )
             try:
                 with heartbeat_write_lock:
                     _write_heartbeat(

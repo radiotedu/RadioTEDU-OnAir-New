@@ -129,9 +129,9 @@ class _FlowingUnverifiedRuntime(_RecoveringRuntime):
             "program_pcm_stalled": False,
             "output_feed_active": False,
             "branch_health": self.branch_health(),
-            "icecast_mount_health": {
-                "process_running": True,
-                "mount_healthy": False,
+                "icecast_mount_health": {
+                    "process_running": True,
+                    "mount_healthy": False,
                 "writer_running": True,
                 "writer_failed": False,
                 "writer_backpressured": False,
@@ -349,7 +349,17 @@ def test_registry_waits_for_initial_branch_probe_before_recovery():
                 "delivery_health": {"icecast": True, branch: False},
                 "icecast_mount_health": {"mount_healthy": True},
                 "extra_icecast_mounts": [
-                    {"branch": branch, "health": {"mount_healthy": None}}
+                    {
+                        "branch": branch,
+                        "health": {
+                            "process_running": True,
+                            "writer_running": True,
+                            "network_writer_running": True,
+                            "mount_healthy": None,
+                            "remote_mount_verified": False,
+                            "mount_probe_age_seconds": 1.0,
+                        },
+                    }
                 ],
             }
 
@@ -366,6 +376,121 @@ def test_registry_waits_for_initial_branch_probe_before_recovery():
 
     assert runtime.calls == []
     assert reg._branch_recovery_state[(5, branch)]["error_code"] == "output_unverified"
+
+
+def test_registry_recovers_required_primary_sink_that_never_started():
+    class MissingPrimaryRuntime:
+        def __init__(self):
+            self.calls = 0
+
+        def status(self):
+            return {
+                "running": False,
+                "program_running": True,
+                "branch_health": {"icecast": False},
+                "delivery_health": {"icecast": False},
+                "icecast_sink_running": False,
+                "icecast_mount_health": {
+                    "process_running": False,
+                    "mount_healthy": None,
+                    "remote_mount_verified": False,
+                },
+            }
+
+        def recover_primary_output(self):
+            self.calls += 1
+
+    runtime = MissingPrimaryRuntime()
+    reg = StationRuntimeRegistry()
+    reg._runtimes[5] = runtime
+    reg._required_outputs[5] = {"icecast": True, "local": False}
+    reg.status = lambda _station_id: runtime.status()
+
+    reg.recover_station_primary_output(5)
+
+    assert runtime.calls == 1
+
+
+def test_registry_waits_for_primary_body_probe_during_startup_grace():
+    class PendingPrimaryRuntime:
+        def __init__(self):
+            self.calls = 0
+
+        def status(self):
+            return {
+                "running": True,
+                "program_running": True,
+                "branch_health": {"icecast": True},
+                "delivery_health": {"icecast": False},
+                "icecast_sink_running": True,
+                "icecast_mount_health": {
+                    "process_running": True,
+                    "writer_running": True,
+                    "network_writer_running": True,
+                    "mount_healthy": None,
+                    "remote_mount_verified": False,
+                    "mount_probe_age_seconds": 1.0,
+                    "last_write_age_seconds": 0.1,
+                    "last_network_write_age_seconds": 0.1,
+                },
+            }
+
+        def recover_primary_output(self):
+            self.calls += 1
+
+    runtime = PendingPrimaryRuntime()
+    reg = StationRuntimeRegistry()
+    reg._runtimes[5] = runtime
+    reg._required_outputs[5] = {"icecast": True, "local": False}
+    reg.status = lambda _station_id: runtime.status()
+
+    reg.recover_station_primary_output(5)
+
+    assert runtime.calls == 0
+    assert reg._recovery_state[5]["error_code"] == "output_unverified"
+
+
+def test_registry_recovers_required_extra_sink_that_never_started():
+    branch = "icecast:/missing-extra"
+
+    class MissingExtraRuntime:
+        def __init__(self):
+            self.calls = []
+
+        def status(self):
+            return {
+                "running": True,
+                "branch_health": {"icecast": True, branch: False},
+                "delivery_health": {"icecast": True, branch: False},
+                "icecast_mount_health": {
+                    "process_running": True,
+                    "mount_healthy": True,
+                    "remote_mount_verified": True,
+                },
+                "extra_icecast_mounts": [
+                    {
+                        "branch": branch,
+                        "health": {
+                            "process_running": False,
+                            "mount_healthy": None,
+                            "remote_mount_verified": False,
+                        },
+                    }
+                ],
+            }
+
+        def recover_output_branch(self, output_branch):
+            self.calls.append(output_branch)
+
+    runtime = MissingExtraRuntime()
+    reg = StationRuntimeRegistry()
+    reg._runtimes[5] = runtime
+    reg._required_outputs[5] = {"icecast": True, branch: True}
+    reg.status = lambda _station_id: runtime.status()
+
+    reg.recover_station_output(5, branch)
+
+    assert runtime.calls == [branch]
 
 
 def test_registry_recovery_uses_bounded_retry_wait(tmp_path, monkeypatch):

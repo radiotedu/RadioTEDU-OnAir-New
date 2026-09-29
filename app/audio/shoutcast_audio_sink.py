@@ -141,6 +141,10 @@ class ShoutcastAudioSink:
         self._writer_failed = False
         self._writer_backpressured = False
         self._dropped_pcm_chunks = 0
+        self._delivery_loss_unrecovered = False
+        self._loss_connection_epoch = None
+        self._connection_epoch = 0
+        self._writer_pending_chunk = None
         self._encoded_bytes_sent = 0
         self._last_pcm_write_monotonic = None
         self._last_network_write_monotonic = None
@@ -178,16 +182,37 @@ class ShoutcastAudioSink:
         return bool(self.is_running() and self.stdin is not None)
 
     def write_pcm(self, chunk: bytes) -> bool:
-        if not chunk or not self.accepts_input():
+        if not chunk:
+            return False
+        if not self.accepts_input():
+            self._record_pcm_loss()
             return False
         try:
             self._pcm_queue.put_nowait(bytes(chunk))
         except queue.Full:
-            with self._lock:
-                self._writer_backpressured = True
-                self._dropped_pcm_chunks += 1
+            self._record_pcm_loss()
             return False
         return True
+
+    def _record_pcm_loss(self) -> None:
+        """Keep a dropped frame visible until a replacement connection sends."""
+        with self._lock:
+            self._writer_backpressured = True
+            self._dropped_pcm_chunks += 1
+            self._delivery_loss_unrecovered = True
+            self._loss_connection_epoch = self._connection_epoch
+
+    def _record_network_delivery(self, byte_count: int, connection_epoch: int) -> None:
+        with self._lock:
+            self._encoded_bytes_sent += int(byte_count)
+            self._last_network_write_monotonic = time.monotonic()
+            if (
+                self._delivery_loss_unrecovered
+                and self._loss_connection_epoch is not None
+                and int(connection_epoch) > int(self._loss_connection_epoch)
+            ):
+                self._delivery_loss_unrecovered = False
+                self._loss_connection_epoch = None
 
     def health_snapshot(self) -> dict:
         now = time.monotonic()
@@ -207,12 +232,22 @@ class ShoutcastAudioSink:
                 and not self._network_failed
                 and self._encoded_bytes_sent > 0
             )
+            mount_healthy = bool(
+                connection_healthy and not self._delivery_loss_unrecovered
+            )
             return {
                 "process_running": bool(
                     self._process and self._process.poll() is None
                 ),
-                "mount_healthy": connection_healthy,
+                "mount_healthy": mount_healthy,
+                # Shoutcast verifies the source handshake and accepted encoded
+                # payload. Icecast body-probe requirements are applied only
+                # when the configured source protocol is Icecast.
+                "remote_mount_verified": connection_healthy,
                 "connection_healthy": connection_healthy,
+                "delivery_loss_unrecovered": bool(
+                    self._delivery_loss_unrecovered
+                ),
                 "handshake_accepted": bool(self._handshake_accepted),
                 "consecutive_probe_failures": int(self._network_failed),
                 "writer_running": bool(
@@ -253,16 +288,22 @@ class ShoutcastAudioSink:
             except Exception:
                 pass
 
-    def _start_threads(self) -> None:
+    def _start_threads(self, *, preserve_pcm: bool = False) -> None:
         self._stop_event.clear()
-        self._clear_queue()
+        if not preserve_pcm:
+            self._clear_queue()
+            self._writer_pending_chunk = None
+        connection_epoch = self._connection_epoch
 
         def write_pcm() -> None:
             while not self._stop_event.is_set():
-                try:
-                    chunk = self._pcm_queue.get(timeout=0.2)
-                except queue.Empty:
-                    continue
+                chunk = self._writer_pending_chunk
+                if chunk is None:
+                    try:
+                        chunk = self._pcm_queue.get(timeout=0.2)
+                    except queue.Empty:
+                        continue
+                    self._writer_pending_chunk = chunk
                 stdin = self.stdin
                 if stdin is None or not self.is_running():
                     continue
@@ -275,9 +316,11 @@ class ShoutcastAudioSink:
                         self._writer_failed = False
                         self._writer_backpressured = False
                         self._last_pcm_write_monotonic = time.monotonic()
+                    self._writer_pending_chunk = None
                 except Exception:
                     with self._lock:
                         self._writer_failed = True
+                    self._writer_pending_chunk = chunk
                     self._fail_network()
                     return
 
@@ -296,9 +339,7 @@ class ShoutcastAudioSink:
                         return
                     source_socket.settimeout(self._write_timeout_sec)
                     source_socket.sendall(chunk)
-                    with self._lock:
-                        self._encoded_bytes_sent += len(chunk)
-                        self._last_network_write_monotonic = time.monotonic()
+                    self._record_network_delivery(len(chunk), connection_epoch)
                 except (OSError, TimeoutError):
                     self._fail_network()
                     return
@@ -322,14 +363,10 @@ class ShoutcastAudioSink:
         *,
         preserve_pcm: bool = False,
     ):
-        # Shoutcast writes directly to its encoder pipe and has no PCM FIFO to
-        # preserve. Keep the shared sink API compatible so station recovery can
-        # request preservation without failing on protocol-specific outputs.
-        del preserve_pcm
         signature = self._cfg_signature(cfg)
         if self.is_running() and self._signature == signature:
             return self._process
-        self.stop()
+        self.stop(preserve_pcm=preserve_pcm)
         host = str(cfg.icecast_host or "").strip()
         port = int(cfg.icecast_port or 0)
         if not host or not 1 <= port <= 65535:
@@ -362,15 +399,15 @@ class ShoutcastAudioSink:
             self._process = process
             self._signature = signature
             with self._lock:
+                self._connection_epoch += 1
                 self._handshake_accepted = True
                 self._network_failed = False
                 self._writer_failed = False
                 self._writer_backpressured = False
-                self._dropped_pcm_chunks = 0
                 self._encoded_bytes_sent = 0
                 self._last_pcm_write_monotonic = None
                 self._last_network_write_monotonic = None
-            self._start_threads()
+            self._start_threads(preserve_pcm=preserve_pcm)
             _log.info(
                 "Started SHOUTcast legacy source host=%s port=%s profile=%s",
                 host,
@@ -394,7 +431,6 @@ class ShoutcastAudioSink:
         preserve_pcm: bool = False,
     ) -> None:
         del preserve_probe_state
-        del preserve_pcm
         self._stop_event.set()
         source_socket = self._socket
         self._socket = None
@@ -432,7 +468,9 @@ class ShoutcastAudioSink:
                 thread.join(timeout=3)
         self._writer_thread = None
         self._network_thread = None
-        self._clear_queue()
+        if not preserve_pcm:
+            self._clear_queue()
+            self._writer_pending_chunk = None
         with self._lock:
             self._handshake_accepted = False
             self._network_failed = False

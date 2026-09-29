@@ -1108,9 +1108,6 @@ class StationWorker:
             )
             return False
 
-        if self._runtime_source_is_draining(rt_status, track_uri):
-            return False
-
         if self._runtime_source_finished_naturally(rt_status, track_uri):
             # Only a clean EOF for this exact source consumes a host item.
             self.program_queue_repo.pop_item(item_id)
@@ -1118,6 +1115,13 @@ class StationWorker:
             self._set_playout_state("none", None, reason="host_track_complete")
             self._broadcast_worker_state(include_queue=True)
             return True
+
+        # Keep ownership while an incomplete source is still draining. A clean
+        # EOF above already queued the complete audio into the persistent sink;
+        # allowing the successor to append now lets it follow the tail without
+        # waiting through an idle interval after the FIFO empties.
+        if self._runtime_source_is_draining(rt_status, track_uri):
+            return False
 
         if self._runtime_playback_matches(rt_status, track_uri):
             self._clear_host_retry(item_id)
@@ -1746,8 +1750,6 @@ class StationWorker:
                     exc_info=True,
                 )
                 return False
-            if self._runtime_source_is_draining(runtime_status, track_uri):
-                return False
             if self._runtime_source_finished_naturally(runtime_status, track_uri):
                 item_id = int(self._row_value(playing, "id", 0) or 0)
                 self.ad_repo.mark_done(item_id)
@@ -1756,6 +1758,8 @@ class StationWorker:
                 self._set_playout_state("none", None, reason="ad_complete")
                 self._broadcast_worker_state(include_track=True)
                 return True
+            if self._runtime_source_is_draining(runtime_status, track_uri):
+                return False
 
         if duration > 0 and elapsed < duration:
             if elapsed >= 2.0:
@@ -1813,17 +1817,18 @@ class StationWorker:
             )
             return True
 
-        if self._runtime_source_is_draining(status, track_uri):
-            return True
-
         if self._runtime_source_finished_naturally(status, track_uri):
             # The complete decoded programme is already behind the current
             # frames in each sink's FIFO. Mark it done and let the next source
-            # append after that tail instead of timing it from database start.
+            # append after that tail instead of waiting for FIFO drain or
+            # timing it from database start.
             self.schedule_repo.mark_done(item_id)
             self._set_playout_state("none", None, reason="schedule_complete")
             self._broadcast_worker_state(include_queue=True, include_track=True)
             return False
+
+        if self._runtime_source_is_draining(status, track_uri):
+            return True
 
         if self._runtime_playback_alive(status) and self._runtime_playback_matches(
             status, track_uri

@@ -35,6 +35,7 @@ class _FakePipe:
     def __init__(self):
         self.closed = False
         self.writes = []
+        self.peek_data = bytes(4096)
 
     def close(self):
         self.closed = True
@@ -46,6 +47,9 @@ class _FakePipe:
 
     def read(self, _size=-1):
         return b""
+
+    def peek(self, size=-1):
+        return self.peek_data if size < 0 else self.peek_data[:size]
 
     def flush(self):
         return None
@@ -1060,6 +1064,39 @@ def test_runtime_defers_failed_transition_without_killing_current_source(monkeyp
     assert "-filter_complex" in launched[1]
     assert procs[0].terminated is False
     assert runtime.is_running() is True
+    assert runtime._last_transition_mode == "deferred"
+
+
+def test_runtime_defers_crossfade_until_decoder_has_buffered_pcm(monkeypatch):
+    _allow_fake_transition_paths(monkeypatch)
+    monkeypatch.setattr(runtime_module, "_CROSSFADE_PREWARM_SECONDS", 0.03)
+    procs = [_FakeProcess(), _FakeProcess()]
+    procs[1].stdout.peek_data = bytes(runtime_module._LIVE_MIX_CHUNK_BYTES - 1)
+
+    runtime = StationRuntime(process_factory=lambda *_args, **_kwargs: procs.pop(0))
+    runtime.ffmpeg_bin = "ffmpeg.exe"
+    runtime.start(
+        _make_cfg(
+            input_uri="C:/music/a.mp3",
+            track_type="music",
+            crossfade_seconds=3.0,
+            local_output_enabled=False,
+        )
+    )
+    current_process = runtime._process
+
+    with pytest.raises(RuntimeError, match="crossfade deferred"):
+        runtime.start(
+            _make_cfg(
+                input_uri="C:/music/b.mp3",
+                track_type="music",
+                crossfade_seconds=3.0,
+                local_output_enabled=False,
+            )
+        )
+
+    assert current_process is not None
+    assert current_process.terminated is False
     assert runtime._last_transition_mode == "deferred"
 
 

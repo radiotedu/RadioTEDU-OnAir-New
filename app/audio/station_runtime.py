@@ -2052,13 +2052,7 @@ class StationRuntime:
                     subprocess.PIPE,
                     buffered=False,
                 )
-                deadline = time.monotonic() + _CROSSFADE_PREWARM_SECONDS
-                while time.monotonic() < deadline:
-                    if new_process.poll() is not None:
-                        raise RuntimeError("crossfade decoder failed during prewarm")
-                    time.sleep(0.01)
-                if new_process.poll() is not None:
-                    raise RuntimeError("crossfade decoder failed during prewarm")
+                self._wait_for_crossfade_pcm(new_process)
 
             handoff_started = True
             self._terminate_process(current_local_process)
@@ -2129,6 +2123,58 @@ class StationRuntime:
             self._router.set_branch_health("icecast", False)
             self._router.set_branch_health("local", False)
             raise
+
+    @staticmethod
+    def _wait_for_crossfade_pcm(process) -> None:
+        """Require decoded PCM to be buffered before retiring the live source.
+
+        A running FFmpeg process can still be initializing or stalled before
+        its first decoded frame. ``peek`` verifies the output pipe contains
+        decoded PCM without consuming it, so the normal pipe worker can deliver
+        those bytes after the hand-off.
+        """
+        stdout = getattr(process, "stdout", None)
+        peek = getattr(stdout, "peek", None)
+        if not callable(peek):
+            raise RuntimeError("crossfade decoder output unavailable during prewarm")
+
+        deadline = time.monotonic() + _CROSSFADE_PREWARM_SECONDS
+        while True:
+            if process.poll() is not None:
+                raise RuntimeError("crossfade decoder exited before producing PCM")
+            peek_done = threading.Event()
+            peek_result = {}
+
+            def inspect_output() -> None:
+                try:
+                    peek_result["buffered"] = peek(_LIVE_MIX_CHUNK_BYTES)
+                except Exception as exc:
+                    peek_result["error"] = exc
+                finally:
+                    peek_done.set()
+
+            threading.Thread(
+                target=inspect_output,
+                name="crossfade-pcm-prewarm",
+                daemon=True,
+            ).start()
+            remaining = max(0.0, deadline - time.monotonic())
+            if not peek_done.wait(remaining):
+                raise RuntimeError("crossfade decoder produced no PCM during prewarm")
+            if "error" in peek_result:
+                raise RuntimeError(
+                    "crossfade decoder output failed during prewarm"
+                ) from peek_result["error"]
+            buffered = peek_result.get("buffered")
+            if len(buffered or b"") >= _LIVE_MIX_CHUNK_BYTES:
+                if process.poll() is not None:
+                    raise RuntimeError(
+                        "crossfade decoder exited before hand-off"
+                    )
+                return
+            if time.monotonic() >= deadline:
+                raise RuntimeError("crossfade decoder produced no PCM during prewarm")
+            time.sleep(0.01)
 
     def start(
         self,
@@ -2560,6 +2606,9 @@ class StationRuntime:
                 {
                     "branch": branch,
                     "mount": output_cfg.icecast_mount,
+                    "source_protocol": str(
+                        output_cfg.source_protocol or "icecast"
+                    ).strip().lower(),
                     "codec_profile": output_cfg.stream_codec_profile,
                     "bitrate_kbps": int(output_cfg.stream_bitrate_kbps),
                     "running": bool(sink and sink.is_running()),
@@ -2574,7 +2623,16 @@ class StationRuntime:
         delivery_health["icecast"] = bool(
             branch_health.get("icecast")
             and icecast_mount_transport_is_healthy(
-                icecast_mount_health, require_mount_healthy=False
+                icecast_mount_health,
+                require_mount_healthy=True,
+                require_remote_mount_verified=(
+                    str(
+                        getattr(self._active_cfg, "source_protocol", "icecast")
+                        if self._active_cfg is not None
+                        else "icecast"
+                    ).strip().lower()
+                    == "icecast"
+                ),
             )
         )
         for item in extra_icecast_mounts:
@@ -2583,7 +2641,14 @@ class StationRuntime:
                 delivery_health[branch] = bool(
                     branch_health.get(branch)
                     and icecast_mount_transport_is_healthy(
-                        item.get("health"), require_mount_healthy=False
+                        item.get("health"),
+                        require_mount_healthy=True,
+                        require_remote_mount_verified=(
+                            str(item.get("source_protocol") or "icecast")
+                            .strip()
+                            .lower()
+                            == "icecast"
+                        ),
                     )
                 )
         producer_exit_current = (

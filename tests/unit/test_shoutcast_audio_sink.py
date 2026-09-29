@@ -1,9 +1,11 @@
+import queue
 import time
 
 import pytest
 
 from app.audio.ffmpeg_pipeline import build_ffmpeg_encoded_sink_cmd
 from app.audio.gst_pipeline import StationPipelineConfig
+from app.audio.output_health import icecast_mount_transport_is_healthy
 from app.audio.shoutcast_audio_sink import (
     ShoutcastAudioSink,
     ShoutcastProtocolError,
@@ -151,6 +153,91 @@ def test_encoded_sink_command_contains_no_destination_or_credential():
     assert "test-source-password" not in rendered
     assert "127.0.0.1" not in rendered
     assert "8001" not in rendered
+
+
+def test_preserved_stop_and_restart_keep_queued_and_inflight_pcm(monkeypatch):
+    source_socket = FakeSocket()
+    process = FakeProcess(encoded_reads=(b"",))
+    sink = ShoutcastAudioSink(
+        "ffmpeg.exe",
+        lambda *args, **kwargs: process,
+        socket_factory=lambda *args, **kwargs: source_socket,
+    )
+    sink._pcm_queue.put_nowait(b"queued-programme-pcm")
+    sink._writer_pending_chunk = b"inflight-programme-pcm"
+    started_with_preserved_pcm = []
+    monkeypatch.setattr(
+        sink,
+        "_start_threads",
+        lambda *, preserve_pcm=False: started_with_preserved_pcm.append(
+            preserve_pcm
+        ),
+    )
+
+    try:
+        sink.stop(preserve_pcm=True)
+        assert sink._pcm_queue.get_nowait() == b"queued-programme-pcm"
+        sink._pcm_queue.put_nowait(b"queued-programme-pcm")
+
+        sink.ensure_started(_config(), preserve_pcm=True)
+
+        assert started_with_preserved_pcm == [True]
+        assert sink._writer_pending_chunk == b"inflight-programme-pcm"
+        assert sink._pcm_queue.get_nowait() == b"queued-programme-pcm"
+    finally:
+        sink.stop()
+
+    assert sink._pcm_queue.empty()
+    assert sink._writer_pending_chunk is None
+
+
+def test_queue_overflow_stays_unhealthy_until_a_recovery_connection_delivers():
+    sink = ShoutcastAudioSink("ffmpeg.exe", lambda *args, **kwargs: None)
+    sink._pcm_queue = queue.Queue(maxsize=1)
+    sink._pcm_queue.put_nowait(b"accepted-before-overflow")
+    sink._process = FakeProcess()
+    sink._socket = FakeSocket()
+    sink._handshake_accepted = True
+    sink._encoded_bytes_sent = 1
+
+    assert sink.write_pcm(b"dropped-on-overflow") is False
+    health = sink.health_snapshot()
+    assert health["dropped_pcm_chunks"] == 1
+    assert health["delivery_loss_unrecovered"] is True
+    assert health["mount_healthy"] is False
+    assert not icecast_mount_transport_is_healthy(health)
+
+    # Bytes from the connection on which loss happened are not recovery proof.
+    sink._record_network_delivery(10, sink._connection_epoch)
+    assert sink.health_snapshot()["delivery_loss_unrecovered"] is True
+
+    # A replacement connection must send encoded audio before health clears.
+    sink._connection_epoch += 1
+    sink._encoded_bytes_sent = 0
+    sink._record_network_delivery(10, sink._connection_epoch)
+    recovered = sink.health_snapshot()
+    assert recovered["delivery_loss_unrecovered"] is False
+    assert recovered["dropped_pcm_chunks"] == 1
+    assert recovered["mount_healthy"] is True
+
+
+def test_shared_transport_health_rejects_unrecovered_pcm_loss():
+    healthy_transport = {
+        "mount_healthy": True,
+        "process_running": True,
+        "writer_running": True,
+        "network_writer_running": True,
+        "writer_failed": False,
+        "network_failed": False,
+        "last_write_age_seconds": 0.0,
+        "last_network_write_age_seconds": 0.0,
+        "delivery_loss_unrecovered": True,
+    }
+
+    assert not icecast_mount_transport_is_healthy(healthy_transport)
+
+    healthy_transport["delivery_loss_unrecovered"] = False
+    assert icecast_mount_transport_is_healthy(healthy_transport)
 
 
 def test_half_open_source_marks_network_failed_and_stops_encoder():

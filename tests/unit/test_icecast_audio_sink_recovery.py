@@ -1,5 +1,6 @@
 import queue
 import threading
+import time
 from types import SimpleNamespace
 
 import app.audio.icecast_audio_sink as sink_module
@@ -115,6 +116,17 @@ def test_mount_probe_rejects_a_partial_audio_canary(monkeypatch):
     )
 
     assert sink_module.probe_icecast_mount(cfg) is False
+
+
+def test_mount_probe_health_exposes_unverified_startup_age():
+    sink = IcecastAudioSink("ffmpeg", lambda *_args, **_kwargs: None)
+    sink._mount_probe = lambda _cfg: True
+    sink._mount_probe_started_monotonic = time.monotonic() - 2.0
+
+    health = sink.health_snapshot()
+
+    assert health["remote_mount_verified"] is False
+    assert 1.0 <= health["mount_probe_age_seconds"] <= 3.0
 
 
 def test_output_recovery_preserves_queued_and_inflight_pcm():

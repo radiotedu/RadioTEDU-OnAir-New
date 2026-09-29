@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pytest
 
+from app.db import get_connection, init_db
+from app.services.broadcast_campaign import BroadcastCampaignService, iso_timestamp, utc_now
 from app.services.audio_watchdog import AudioWatchdogService, WATCHDOG_STATIONS
 
 
@@ -10,6 +14,34 @@ def test_snapshot_and_repair_allow_maincharacter_mount():
         "maincharacter",
         "http://stream.radiotedu.com:11154/maincharacter",
     )
+
+
+def test_snapshot_ignores_disabled_campaign_profiles(monkeypatch):
+    init_db()
+    conn = get_connection()
+    for station_id, name in ((1, "Classical"), (4, "Pop"), (8, "Rock"), (9, "Energize")):
+        conn.execute("INSERT OR IGNORE INTO stations (id,name) VALUES (?,?)", (station_id, name))
+    conn.commit()
+    now = utc_now()
+    BroadcastCampaignService(conn).save_campaign(
+        name="Disabled managed profile test",
+        starts_at=iso_timestamp(now - timedelta(minutes=1)),
+        ends_at=iso_timestamp(now + timedelta(days=1)),
+        enabled=True,
+        voting_enabled=False,
+        ai_enabled=False,
+    )
+    conn.execute("UPDATE broadcast_campaigns SET enabled=0")
+    conn.commit()
+    conn.close()
+
+    service = AudioWatchdogService()
+    monkeypatch.setattr(service, "_runtime_snapshot", lambda station_id: {})
+
+    snapshot = service.snapshot()
+
+    assert snapshot["managed_profiles"] == []
+    assert snapshot["managed_profiles_ok"] is True
 
 
 def test_repair_restarts_only_selected_station(monkeypatch):

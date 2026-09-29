@@ -417,6 +417,7 @@ class MultiQualityRuntimeTests(unittest.TestCase):
         self.runtime._active_started_monotonic = 1.0
         producer = MagicMock()
         producer.poll.return_value = None
+        producer.stdout.peek.return_value = bytes(4096)
 
         with (
             patch.object(self.runtime, "_ensure_icecast_sink", return_value=False),

@@ -256,6 +256,7 @@ class IcecastAudioSink:
         self._probe_thread = None
         self._probe_lock = threading.Lock()
         self._mount_healthy = None
+        self._mount_probe_started_monotonic = None
         self._probe_failures = 0
         self._last_mount_probe_reconnect_monotonic = None
         self._mount_reconnect_requested = threading.Event()
@@ -522,6 +523,14 @@ class IcecastAudioSink:
                 )
             )
             mount_healthy = self._mount_healthy
+            mount_probe_age = (
+                None
+                if self._mount_probe_started_monotonic is None
+                else max(
+                    0.0,
+                    time.monotonic() - self._mount_probe_started_monotonic,
+                )
+            )
             if self._mount_probe is None:
                 if self._network_failed:
                     mount_healthy = False
@@ -541,6 +550,12 @@ class IcecastAudioSink:
             return {
                 "process_running": process_running,
                 "mount_healthy": mount_healthy,
+                "remote_mount_verified": bool(
+                    self._mount_probe is not None and self._mount_healthy is True
+                ),
+                "mount_probe_age_seconds": (
+                    None if mount_probe_age is None else round(mount_probe_age, 3)
+                ),
                 "consecutive_probe_failures": int(self._probe_failures),
                 "writer_running": bool(
                     self._writer_thread and self._writer_thread.is_alive()
@@ -1126,6 +1141,7 @@ class IcecastAudioSink:
                 self._probe_failures = 0
                 self._last_mount_probe_reconnect_monotonic = None
                 self._mount_reconnect_requested.clear()
+                self._mount_probe_started_monotonic = time.monotonic()
 
         def run() -> None:
             initial_delay = self._probe_warmup_sec + _mount_spread_seconds(
@@ -1261,3 +1277,4 @@ class IcecastAudioSink:
             with self._probe_lock:
                 self._mount_healthy = None
                 self._probe_failures = 0
+                self._mount_probe_started_monotonic = None

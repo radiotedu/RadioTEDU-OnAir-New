@@ -104,6 +104,19 @@ def test_disabled_campaign_does_not_rewrite_operator_library_folder(tmp_path):
     conn.close()
 
 
+def test_active_managed_profile_reconciliation_is_noop_when_settings_match(tmp_path):
+    init_db()
+    conn = get_connection()
+    _ensure_campaign_stations(conn)
+    service = BroadcastCampaignService(conn)
+    service.save_campaign(**_active_payload())
+    changes_before_reconcile = conn.total_changes
+
+    assert service.ensure_managed_profiles() == []
+    assert conn.total_changes == changes_before_reconcile
+    conn.close()
+
+
 def test_normalization_preserves_original_source_metadata(tmp_path):
     init_db()
     conn = get_connection()

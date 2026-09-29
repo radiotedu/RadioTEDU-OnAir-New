@@ -42,7 +42,6 @@ def _worker(*, defer_count=1):
         "",
         "schedule",
     )
-    worker._runtime_source_finished_naturally = lambda *_args: False
     worker._runtime_playback_alive = lambda _status: False
     worker._runtime_playback_matches = lambda *_args: False
     worker._restart_attempt_allowed = lambda *_args: (False, "retry_deferred")
@@ -96,3 +95,22 @@ def test_schedule_keeps_ownership_while_encoder_input_fifos_drain():
     assert worker.schedule_repo.item is not None
     assert worker.schedule_repo.failed == []
     assert started == []
+
+
+def test_schedule_releases_at_clean_eof_while_encoder_input_fifos_drain():
+    worker = _worker()
+    status = {
+        "program_running": False,
+        "producer_eof": True,
+        "producer_draining": True,
+        "active_input_uri": "E:/Programmes/recording.mp3",
+    }
+    worker.runtime_registry = SimpleNamespace(status=lambda _station_id: status)
+    completed = []
+    worker.schedule_repo.mark_done = completed.append
+
+    should_keep_schedule_owner = worker._advance_playing_schedule_item()
+
+    assert should_keep_schedule_owner is False
+    assert completed == [81]
+    assert worker.schedule_repo.failed == []
