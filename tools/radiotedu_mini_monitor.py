@@ -11,18 +11,26 @@ import http.client
 import json
 import os
 import queue
+import sqlite3
 import threading
 import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import font as tkfont
-from datetime import datetime
+from datetime import date, datetime, time as day_time, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 
 MONITOR_API_HOST = "127.0.0.1"
 MONITOR_API_PORT = 18110
 MONITOR_API_PATH = "/api/monitor/snapshot"
 STATE_ROOT = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / "RadioTEDU" / "OnAir" / "State" / "StationWorkers"
+DATABASE = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / "RadioTEDU" / "OnAir" / "cleanroom.db"
+_LOCAL_DATA_LOCK = threading.Lock()
+_LOCAL_DATA_CACHE: tuple[dict[int, dict], dict] | None = None
+_LOCAL_DATA_CACHE_AT = 0.0
+_LOCAL_DATA_CACHE_TTL_SECONDS = 30.0
+_LOCAL_DATA_ERROR = ""
 STATIONS = (
     (1, "Classical", "/classic"),
     (2, "Lo-Fi", "/lofi"),
@@ -109,6 +117,12 @@ def _snapshot() -> dict:
         for item in snapshot.get("stations", [])
         if isinstance(item, dict) and item.get("station_id") is not None
     }
+    needs_local = not isinstance(snapshot.get("ad_monitor"), dict) or any(
+        not isinstance(item.get("playout_monitor"), dict)
+        or item["playout_monitor"].get("state") == "unavailable"
+        for item in stations.values()
+    )
+    local_playout, local_ad = _read_local_monitor_data() if needs_local else ({}, None)
     heartbeats: dict[int, dict] = {}
     playing: dict[int, dict] = {}
     for station_id, _, _ in STATIONS:
@@ -137,8 +151,8 @@ def _snapshot() -> dict:
                     else "degraded"
                 )
         playout = station.get("playout_monitor")
-        if not isinstance(playout, dict):
-            playout = {"state": "unavailable"}
+        if not isinstance(playout, dict) or playout.get("state") == "unavailable":
+            playout = local_playout.get(station_id) or {"state": "unavailable"}
         public_status = station.get("public_status")
         if not public_status:
             public_status = "live" if station.get("health") == "healthy" else "unknown"
@@ -157,6 +171,12 @@ def _snapshot() -> dict:
             last_item = {"title": last_item}
         if not isinstance(last_item, dict):
             last_item = {}
+        if is_live and not current and playout.get("current_title"):
+            current = {
+                "title": playout.get("current_title"),
+                "artist": playout.get("current_artist"),
+                "track_type": playout.get("current_track_type"),
+            }
         playing[station_id] = {
             **playout,
             "is_live": is_live,
@@ -201,7 +221,8 @@ def _snapshot() -> dict:
         "ad": (
             snapshot.get("ad_monitor")
             if isinstance(snapshot.get("ad_monitor"), dict)
-            else {"state": "unsupported"}
+            and snapshot["ad_monitor"].get("state") != "unavailable"
+            else (local_ad or {"state": "unsupported"})
         ),
         "error": None,
         "at": time.time(),
@@ -280,6 +301,248 @@ def _read_maincharacter_runtime() -> dict | None:
         return {"runtime": safe, "updated_epoch": updated_epoch}
     except (OSError, ValueError, TypeError, AttributeError):
         return None
+
+
+def _monitor_plan_window_active(plan: sqlite3.Row) -> bool:
+    zone = ZoneInfo(str(plan["timezone"] or "Europe/Istanbul"))
+    current = datetime.now(timezone.utc).astimezone(zone)
+    starts_on = date.fromisoformat(str(plan["starts_on"]))
+    ends_on = date.fromisoformat(str(plan["ends_on"]))
+    start_time = day_time.fromisoformat(str(plan["local_start"]))
+    end_time = day_time.fromisoformat(str(plan["local_end"]))
+    weekdays = {int(value) for value in json.loads(str(plan["weekdays_json"] or "[]"))}
+    for anchor_day in (current.date(), current.date() - timedelta(days=1)):
+        if not starts_on <= anchor_day <= ends_on or anchor_day.isoweekday() not in weekdays:
+            continue
+        anchor_start = datetime.combine(anchor_day, start_time, tzinfo=zone)
+        anchor_end = datetime.combine(anchor_day, end_time, tzinfo=zone)
+        if anchor_end <= anchor_start:
+            anchor_end += timedelta(days=1)
+        if anchor_start <= current < anchor_end:
+            return True
+    return False
+
+
+def _read_local_monitor_data() -> tuple[dict[int, dict], dict]:
+    """Read compact, read-only program/ad state when the installed API is old."""
+    global _LOCAL_DATA_CACHE, _LOCAL_DATA_CACHE_AT, _LOCAL_DATA_ERROR
+    now = time.monotonic()
+    with _LOCAL_DATA_LOCK:
+        if (
+            _LOCAL_DATA_CACHE is not None
+            and now - _LOCAL_DATA_CACHE_AT < _LOCAL_DATA_CACHE_TTL_SECONDS
+        ):
+            return (
+                {key: dict(value) for key, value in _LOCAL_DATA_CACHE[0].items()},
+                dict(_LOCAL_DATA_CACHE[1]),
+            )
+
+        playout: dict[int, dict] = {}
+        ad: dict = {"state": "unavailable"}
+        conn = None
+        stage = "connect"
+        try:
+            _LOCAL_DATA_ERROR = ""
+            conn = sqlite3.connect(
+                f"file:{DATABASE.as_posix()}?mode=ro", uri=True, timeout=0.7
+            )
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA query_only=ON")
+            conn.execute("PRAGMA busy_timeout=700")
+            stage = "eligible_music"
+            station_ids = tuple(station_id for station_id, _, _ in STATIONS)
+            placeholders = ",".join("?" for _ in station_ids)
+            eligible = {
+                int(row["station_id"]): int(row["amount"] or 0)
+                for row in conn.execute(
+                    "SELECT station_id, COUNT(*) AS amount FROM tracks "
+                    f"WHERE station_id IN ({placeholders}) AND is_active=1 "
+                    "AND LOWER(COALESCE(track_type,'music'))='music' "
+                    "AND COALESCE(file_path,'')<>'' GROUP BY station_id",
+                    station_ids,
+                )
+            }
+            pending_music = {
+                int(row["station_id"]): int(row["amount"] or 0)
+                for row in conn.execute(
+                    "SELECT q.station_id, COUNT(*) AS amount FROM queue_items q "
+                    "JOIN tracks t ON t.id=q.track_id "
+                    f"WHERE q.station_id IN ({placeholders}) AND q.status='pending' "
+                    "AND t.is_active=1 AND LOWER(COALESCE(t.track_type,'music'))='music' "
+                    "AND COALESCE(t.file_path,'')<>'' "
+                    "GROUP BY q.station_id",
+                    station_ids,
+                )
+            }
+            stage = "queue_items"
+            for station_id in station_ids:
+                playout[station_id] = {
+                    "state": "ready",
+                    "eligible_music_count": eligible.get(station_id, 0),
+                    "pending_count": pending_music.get(station_id, 0),
+                    "program_ready": bool(
+                        eligible.get(station_id, 0) or pending_music.get(station_id, 0)
+                    ),
+                    "next_title": "",
+                    "next_artist": "",
+                    "current_title": "",
+                    "current_artist": "",
+                    "current_track_type": "",
+                }
+
+            stage = "queue_details"
+            queue_rows = conn.execute(
+                "SELECT q.station_id, q.status, q.position, q.id, "
+                "COALESCE(t.title,'') AS title, COALESCE(t.artist,'') AS artist, "
+                "COALESCE(t.track_type,'music') AS track_type "
+                "FROM queue_items q JOIN tracks t ON t.id=q.track_id "
+                f"WHERE q.station_id IN ({placeholders}) "
+                "AND q.status IN ('playing','pending') AND t.is_active=1 "
+                "AND COALESCE(t.file_path,'')<>'' "
+                "ORDER BY q.station_id, CASE q.status WHEN 'playing' THEN 0 ELSE 1 END, "
+                "q.position, q.id",
+                station_ids,
+            )
+            for row in queue_rows:
+                station_id = int(row["station_id"])
+                target = playout[station_id]
+                if row["status"] == "playing" and not target["current_title"]:
+                    target["current_title"] = str(row["title"] or "")
+                    target["current_artist"] = str(row["artist"] or "")
+                    target["current_track_type"] = str(row["track_type"] or "music")
+                elif row["status"] == "pending" and not target["next_title"]:
+                    target["next_title"] = str(row["title"] or "")
+                    target["next_artist"] = str(row["artist"] or "")
+                    target["next_track_type"] = str(row["track_type"] or "music")
+
+            stage = "ad_playing"
+            playing_ad = conn.execute(
+                "SELECT a.id, a.status, a.due_at, COALESCE(t.title,'') AS title, "
+                "COALESCE(t.artist,'') AS artist, "
+                "CASE WHEN COALESCE(t.file_path,'')<>'' THEN 1 ELSE 0 END AS media_ready "
+                "FROM ad_break_items a LEFT JOIN tracks t ON t.id=a.track_id "
+                "WHERE a.station_id=4 AND a.status='playing' "
+                "ORDER BY a.started_at, a.id LIMIT 1"
+            ).fetchone()
+            if playing_ad:
+                ad = {"state": "playing_unverified", **dict(playing_ad)}
+            else:
+                stage = "ad_pending"
+                pending_ad = conn.execute(
+                    "SELECT a.id, a.status, a.due_at, COALESCE(t.title,'') AS title, "
+                    "COALESCE(t.artist,'') AS artist, "
+                    "CASE WHEN COALESCE(t.file_path,'')<>'' THEN 1 ELSE 0 END AS media_ready "
+                    "FROM ad_break_items a LEFT JOIN tracks t ON t.id=a.track_id "
+                    "WHERE a.station_id=4 AND a.status='pending' "
+                    "ORDER BY datetime(a.due_at), a.priority DESC, a.id LIMIT 1"
+                ).fetchone()
+                stage = "ad_plans"
+                plans = conn.execute(
+                    "SELECT p.id,p.name,p.enabled,p.starts_on,p.ends_on,p.weekdays_json, "
+                    "p.local_start,p.local_end,p.timezone,p.repeat_every_songs,p.priority, "
+                    "p.created_at,t.enabled AS target_enabled,COALESCE(tr.is_active,0) AS track_active, "
+                    "CASE WHEN COALESCE(tr.file_path,'')<>'' THEN 1 ELSE 0 END AS media_ready "
+                    "FROM broadcast_plans p "
+                    "LEFT JOIN broadcast_plan_targets t ON t.plan_id=p.id AND t.station_id=4 "
+                    "LEFT JOIN tracks tr ON tr.id=t.track_id "
+                    "WHERE p.plan_type='ad' AND p.cadence_mode='songs' "
+                    "AND EXISTS(SELECT 1 FROM broadcast_plan_targets x "
+                    "WHERE x.plan_id=p.id AND x.station_id=4) "
+                    "ORDER BY p.priority DESC,p.id DESC"
+                ).fetchall()
+                active = []
+                inactive_reason = ""
+                stage = "ad_plan_window"
+                for plan in plans:
+                    if not bool(plan["enabled"]):
+                        inactive_reason = "plan_disabled"
+                        continue
+                    if not bool(plan["target_enabled"]):
+                        inactive_reason = "target_disabled"
+                        continue
+                    try:
+                        if not _monitor_plan_window_active(plan):
+                            inactive_reason = "outside_schedule_window"
+                            continue
+                    except Exception:
+                        inactive_reason = "invalid_plan"
+                        continue
+                    if not bool(plan["track_active"]) or not bool(plan["media_ready"]):
+                        inactive_reason = "ad_track_inactive_or_missing"
+                        continue
+                    active.append(plan)
+
+                if pending_ad:
+                    ad = {key: value for key, value in dict(pending_ad).items() if key != "media_ready"}
+                    ad["state"] = "pending" if bool(pending_ad["media_ready"]) else "pending_media_missing"
+                elif not active:
+                    ad = (
+                        {"state": "inactive", "reason": inactive_reason or "no_eligible_target"}
+                        if plans else {"state": "no_plan"}
+                    )
+                else:
+                    plan = active[0]
+                    interval = max(1, int(plan["repeat_every_songs"] or 10))
+                    stage = "ad_music_count"
+                    count_row = conn.execute(
+                        "SELECT COUNT(*) AS amount FROM queue_items q JOIN tracks t ON t.id=q.track_id "
+                        "WHERE q.station_id=4 AND t.station_id=4 AND q.status='done' "
+                        "AND LOWER(COALESCE(t.track_type,'music'))='music' "
+                        "AND q.finished_at IS NOT NULL AND datetime(q.finished_at)>=datetime(?)",
+                        (str(plan["created_at"] or "1970-01-01 00:00:00"),),
+                    ).fetchone()
+                    music_count = int((count_row["amount"] if count_row else 0) or 0)
+                    completed_cycles = music_count // interval
+                    stage = "ad_cycle_status"
+                    statuses = conn.execute(
+                        "SELECT dedupe_key,status FROM ad_break_items WHERE station_id=4 "
+                        "AND dedupe_key LIKE ? ORDER BY id DESC",
+                        (f"broadcast-plan:{int(plan['id'])}:song:4:%",),
+                    ).fetchall()
+                    status_by_cycle: dict[int, str] = {}
+                    for row in statuses:
+                        try:
+                            cycle = int(str(row["dedupe_key"]).rsplit(":",1)[1])
+                        except (IndexError, TypeError, ValueError):
+                            continue
+                        status_by_cycle.setdefault(cycle, str(row["status"] or ""))
+                    due_cycle = next(
+                        (cycle for cycle in range(1, completed_cycles + 1)
+                         if status_by_cycle.get(cycle) != "done"),
+                        None,
+                    )
+                    if due_cycle is not None:
+                        ad = {
+                            "state": "unmaterialized",
+                            "reason": "due_without_pending_row",
+                            "name": str(plan["name"] or ""),
+                            "interval": interval,
+                            "remaining": 0,
+                            "cycle": due_cycle,
+                        }
+                    else:
+                        remainder = music_count % interval
+                        ad = {
+                            "state": "countdown",
+                            "name": str(plan["name"] or ""),
+                            "interval": interval,
+                            "remaining": interval - remainder if remainder else interval,
+                        }
+        except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
+            detail = str(exc).replace(str(DATABASE), "[database]").splitlines()[0][:120]
+            _LOCAL_DATA_ERROR = f"{stage}:{type(exc).__name__}:{detail}"
+            playout = {station_id: {"state": "unavailable"} for station_id, _, _ in STATIONS}
+            ad = {"state": "unavailable"}
+        finally:
+            if conn is not None:
+                conn.close()
+
+        _LOCAL_DATA_CACHE = (playout, ad)
+        _LOCAL_DATA_CACHE_AT = now
+        return (
+            {key: dict(value) for key, value in playout.items()},
+            dict(ad),
+        )
 
 
 def _classify(heartbeat: dict, prior: dict | None, listener: dict | None) -> tuple[str, str]:
