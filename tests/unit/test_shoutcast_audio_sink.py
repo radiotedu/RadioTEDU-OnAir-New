@@ -218,7 +218,86 @@ def test_queue_overflow_stays_unhealthy_until_a_recovery_connection_delivers():
     recovered = sink.health_snapshot()
     assert recovered["delivery_loss_unrecovered"] is False
     assert recovered["dropped_pcm_chunks"] == 1
+    assert recovered["delivery_loss_count"] == 1
+    assert recovered["no_drop_since_start"] is False
     assert recovered["mount_healthy"] is True
+    assert recovered["remote_mount_verified"] is False
+    assert recovered["remote_mount_verification_supported"] is False
+    assert recovered["public_listener_verified"] is False
+
+
+def test_stale_connection_failure_cannot_kill_replacement_encoder():
+    sink = ShoutcastAudioSink("ffmpeg.exe", lambda *_args, **_kwargs: None)
+    old_process = FakeProcess()
+    replacement_process = FakeProcess()
+    sink._process = replacement_process
+    sink._connection_epoch = 2
+    sink._network_failed = False
+
+    sink._fail_network(process=old_process, connection_epoch=1)
+
+    assert replacement_process.poll() is None
+    assert sink._network_failed is False
+
+
+def test_stale_writer_cannot_replace_pending_pcm_for_new_connection():
+    sink = ShoutcastAudioSink("ffmpeg.exe", lambda *_args, **_kwargs: None)
+    old_process = FakeProcess()
+    replacement_process = FakeProcess()
+    sink._process = replacement_process
+    sink._connection_epoch = 2
+    sink._writer_pending_chunk = b"replacement-pcm"
+
+    stored = sink._store_writer_pending_chunk(
+        b"stale-old-session-pcm",
+        process=old_process,
+        connection_epoch=1,
+        allow_stopping=True,
+    )
+
+    assert stored is False
+    assert sink._writer_pending_chunk == b"replacement-pcm"
+
+
+def test_writer_preserves_dequeued_pcm_when_stop_clears_process_before_store():
+    sink = ShoutcastAudioSink("ffmpeg.exe", lambda *_args, **_kwargs: None)
+    old_process = FakeProcess()
+    sink._process = None
+    sink._connection_epoch = 1
+
+    stored = sink._store_writer_pending_chunk(
+        b"dequeued-before-stop",
+        process=old_process,
+        connection_epoch=1,
+        allow_stopping=True,
+    )
+
+    assert stored is True
+    assert sink._writer_pending_chunk == b"dequeued-before-stop"
+
+
+def test_late_old_connection_write_does_not_refresh_replacement_health():
+    sink = ShoutcastAudioSink("ffmpeg.exe", lambda *_args, **_kwargs: None)
+    sink._connection_epoch = 2
+
+    sink._record_network_delivery(512, 1)
+
+    assert sink._encoded_bytes_sent == 0
+    assert sink._last_network_write_monotonic is None
+
+
+def test_shoutcast_health_exposes_bounded_first_audio_startup_age():
+    sink = ShoutcastAudioSink("ffmpeg.exe", lambda *args, **kwargs: None)
+    sink._process = FakeProcess()
+    sink._handshake_accepted = True
+    sink._connection_started_monotonic = time.monotonic() - 31.0
+
+    health = sink.health_snapshot()
+
+    assert health["source_protocol"] == "shoutcast"
+    assert health["connection_age_seconds"] >= 30.0
+    assert health["first_audio_startup_timeout_seconds"] == 30.0
+    assert health["encoded_bytes_sent"] == 0
 
 
 def test_shared_transport_health_rejects_unrecovered_pcm_loss():

@@ -450,6 +450,142 @@ def test_registry_waits_for_primary_body_probe_during_startup_grace():
     assert reg._recovery_state[5]["error_code"] == "output_unverified"
 
 
+def test_registry_does_not_reconnect_primary_when_status_read_fails():
+    class UnavailableStatusRuntime:
+        def __init__(self):
+            self.calls = 0
+
+        def status(self):
+            raise RuntimeError("temporary status lock")
+
+        def output_health_snapshot(self, _branch):
+            return {
+                "source_protocol": "shoutcast",
+                "process_running": True,
+                "writer_running": True,
+                "network_writer_running": True,
+                "mount_healthy": True,
+                "connection_healthy": True,
+                "encoded_bytes_sent": 512,
+                "last_write_age_seconds": 0.2,
+                "last_network_write_age_seconds": 0.2,
+                "remote_mount_verified": False,
+                "remote_mount_verification_supported": False,
+                "network_failed": False,
+                "writer_failed": False,
+            }
+
+        def recover_primary_output(self):
+            self.calls += 1
+
+    runtime = UnavailableStatusRuntime()
+    reg = StationRuntimeRegistry()
+    reg._runtimes[5] = runtime
+    reg._required_outputs[5] = {"icecast": True, "local": False}
+    reg.status = lambda _station_id: {}
+
+    reg.recover_station_primary_output(5)
+
+    assert runtime.calls == 0
+    assert reg._recovery_state[5]["error_code"] == "output_health_unavailable"
+
+
+def test_registry_recovers_when_status_fails_but_local_shoutcast_startup_expired():
+    class UnavailableAggregateStatusRuntime:
+        def __init__(self):
+            self.calls = 0
+
+        def status(self):
+            raise RuntimeError("temporary aggregate status lock")
+
+        def output_health_snapshot(self, _branch):
+            return {
+                "source_protocol": "shoutcast",
+                "process_running": True,
+                "handshake_accepted": True,
+                "mount_healthy": None,
+                "connection_healthy": False,
+                "encoded_bytes_sent": 0,
+                "connection_age_seconds": 31.0,
+                "first_audio_startup_timeout_seconds": 30.0,
+                "remote_mount_verified": False,
+                "remote_mount_verification_supported": False,
+                "network_failed": False,
+                "writer_failed": False,
+            }
+
+        def recover_primary_output(self):
+            self.calls += 1
+
+    runtime = UnavailableAggregateStatusRuntime()
+    reg = StationRuntimeRegistry()
+    reg._runtimes[5] = runtime
+    reg._required_outputs[5] = {"icecast": True, "local": False}
+    reg.status = lambda _station_id: {}
+
+    reg.recover_station_primary_output(5)
+
+    assert runtime.calls == 1
+    assert reg._recovery_state[5]["state"] == "monitoring"
+
+
+def test_registry_keeps_unexpired_shoutcast_first_audio_startup_connected():
+    health = {
+        "source_protocol": "shoutcast",
+        "process_running": True,
+        "handshake_accepted": True,
+        "mount_healthy": None,
+        "connection_healthy": False,
+        "encoded_bytes_sent": 0,
+        "connection_age_seconds": 29.9,
+        "first_audio_startup_timeout_seconds": 30.0,
+        "remote_mount_verified": False,
+        "remote_mount_verification_supported": False,
+    }
+
+    assert StationRuntimeRegistry._output_failure_confirmed(health) is False
+
+
+def test_registry_confirms_shoutcast_first_audio_timeout_after_bounded_grace():
+    health = {
+        "source_protocol": "shoutcast",
+        "process_running": True,
+        "handshake_accepted": True,
+        "mount_healthy": None,
+        "connection_healthy": False,
+        "encoded_bytes_sent": 0,
+        "connection_age_seconds": 30.1,
+        "first_audio_startup_timeout_seconds": 30.0,
+        "remote_mount_verified": False,
+        "remote_mount_verification_supported": False,
+    }
+
+    assert StationRuntimeRegistry._output_failure_confirmed(health) is True
+
+
+def test_registry_does_not_reconnect_primary_when_mount_telemetry_is_missing():
+    class MissingTelemetryRuntime:
+        def __init__(self):
+            self.calls = 0
+
+        def status(self):
+            return {"program_running": True}
+
+        def recover_primary_output(self):
+            self.calls += 1
+
+    runtime = MissingTelemetryRuntime()
+    reg = StationRuntimeRegistry()
+    reg._runtimes[5] = runtime
+    reg._required_outputs[5] = {"icecast": True, "local": False}
+    reg.status = lambda _station_id: {}
+
+    reg.recover_station_primary_output(5)
+
+    assert runtime.calls == 0
+    assert reg._recovery_state[5]["error_code"] == "output_health_unavailable"
+
+
 def test_registry_recovers_required_extra_sink_that_never_started():
     branch = "icecast:/missing-extra"
 

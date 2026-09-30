@@ -2451,6 +2451,26 @@ class StationRuntime:
     def _icecast_sink_running(self) -> bool:
         return bool(self._icecast_sink and self._icecast_sink.is_running())
 
+    def output_health_snapshot(self, branch: str = "icecast") -> dict:
+        """Read one sink's health without assembling the full runtime status.
+
+        Recovery uses this as independent local evidence when the aggregate
+        status call is temporarily unavailable. It deliberately reports only
+        sink-local state; an exception in the status endpoint alone must never
+        trigger a reconnect.
+        """
+        output_branch = str(branch or "icecast").strip()
+        if output_branch == "icecast":
+            sink = self._icecast_sink
+        else:
+            with self._extra_icecast_lock:
+                sink = self._extra_icecast_sinks.get(output_branch)
+        snapshot = getattr(sink, "health_snapshot", None) if sink is not None else None
+        if not callable(snapshot):
+            return {}
+        health = snapshot()
+        return dict(health) if isinstance(health, dict) else {}
+
     def _extra_icecast_sinks_running(self) -> bool:
         with self._extra_icecast_lock:
             return any(
@@ -2651,6 +2671,40 @@ class StationRuntime:
                         ),
                     )
                 )
+        primary_protocol = str(
+            getattr(self._active_cfg, "source_protocol", "icecast")
+            if self._active_cfg is not None
+            else "icecast"
+        ).strip().lower()
+        public_listener_health = {
+            "icecast": bool(
+                primary_protocol == "icecast"
+                and delivery_health.get("icecast")
+                and icecast_mount_health.get("remote_mount_verified") is True
+            )
+        }
+        no_drop_delivery_health = dict(delivery_health)
+        if primary_protocol == "shoutcast":
+            no_drop_delivery_health["icecast"] = bool(
+                delivery_health.get("icecast")
+                and icecast_mount_health.get("no_drop_since_start") is True
+            )
+        for item in extra_icecast_mounts:
+            branch = str(item.get("branch") or "")
+            if not branch:
+                continue
+            protocol = str(item.get("source_protocol") or "icecast").strip().lower()
+            health = dict(item.get("health") or {})
+            public_listener_health[branch] = bool(
+                protocol == "icecast"
+                and delivery_health.get(branch)
+                and health.get("remote_mount_verified") is True
+            )
+            if protocol == "shoutcast":
+                no_drop_delivery_health[branch] = bool(
+                    delivery_health.get(branch)
+                    and health.get("no_drop_since_start") is True
+                )
         producer_exit_current = (
             self._producer_exit_generation == self._playout_generation
         )
@@ -2694,6 +2748,12 @@ class StationRuntime:
             "transition_active": self._is_transition_active(),
             "branch_health": branch_health,
             "delivery_health": delivery_health,
+            # SHOUTcast source acceptance is not a listener-side verification;
+            # consumers that need public delivery proof must use this map.
+            "public_listener_health": public_listener_health,
+            # This remains false after any SHOUTcast PCM chunk was dropped,
+            # even if current source transport recovers successfully.
+            "no_drop_delivery_health": no_drop_delivery_health,
             "elapsed": self._current_offset_seconds(),
             "live_input_enabled": bool(live_snapshot.get("live_input_enabled")),
             "live_mic_active": bool(live_snapshot.get("transmitting")),

@@ -95,6 +95,10 @@ Name: "{autoprograms}\RadioTEDU OnAir"; Filename: "{app}\RadioTEDU-OnAir.exe"; W
 
 [Run]
 Filename: "{app}\RadioTEDU-OnAir.exe"; Description: "Open RadioTEDU OnAir"; Flags: nowait postinstall skipifsilent; Tasks: launch
+Filename: "{app}\backend\RadioTEDU-OnAir-MiniMonitor.exe"; Description: "Open the RadioTEDU broadcast monitor"; Flags: nowait postinstall skipifsilent
+
+[Registry]
+Root: HKLM; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "RadioTEDU OnAir Mini Monitor"; ValueData: """{app}\backend\RadioTEDU-OnAir-MiniMonitor.exe"""; Flags: uninsdeletevalue
 
 [UninstallRun]
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File ""{app}\installer\InstallAudioWatchdog.ps1"" -Action Remove -AppRoot ""{app}"" -DataRoot ""{commonappdata}\RadioTEDU\OnAir"""; Flags: runhidden waituntilterminated skipifdoesntexist; RunOnceId: "RemoveAudioWatchdog"

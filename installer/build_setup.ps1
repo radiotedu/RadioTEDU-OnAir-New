@@ -12,6 +12,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $BackendExeName = "RadioTEDU-OnAir-Backend.exe"
+$MiniMonitorExeName = "RadioTEDU-OnAir-MiniMonitor.exe"
 $SupervisorExeName = "RadioTEDU-OnAir-Supervisor.exe"
 $ShellExeName = "RadioTEDU-OnAir.exe"
 $SetupScriptName = "RadioTEDUBroadcastRoomSetup.iss"
@@ -337,12 +338,14 @@ if (-not (Test-Path -LiteralPath $backendProvenancePath -PathType Leaf)) {
     throw "Backend provenance is missing: $backendProvenancePath"
 }
 $backendProvenance = Get-Content -LiteralPath $backendProvenancePath -Raw | ConvertFrom-Json
+$miniMonitorArtifactPath = Join-Path (Split-Path -Parent $backendArtifactPath) $MiniMonitorExeName
 $shellArtifactPath = Join-Path $repositoryRoot "dist\desktop\shell\$ShellExeName"
 $supervisorArtifactPath = Join-Path $repositoryRoot "dist\desktop\supervisor\$SupervisorExeName"
 $watchdogScriptPath = Join-Path $repositoryRoot "tools\RadioTEDU-AudioWatchdog.ps1"
 $watchdogInstallerPath = Join-Path $root "InstallAudioWatchdog.ps1"
 $supervisorInstallerPath = Join-Path $root "InstallSupervisorService.ps1"
 foreach ($releaseInput in @(
+    $miniMonitorArtifactPath,
     $shellArtifactPath,
     $supervisorArtifactPath,
     $watchdogScriptPath,
@@ -367,6 +370,7 @@ $provenancePath = Join-Path $releaseDir "$setupBaseName.provenance.json"
     backend_git_commit = [string]$backendProvenance.git_commit
     backend_source_sha256 = [string]$backendProvenance.source_sha256
     backend_executable_sha256 = (Get-FileHash -LiteralPath $backendArtifactPath -Algorithm SHA256).Hash
+    mini_monitor_executable_sha256 = (Get-FileHash -LiteralPath $miniMonitorArtifactPath -Algorithm SHA256).Hash
     desktop_shell_sha256 = (Get-FileHash -LiteralPath $shellArtifactPath -Algorithm SHA256).Hash
     desktop_supervisor_sha256 = (Get-FileHash -LiteralPath $supervisorArtifactPath -Algorithm SHA256).Hash
     installer_definition_sha256 = (Get-FileHash -LiteralPath $setupScript -Algorithm SHA256).Hash

@@ -16,6 +16,10 @@ _log = logging.getLogger(__name__)
 _PCM_QUEUE_MAX_CHUNKS = 64
 _HANDSHAKE_RESPONSE_LIMIT = 4096
 _ENCODED_CHUNK_BYTES = 64 * 1024
+# A SHOUTcast source handshake can succeed while the encoder never produces a
+# single byte. Bound the time we accept a registered-but-silent source before
+# the registry reconnects this output branch.
+_FIRST_AUDIO_STARTUP_TIMEOUT_SECONDS = 30.0
 
 
 class ShoutcastProtocolError(RuntimeError):
@@ -148,6 +152,7 @@ class ShoutcastAudioSink:
         self._encoded_bytes_sent = 0
         self._last_pcm_write_monotonic = None
         self._last_network_write_monotonic = None
+        self._connection_started_monotonic = None
 
     @property
     def process(self):
@@ -194,6 +199,25 @@ class ShoutcastAudioSink:
             return False
         return True
 
+    def _store_writer_pending_chunk(
+        self,
+        chunk: bytes,
+        *,
+        process,
+        connection_epoch: int,
+        allow_stopping: bool = False,
+    ) -> bool:
+        """Store only if this writer still owns the current connection epoch."""
+        with self._lock:
+            if int(connection_epoch) != self._connection_epoch:
+                return False
+            if self._process is process or (
+                allow_stopping and self._process is None
+            ):
+                self._writer_pending_chunk = chunk
+                return True
+            return False
+
     def _record_pcm_loss(self) -> None:
         """Keep a dropped frame visible until a replacement connection sends."""
         with self._lock:
@@ -204,6 +228,10 @@ class ShoutcastAudioSink:
 
     def _record_network_delivery(self, byte_count: int, connection_epoch: int) -> None:
         with self._lock:
+            # A send that finishes late on an old socket must not refresh the
+            # replacement session or clear its delivery-loss state.
+            if int(connection_epoch) != self._connection_epoch:
+                return
             self._encoded_bytes_sent += int(byte_count)
             self._last_network_write_monotonic = time.monotonic()
             if (
@@ -227,23 +255,39 @@ class ShoutcastAudioSink:
                 if self._last_network_write_monotonic is None
                 else max(0.0, now - self._last_network_write_monotonic)
             )
+            connection_age = (
+                None
+                if self._connection_started_monotonic is None
+                else max(0.0, now - self._connection_started_monotonic)
+            )
             connection_healthy = bool(
                 self._handshake_accepted
                 and not self._network_failed
                 and self._encoded_bytes_sent > 0
             )
-            mount_healthy = bool(
-                connection_healthy and not self._delivery_loss_unrecovered
+            source_starting = bool(
+                self._handshake_accepted
+                and not self._network_failed
+                and self._encoded_bytes_sent == 0
+                and not self._delivery_loss_unrecovered
+            )
+            mount_healthy = (
+                None
+                if source_starting
+                else bool(connection_healthy and not self._delivery_loss_unrecovered)
             )
             return {
                 "process_running": bool(
                     self._process and self._process.poll() is None
                 ),
                 "mount_healthy": mount_healthy,
-                # Shoutcast verifies the source handshake and accepted encoded
-                # payload. Icecast body-probe requirements are applied only
-                # when the configured source protocol is Icecast.
-                "remote_mount_verified": connection_healthy,
+                # The source handshake proves only that DNAS accepted this
+                # producer connection. This sink has no listener-side probe.
+                "remote_mount_verified": False,
+                "remote_mount_verification_supported": False,
+                "public_listener_verified": False,
+                "delivery_loss_count": int(self._dropped_pcm_chunks),
+                "no_drop_since_start": self._dropped_pcm_chunks == 0,
                 "connection_healthy": connection_healthy,
                 "delivery_loss_unrecovered": bool(
                     self._delivery_loss_unrecovered
@@ -268,6 +312,13 @@ class ShoutcastAudioSink:
                 "last_network_write_age_seconds": (
                     None if network_age is None else round(network_age, 3)
                 ),
+                "connection_age_seconds": (
+                    None if connection_age is None else round(connection_age, 3)
+                ),
+                "first_audio_startup_timeout_seconds": (
+                    _FIRST_AUDIO_STARTUP_TIMEOUT_SECONDS
+                ),
+                "writer_pending_pcm": self._writer_pending_chunk is not None,
                 "source_protocol": self.protocol,
             }
 
@@ -278,70 +329,134 @@ class ShoutcastAudioSink:
             except queue.Empty:
                 return
 
-    def _fail_network(self) -> None:
+    def _fail_network(
+        self,
+        *,
+        process=None,
+        connection_epoch: int | None = None,
+    ) -> None:
         with self._lock:
+            if process is not None and self._process is not process:
+                return
+            if (
+                connection_epoch is not None
+                and int(connection_epoch) != self._connection_epoch
+            ):
+                return
             self._network_failed = True
-        process = self._process
-        if process is not None and process.poll() is None:
+            active_process = self._process
+        if active_process is not None and active_process.poll() is None:
             try:
-                process.terminate()
+                active_process.terminate()
             except Exception:
                 pass
 
     def _start_threads(self, *, preserve_pcm: bool = False) -> None:
-        self._stop_event.clear()
+        # A stopped connection's event must stay set. Reusing and clearing the
+        # same Event can wake an old blocked writer after reconnect.
+        stop_event = threading.Event()
+        self._stop_event = stop_event
+        process = self._process
+        source_socket = self._socket
+        connection_epoch = self._connection_epoch
+        stdin = getattr(process, "stdin", None) if process is not None else None
         if not preserve_pcm:
             self._clear_queue()
-            self._writer_pending_chunk = None
-        connection_epoch = self._connection_epoch
+            with self._lock:
+                if (
+                    self._process is process
+                    and self._connection_epoch == connection_epoch
+                ):
+                    self._writer_pending_chunk = None
 
         def write_pcm() -> None:
-            while not self._stop_event.is_set():
-                chunk = self._writer_pending_chunk
+            with self._lock:
+                pending_chunk = self._writer_pending_chunk
+            while not stop_event.is_set():
+                chunk = pending_chunk
                 if chunk is None:
                     try:
                         chunk = self._pcm_queue.get(timeout=0.2)
                     except queue.Empty:
                         continue
-                    self._writer_pending_chunk = chunk
-                stdin = self.stdin
-                if stdin is None or not self.is_running():
-                    continue
+                    if stop_event.is_set():
+                        # Keep a chunk fetched just as stop began available to
+                        # the next connection when PCM preservation is enabled.
+                        self._store_writer_pending_chunk(
+                            chunk,
+                            process=process,
+                            connection_epoch=connection_epoch,
+                            allow_stopping=True,
+                        )
+                        return
+                if not self._store_writer_pending_chunk(
+                    chunk,
+                    process=process,
+                    connection_epoch=connection_epoch,
+                    allow_stopping=True,
+                ):
+                    return
+                if (
+                    stop_event.is_set()
+                    or stdin is None
+                    or process is None
+                    or process.poll() is not None
+                ):
+                    return
                 try:
                     stdin.write(chunk)
                     flush = getattr(stdin, "flush", None)
                     if callable(flush):
                         flush()
                     with self._lock:
-                        self._writer_failed = False
-                        self._writer_backpressured = False
-                        self._last_pcm_write_monotonic = time.monotonic()
-                    self._writer_pending_chunk = None
+                        if (
+                            self._process is process
+                            and self._connection_epoch == connection_epoch
+                        ):
+                            self._writer_failed = False
+                            self._writer_backpressured = False
+                            self._last_pcm_write_monotonic = time.monotonic()
+                            self._writer_pending_chunk = None
+                            pending_chunk = None
                 except Exception:
                     with self._lock:
-                        self._writer_failed = True
-                    self._writer_pending_chunk = chunk
-                    self._fail_network()
+                        if (
+                            self._process is process
+                            and self._connection_epoch == connection_epoch
+                        ):
+                            self._writer_failed = True
+                            self._writer_pending_chunk = chunk
+                    self._fail_network(
+                        process=process,
+                        connection_epoch=connection_epoch,
+                    )
                     return
 
         def send_encoded() -> None:
-            process = self._process
             encoded = getattr(process, "stdout", None) if process else None
-            source_socket = self._socket
             if encoded is None or source_socket is None:
-                self._fail_network()
+                self._fail_network(
+                    process=process,
+                    connection_epoch=connection_epoch,
+                )
                 return
-            while not self._stop_event.is_set():
+            while not stop_event.is_set():
                 try:
                     chunk = encoded.read(_ENCODED_CHUNK_BYTES)
                     if not chunk:
-                        self._fail_network()
+                        self._fail_network(
+                            process=process,
+                            connection_epoch=connection_epoch,
+                        )
                         return
                     source_socket.settimeout(self._write_timeout_sec)
                     source_socket.sendall(chunk)
                     self._record_network_delivery(len(chunk), connection_epoch)
                 except (OSError, TimeoutError):
-                    self._fail_network()
+                    self._fail_network(
+                        process=process,
+                        connection_epoch=connection_epoch,
+                    )
                     return
 
         self._writer_thread = threading.Thread(
@@ -407,6 +522,7 @@ class ShoutcastAudioSink:
                 self._encoded_bytes_sent = 0
                 self._last_pcm_write_monotonic = None
                 self._last_network_write_monotonic = None
+                self._connection_started_monotonic = time.monotonic()
             self._start_threads(preserve_pcm=preserve_pcm)
             _log.info(
                 "Started SHOUTcast legacy source host=%s port=%s profile=%s",
@@ -475,3 +591,4 @@ class ShoutcastAudioSink:
             self._handshake_accepted = False
             self._network_failed = False
             self._writer_failed = False
+            self._connection_started_monotonic = None

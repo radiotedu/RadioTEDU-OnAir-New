@@ -2729,10 +2729,10 @@ class StationWorker:
         cur = self.conn.cursor()
         cur.execute(
             "SELECT COALESCE(SUM(t.duration), 0.0) AS total "
-            "FROM queue_items q "
-            "LEFT JOIN tracks t ON t.id = q.track_id "
-            "WHERE q.station_id=? AND q.status='pending'",
-            (self.station_id,),
+            "FROM queue_items q JOIN tracks t ON t.id = q.track_id "
+            "WHERE q.station_id=? AND q.status='pending' "
+            "AND t.station_id=? AND COALESCE(TRIM(t.file_path),'')<>''",
+            (self.station_id, self.station_id),
         )
         row = cur.fetchone()
         return float(row["total"] or 0.0) if row else 0.0
@@ -2743,13 +2743,43 @@ class StationWorker:
         cur.execute(
             "SELECT COUNT(*) AS count "
             "FROM queue_items q "
-            "LEFT JOIN tracks t ON t.id = q.track_id "
+            "JOIN tracks t ON t.id = q.track_id "
             "WHERE q.station_id=? AND q.status='pending' "
+            "AND t.station_id=? AND COALESCE(TRIM(t.file_path),'')<>'' "
             "AND LOWER(COALESCE(t.track_type, 'music'))='music'",
-            (self.station_id,),
+            (self.station_id, self.station_id),
         )
         row = cur.fetchone()
         return int(row["count"] or 0) if row else 0
+
+    def _fail_pending_items_without_media_reference(self) -> int:
+        """Fail broken pending references before they can starve a good successor.
+
+        Pending rows are not deleted: their failure remains visible in queue
+        history. Playing rows are never touched, so the current output keeps its
+        owner while the autofiller prepares station-owned music behind it.
+        """
+        cur = self.conn.cursor()
+        cur.execute(
+            "UPDATE queue_items SET status='failed', finished_at=CURRENT_TIMESTAMP "
+            "WHERE station_id=? AND status='pending' AND ("
+            "  NOT EXISTS (SELECT 1 FROM tracks t WHERE t.id=queue_items.track_id) "
+            "  OR EXISTS (SELECT 1 FROM tracks t WHERE t.id=queue_items.track_id "
+            "            AND (t.station_id<>? OR COALESCE(TRIM(t.file_path),'')=''))"
+            ")",
+            (self.station_id, self.station_id),
+        )
+        failed = int(cur.rowcount or 0)
+        if self.conn.in_transaction:
+            self.conn.commit()
+        if failed:
+            _log.error(
+                "Failed %d pending queue row(s) without a station-owned media path; "
+                "autofill will prepare a valid successor station_id=%s",
+                failed,
+                self.station_id,
+            )
+        return failed
 
     def _active_track_ids(self) -> set[int]:
         """Track IDs already pending/playing; hard-block these from autofill."""
@@ -3568,6 +3598,10 @@ class StationWorker:
         # A station is an isolation boundary. Repair legacy/corrupt queue rows
         # before measuring, filling, or selecting the next item.
         self._fail_cross_station_queue_items()
+        # Broken queue references must not count toward the autofill reserve or
+        # sit at the head of the queue when the current source reaches EOF.
+        # This only releases pending rows; the playing source remains untouched.
+        self._fail_pending_items_without_media_reference()
         self._remove_unplanned_pending_ads()
 
         # Auto-fill queue BEFORE advance check so that crossfade timing

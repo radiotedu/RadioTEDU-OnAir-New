@@ -1510,7 +1510,49 @@ class StationRuntimeRegistry:
             try:
                 current_status = dict(runtime.status() or {})
             except Exception:
-                current_status = {}
+                current_status = None
+            if (
+                current_status is None
+                or not isinstance(current_status.get("icecast_mount_health"), dict)
+                or not current_status.get("icecast_mount_health")
+            ):
+                # Aggregate status can fail independently of the output
+                # worker. Consult the sink directly and reconnect only when
+                # that separate local snapshot proves a stalled/dead output.
+                # The status exception itself is never a recovery signal.
+                local_snapshot = getattr(runtime, "output_health_snapshot", None)
+                try:
+                    local_health = (
+                        dict(local_snapshot("icecast") or {})
+                        if callable(local_snapshot)
+                        else {}
+                    )
+                except Exception:
+                    local_health = {}
+                if local_health and self._output_failure_confirmed(local_health):
+                    current_status = {
+                        "source_protocol": local_health.get("source_protocol"),
+                        "icecast_mount_health": local_health,
+                    }
+                    local_health_confirms_failure = True
+                else:
+                    local_health_confirms_failure = False
+                    with self._recovery_lock:
+                        self._recovery_state[sid] = {
+                            "state": "monitoring",
+                            "attempt_count": int(previous.get("attempt_count") or 0),
+                            "next_attempt_monotonic": (
+                                time.monotonic() + _PRIMARY_OUTPUT_MONITOR_RECHECK_SECONDS
+                            ),
+                            "error_code": "output_health_unavailable",
+                            "message": (
+                                "Primary output status is unavailable; no independent "
+                                "sink failure was confirmed, so the source remains connected."
+                            ),
+                        }
+                    return self.status(sid)
+            else:
+                local_health_confirms_failure = False
             primary_health = dict(current_status.get("icecast_mount_health") or {})
             if not self._output_failure_confirmed(primary_health):
                 with self._recovery_lock:
@@ -1527,7 +1569,12 @@ class StationRuntimeRegistry:
                     }
                 return self.status(sid)
 
-            if self._unverified_icecast_transport_is_flowing(sid, runtime):
+            if (
+                not local_health_confirms_failure
+                and self._unverified_icecast_transport_is_flowing(
+                    sid, runtime, runtime_status=current_status
+                )
+            ):
                 with self._recovery_lock:
                     self._recovery_state[sid] = {
                         "state": "monitoring",
@@ -1597,9 +1644,10 @@ class StationRuntimeRegistry:
     def _output_failure_confirmed(mount: dict | None) -> bool:
         health = dict(mount or {})
         if not health:
-            # A required configured mount with no sink health object cannot be
-            # delivering. Branch-local recovery is safe and can create it.
-            return True
+            # Empty health is unavailable evidence. The caller can distinguish
+            # a successfully read status with process_running=False from a
+            # failed or incomplete status read.
+            return False
         if (
             health.get("mount_healthy") is False
             or bool(health.get("writer_failed"))
@@ -1607,17 +1655,56 @@ class StationRuntimeRegistry:
             or icecast_mount_has_sustained_saturation(health)
         ):
             return True
-        if icecast_mount_probe_is_pending(
-            health,
-            startup_grace_seconds=ICECAST_MOUNT_PROBE_STARTUP_GRACE_SECONDS,
-        ):
-            return False
         if health.get("process_running") is False:
             return True
-        if health.get("remote_mount_verified") is not True:
-            # A fresh source-side write is not proof that Icecast returned audio
-            # to a listener. Unknown/missing probe evidence is a failed output
-            # once the bounded startup grace above has expired.
+        source_protocol = str(health.get("source_protocol") or "icecast").strip().lower()
+        if (
+            source_protocol != "shoutcast"
+            and icecast_mount_probe_is_pending(
+                health,
+                startup_grace_seconds=ICECAST_MOUNT_PROBE_STARTUP_GRACE_SECONDS,
+            )
+        ):
+            return False
+        # A source handshake is not proof that DNAS is receiving audio. A
+        # registered SHOUTcast source that emits no network bytes past its
+        # bounded startup window is a failed output even without listener-side
+        # probing; recover just this output branch.
+        if source_protocol == "shoutcast":
+            try:
+                encoded_bytes = int(health.get("encoded_bytes_sent") or 0)
+                startup_age = float(health.get("connection_age_seconds"))
+                startup_timeout = float(
+                    health.get("first_audio_startup_timeout_seconds") or 30.0
+                )
+            except (TypeError, ValueError):
+                encoded_bytes = 0
+                startup_age = -1.0
+                startup_timeout = 30.0
+            if (
+                health.get("handshake_accepted") is True
+                and health.get("process_running") is True
+                and encoded_bytes == 0
+                and startup_age >= startup_timeout
+            ):
+                # A registered source that has emitted zero bytes is not a
+                # healthy public output. The elapsed connection age and byte
+                # counter are both sink-local, so this bound remains usable
+                # even when aggregate runtime/status telemetry is unavailable.
+                return True
+        verification_supported = health.get("remote_mount_verification_supported")
+        if verification_supported is False:
+            # For protocols without a listener-side probe, source transport
+            # evidence may drive reconnects, but must not be labelled public
+            # listener verification.
+            if health.get("connection_healthy") is not True:
+                return False
+        elif health.get("remote_mount_verified") is not True:
+            # Unknown probe capability or age is not a confirmed failure.
+            # Icecast sinks expose a probe age, so only an expired probe grace
+            # can turn an unverified result into a recovery signal.
+            if health.get("mount_probe_age_seconds") is None:
+                return False
             return True
         for key in ("last_write_age_seconds", "last_network_write_age_seconds"):
             try:
@@ -1647,10 +1734,11 @@ class StationRuntimeRegistry:
                 return self.status(sid)
 
             runtime_status = {}
+            status_unavailable = False
             try:
                 runtime_status = dict(runtime.status() or {})
             except Exception:
-                pass
+                status_unavailable = True
             delivery = dict(runtime_status.get("delivery_health") or {})
             branches = dict(runtime_status.get("branch_health") or {})
             branch_ok = delivery.get(output_branch)
@@ -1665,6 +1753,25 @@ class StationRuntimeRegistry:
                 ),
                 {},
             )
+            if status_unavailable or not runtime_status or not mount:
+                local_snapshot = getattr(runtime, "output_health_snapshot", None)
+                try:
+                    local_health = (
+                        dict(local_snapshot(output_branch) or {})
+                        if callable(local_snapshot)
+                        else {}
+                    )
+                except Exception:
+                    local_health = {}
+                if local_health:
+                    mount = local_health
+                    # Keep an explicit false branch state only when local
+                    # transport evidence confirms the branch has stalled.
+                    branch_ok = (
+                        False
+                        if self._output_failure_confirmed(local_health)
+                        else None
+                    )
             now = time.monotonic()
             state_key = (sid, output_branch)
             with self._recovery_lock:
@@ -1860,7 +1967,7 @@ class StationRuntimeRegistry:
         return self.status(sid)
 
     def _unverified_icecast_transport_is_flowing(
-        self, station_id: int, runtime
+        self, station_id: int, runtime, *, runtime_status: dict | None = None
     ) -> bool:
         required = self._required_outputs.get(
             int(station_id), {"icecast": True, "local": False}
@@ -1874,10 +1981,13 @@ class StationRuntimeRegistry:
             not branch.startswith("icecast") for branch in required_branches
         ):
             return False
-        try:
-            status = dict(runtime.status())
-        except Exception:
-            return False
+        if runtime_status is None:
+            try:
+                status = dict(runtime.status())
+            except Exception:
+                return False
+        else:
+            status = dict(runtime_status)
         mount = status.get("icecast_mount_health")
         if not isinstance(mount, dict):
             return False
@@ -1885,20 +1995,26 @@ class StationRuntimeRegistry:
             # Repeated body-probe failures are confirmed delivery failures. Do
             # not let source-side writes mask a listener mount that is silent.
             return False
-        if mount.get("remote_mount_verified") is not True and not icecast_mount_probe_is_pending(
-            mount,
-            startup_grace_seconds=ICECAST_MOUNT_PROBE_STARTUP_GRACE_SECONDS,
+        if (
+            str(status.get("source_protocol") or "icecast").strip().lower()
+            == "icecast"
+            and mount.get("remote_mount_verification_supported") is not False
+            and mount.get("remote_mount_verified") is not True
+            and not icecast_mount_probe_is_pending(
+                mount,
+                startup_grace_seconds=ICECAST_MOUNT_PROBE_STARTUP_GRACE_SECONDS,
+            )
         ):
             return False
+        mounts = {"icecast": mount}
+        for item in status.get("extra_icecast_mounts") or ():
+            mounts[str(item.get("branch") or "")] = dict(item.get("health") or {})
         if "network_writer_running" in mount:
             # A listener probe miss must not reset a source that is actively
             # writing. Thread liveness alone is insufficient: sendall() can be
             # blocked while its worker thread still appears alive. Require
             # fresh local writes on every required mount so a stalled socket
             # can be recovered without disconnecting healthy sibling outputs.
-            mounts = {"icecast": mount}
-            for item in status.get("extra_icecast_mounts") or ():
-                mounts[str(item.get("branch") or "")] = dict(item.get("health") or {})
             return bool(
                 all(
                     self._mount_transport_is_flowing(mounts.get(branch, {}))

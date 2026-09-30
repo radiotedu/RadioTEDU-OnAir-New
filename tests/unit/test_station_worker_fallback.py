@@ -214,6 +214,45 @@ def test_worker_process_once_stays_idle_when_library_has_no_autoplay_candidates(
     assert runtime.started == []
 
 
+def test_worker_fails_blank_pending_reference_before_refilling_active_music(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("CLEANROOM_DB_PATH", str(tmp_path / "cleanroom.db"))
+    init_db()
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO tracks (station_id, title, artist, track_type, duration, file_path, "
+        "is_active, play_count, exclude_from_autoplay) "
+        "VALUES (4, 'Broken row', '', 'music', 240, '', 1, 0, 0)"
+    )
+    broken_track_id = int(cur.lastrowid)
+    cur.execute(
+        "INSERT INTO queue_items (station_id, track_id, position, status, dedupe_key) "
+        "VALUES (4, ?, 1, 'pending', 'broken-empty-path')",
+        (broken_track_id,),
+    )
+    cur.execute(
+        "INSERT INTO tracks (station_id, title, artist, track_type, duration, file_path, "
+        "is_active, play_count, exclude_from_autoplay) "
+        "VALUES (4, 'Available Pop Song', 'Artist', 'music', 210, 'E:/pop/available.mp3', 1, 0, 0)"
+    )
+    available_track_id = int(cur.lastrowid)
+    conn.commit()
+
+    runtime = _FakeRuntimeRegistry()
+    worker = StationWorker(station_id=4, runtime_registry=runtime)
+    result = worker.process_once()
+
+    assert result["source"] == "manual"
+    assert result["input_uri"] == "E:/pop/available.mp3"
+    rows = conn.execute(
+        "SELECT track_id, status FROM queue_items WHERE station_id=4 ORDER BY position, id"
+    ).fetchall()
+    assert (broken_track_id, "failed") in [tuple(row) for row in rows]
+    assert (available_track_id, "playing") in [tuple(row) for row in rows]
+
+
 def test_worker_autofill_is_strictly_isolated_to_its_station(
     tmp_path, monkeypatch
 ):

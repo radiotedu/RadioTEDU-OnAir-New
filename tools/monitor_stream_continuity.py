@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -33,6 +34,13 @@ DEFAULT_STREAMS = (
     ("rock", "http://stream.radiotedu.com:11154/rock"),
     ("situation", "http://stream.radiotedu.com:11154/situation"),
 )
+# This is the checked-in code roster, not a live server inventory. Update the
+# version and pin whenever DEFAULT_STREAMS changes; strict evidence fails closed
+# if the roster and its pin diverge.
+CANONICAL_STREAM_ROSTER_VERSION = 1
+CANONICAL_STREAM_ROSTER_SHA256 = (
+    "a5dced932450a080d28e8e2acf0338744312566e930de3bfd56590630edbb7b0"
+)
 _CLOCK = re.compile(r"^(\d+):(\d+):(\d+(?:\.\d+)?)$")
 _SILENCE_START = re.compile(r"silence_start:\s*([0-9.]+)")
 _SILENCE_END = re.compile(
@@ -43,6 +51,10 @@ _TRANSPORT_ERROR = re.compile(
     r"input/output error|end of file|http error|broken pipe|error while decoding",
     re.IGNORECASE,
 )
+_PCM_SAMPLE_RATE = 48_000
+_PCM_CHANNELS = 2
+_PCM_BYTES_PER_SAMPLE = 2
+_PCM_BYTES_PER_SECOND = _PCM_SAMPLE_RATE * _PCM_CHANNELS * _PCM_BYTES_PER_SAMPLE
 
 
 def _utc_now() -> str:
@@ -77,8 +89,149 @@ def _parse_stream_arg(value: str) -> tuple[str, str]:
     return label, _safe_url(url)
 
 
-def build_ffmpeg_command(ffmpeg: Path, url: str) -> list[str]:
-    return [
+def _sha256_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _endpoint_identity(label: str, url: str) -> dict[str, str | bool]:
+    parsed = urlsplit(url)
+    safe_url = parsed._replace(query="", fragment="").geturl() if parsed.query else url
+    return {
+        "label": label,
+        "url": safe_url,
+        "url_sha256": hashlib.sha256(url.encode("utf-8")).hexdigest(),
+        "query_redacted": bool(parsed.query),
+    }
+
+
+def _canonical_stream_roster() -> tuple[dict[str, str], str]:
+    rows = sorted(DEFAULT_STREAMS)
+    roster = dict(rows)
+    if len(roster) != len(rows) or len(set(roster.values())) != len(rows):
+        raise RuntimeError("checked-in canonical stream roster contains duplicates")
+    canonical_bytes = json.dumps(rows, separators=(",", ":")).encode("utf-8")
+    digest = hashlib.sha256(canonical_bytes).hexdigest()
+    if digest != CANONICAL_STREAM_ROSTER_SHA256:
+        raise RuntimeError(
+            "checked-in canonical stream roster changed without updating its "
+            "version and SHA-256 pin"
+        )
+    return roster, digest
+
+
+def _roster_difference(expected: dict[str, str], actual: dict[str, str]) -> str:
+    missing = sorted(set(expected) - set(actual))
+    unexpected = sorted(set(actual) - set(expected))
+    changed = sorted(
+        label
+        for label in set(expected) & set(actual)
+        if expected[label] != actual[label]
+    )
+    details = []
+    if missing:
+        details.append(f"missing labels: {', '.join(missing)}")
+    if unexpected:
+        details.append(f"unexpected labels: {', '.join(unexpected)}")
+    if changed:
+        details.append(f"endpoint mismatch: {', '.join(changed)}")
+    return "; ".join(details) or "roster mapping differs"
+
+
+def _load_expected_roster(
+    path: Path, streams: list[tuple[str, str]]
+) -> dict[str, Any]:
+    """Validate a manifest against the pinned checked-in code roster.
+
+    A caller-supplied source string is provenance only; it cannot establish the
+    current runtime's authoritative public-output inventory.
+    """
+    manifest_bytes = path.expanduser().resolve().read_bytes()
+    try:
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("expected-roster manifest must be valid UTF-8 JSON") from exc
+    if not isinstance(manifest, dict) or manifest.get("schema_version") != 1:
+        raise RuntimeError("expected-roster manifest must use schema_version 1")
+    source = manifest.get("source")
+    captured_at = manifest.get("captured_at_utc")
+    if not isinstance(source, str) or not source.strip():
+        raise RuntimeError("expected-roster manifest must identify its claimed source")
+    if not isinstance(captured_at, str):
+        raise RuntimeError("expected-roster manifest must include captured_at_utc")
+    try:
+        captured_time = datetime.fromisoformat(captured_at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise RuntimeError("captured_at_utc must be an ISO-8601 timestamp") from exc
+    if captured_time.tzinfo is None:
+        raise RuntimeError("captured_at_utc must include a timezone")
+    roster_age = (datetime.now(UTC) - captured_time.astimezone(UTC)).total_seconds()
+    if roster_age < -60.0 or roster_age > 15 * 60.0:
+        raise RuntimeError("expected-roster manifest must be no more than 15 minutes old")
+    rows = manifest.get("streams")
+    if not isinstance(rows, list) or not rows:
+        raise RuntimeError("expected-roster manifest must include a non-empty streams list")
+
+    expected: dict[str, str] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise RuntimeError("each expected-roster stream must be an object")
+        label, url = row.get("label"), row.get("url")
+        if not isinstance(label, str) or not isinstance(url, str):
+            raise RuntimeError("each expected-roster stream needs a label and URL")
+        parsed_label, parsed_url = _parse_stream_arg(f"{label}={url}")
+        if urlsplit(parsed_url).query:
+            raise RuntimeError(
+                "strict public-listener roster URLs must not contain query credentials"
+            )
+        if parsed_label in expected:
+            raise RuntimeError(f"expected-roster manifest repeats label {parsed_label!r}")
+        if parsed_url in expected.values():
+            raise RuntimeError("expected-roster manifest repeats a public endpoint")
+        expected[parsed_label] = parsed_url
+
+    canonical, canonical_digest = _canonical_stream_roster()
+    if expected != canonical:
+        raise RuntimeError(
+            "expected-roster manifest does not match checked-in canonical code "
+            f"roster v{CANONICAL_STREAM_ROSTER_VERSION} sha256={canonical_digest} "
+            "(this roster is not a live runtime authority): "
+            + _roster_difference(canonical, expected)
+        )
+
+    supplied = dict(streams)
+    if len(supplied) != len(streams):
+        raise RuntimeError("stream labels must be unique")
+    if supplied != canonical:
+        raise RuntimeError(
+            "provided streams do not match checked-in canonical code roster "
+            f"v{CANONICAL_STREAM_ROSTER_VERSION} sha256={canonical_digest} "
+            "(this roster is not a live runtime authority): "
+            + _roster_difference(canonical, supplied)
+        )
+    return {
+        "path": str(path.expanduser().resolve()),
+        "sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+        "manifest_source_claim": source.strip(),
+        "captured_at_utc": (
+            captured_time.astimezone(UTC).isoformat().replace("+00:00", "Z")
+        ),
+        "age_at_start_seconds": round(max(0.0, roster_age), 3),
+        "stream_count": len(expected),
+        "canonical_roster_version": CANONICAL_STREAM_ROSTER_VERSION,
+        "canonical_roster_sha256": canonical_digest,
+        "canonical_code_roster_match": True,
+        "live_runtime_roster_authoritative": False,
+    }
+
+
+def build_ffmpeg_command(
+    ffmpeg: Path, url: str, *, decoded_pcm: bool = False
+) -> list[str]:
+    command = [
         str(ffmpeg),
         "-hide_banner",
         "-nostdin",
@@ -101,24 +254,51 @@ def build_ffmpeg_command(ffmpeg: Path, url: str) -> list[str]:
         "-i",
         url,
         "-vn",
-        "-af",
-        # A two-second detector hides precisely the short interruptions this
-        # monitor is intended to find.  One PCM frame is about 21 ms.
-        "silencedetect=noise=-75dB:d=0.01",
-        "-f",
-        "null",
-        "NUL" if os.name == "nt" else "/dev/null",
-        "-progress",
-        "pipe:1",
     ]
+    if decoded_pcm:
+        # Count decoded samples rather than inferring delivery from occasional
+        # FFmpeg progress messages or from signal level. Silence can be valid
+        # program material; PCM bytes continue to arrive during valid silence.
+        command.extend(
+            [
+                "-map",
+                "0:a:0",
+                "-ac",
+                str(_PCM_CHANNELS),
+                "-ar",
+                str(_PCM_SAMPLE_RATE),
+                "-c:a",
+                "pcm_s16le",
+                "-flush_packets",
+                "1",
+                "-f",
+                "s16le",
+                "pipe:1",
+            ]
+        )
+    else:
+        command.extend(
+            [
+                "-af",
+                # Keep the legacy silence diagnostics for existing callers.
+                "silencedetect=noise=-75dB:d=0.01",
+                "-f",
+                "null",
+                "NUL" if os.name == "nt" else "/dev/null",
+                "-progress",
+                "pipe:1",
+            ]
+        )
+    return command
 
 
 @dataclass
 class StreamState:
     label: str
     url: str
-    process: subprocess.Popen[str]
+    process: subprocess.Popen[Any]
     started_monotonic: float
+    decoded_audio_mode: bool = False
     lock: threading.Lock = field(default_factory=threading.Lock)
     media_seconds: float = 0.0
     first_progress_monotonic: float | None = None
@@ -129,6 +309,8 @@ class StreamState:
     measurement_media_baseline: float = 0.0
     measurement_last_progress_monotonic: float | None = None
     measurement_max_progress_gap_seconds: float = 0.0
+    decoded_audio_bytes_total: int = 0
+    measurement_audio_bytes_baseline: int = 0
     startup_delay_seconds: float | None = None
     startup_progress_age_seconds: float | None = None
     startup_transport_errors: int = 0
@@ -178,9 +360,56 @@ def _read_progress(state: StreamState, stream: IO[str]) -> None:
             state.media_seconds = max(state.media_seconds, media_seconds)
 
 
-def _read_diagnostics(state: StreamState, stream: IO[str]) -> None:
-    for raw_line in iter(stream.readline, ""):
-        line = raw_line.strip()
+def _read_decoded_audio(state: StreamState, stream: IO[bytes]) -> None:
+    """Measure decoded PCM delivery without treating quiet audio as a dropout."""
+    read_chunk = getattr(stream, "read1", stream.read)
+    while True:
+        chunk = read_chunk(65_536)
+        if not chunk:
+            return
+        now = time.monotonic()
+        with state.lock:
+            previous = state.last_progress_monotonic
+            if state.first_progress_monotonic is None:
+                state.first_progress_monotonic = now
+                state.first_media_seconds = 0.0
+            if previous is not None:
+                gap = now - previous
+                state.max_progress_gap_seconds = max(
+                    state.max_progress_gap_seconds, gap
+                )
+                if state.measurement_started_monotonic is not None:
+                    measurement_previous = (
+                        state.measurement_last_progress_monotonic
+                        or state.measurement_started_monotonic
+                    )
+                    state.measurement_max_progress_gap_seconds = max(
+                        state.measurement_max_progress_gap_seconds,
+                        now - measurement_previous,
+                    )
+            elif state.measurement_started_monotonic is not None:
+                state.measurement_max_progress_gap_seconds = max(
+                    state.measurement_max_progress_gap_seconds,
+                    now - state.measurement_started_monotonic,
+                )
+            state.decoded_audio_bytes_total += len(chunk)
+            state.media_seconds = (
+                state.decoded_audio_bytes_total / _PCM_BYTES_PER_SECOND
+            )
+            state.last_progress_monotonic = now
+            if state.measurement_started_monotonic is not None:
+                state.measurement_last_progress_monotonic = now
+
+
+def _read_diagnostics(state: StreamState, stream: IO[str] | IO[bytes]) -> None:
+    while True:
+        raw_line = stream.readline()
+        if not raw_line:
+            return
+        if isinstance(raw_line, bytes):
+            line = raw_line.decode("utf-8", errors="replace").strip()
+        else:
+            line = raw_line.strip()
         if not line:
             continue
         start = _SILENCE_START.search(line)
@@ -254,6 +483,9 @@ def _snapshot(state: StreamState, now: float, *, stopping: bool = False) -> dict
             )
             maximum_progress_gap = state.max_progress_gap_seconds
         maximum_silence = max(state.max_silence_seconds, current_silence)
+        decoded_audio_bytes = max(
+            0, state.decoded_audio_bytes_total - state.measurement_audio_bytes_baseline
+        )
         return {
             "label": state.label,
             "process_alive": state.process.poll() is None,
@@ -273,6 +505,18 @@ def _snapshot(state: StreamState, now: float, *, stopping: bool = False) -> dict
             "startup_transport_errors": state.startup_transport_errors,
             "readiness_satisfied": state.readiness_satisfied,
             "media_seconds": round(media_seconds, 3),
+            "decoded_audio_mode": state.decoded_audio_mode,
+            "decoded_audio_bytes": decoded_audio_bytes if state.decoded_audio_mode else None,
+            "decoded_audio_seconds": (
+                round(decoded_audio_bytes / _PCM_BYTES_PER_SECOND, 6)
+                if state.decoded_audio_mode
+                else None
+            ),
+            "decoded_audio_gap_seconds": (
+                round(maximum_progress_gap, 3)
+                if state.decoded_audio_mode
+                else None
+            ),
             "playback_margin_seconds": (
                 round(playback_margin, 3) if playback_margin is not None else None
             ),
@@ -290,23 +534,31 @@ def _snapshot(state: StreamState, now: float, *, stopping: bool = False) -> dict
         }
 
 
-def _start_stream(ffmpeg: Path, label: str, url: str) -> StreamState:
+def _start_stream(
+    ffmpeg: Path, label: str, url: str, *, decoded_pcm: bool = False
+) -> StreamState:
     process = subprocess.Popen(
-        build_ffmpeg_command(ffmpeg, url),
+        build_ffmpeg_command(ffmpeg, url, decoded_pcm=decoded_pcm),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
+        text=not decoded_pcm,
+        encoding=None if decoded_pcm else "utf-8",
+        errors=None if decoded_pcm else "replace",
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     assert process.stdout is not None and process.stderr is not None
-    state = StreamState(label, url, process, time.monotonic())
+    state = StreamState(
+        label, url, process, time.monotonic(), decoded_audio_mode=decoded_pcm
+    )
     threading.Thread(
-        target=_read_progress,
+        target=_read_decoded_audio if decoded_pcm else _read_progress,
         args=(state, process.stdout),
-        name=f"continuity-progress-{label}",
+        name=(
+            f"continuity-audio-{label}"
+            if decoded_pcm
+            else f"continuity-progress-{label}"
+        ),
         daemon=True,
     ).start()
     threading.Thread(
@@ -340,6 +592,7 @@ def _begin_measurement(
         state.readiness_satisfied = readiness_satisfied
         state.measurement_started_monotonic = now
         state.measurement_media_baseline = state.media_seconds
+        state.measurement_audio_bytes_baseline = state.decoded_audio_bytes_total
         state.measurement_last_progress_monotonic = state.last_progress_monotonic
         state.measurement_max_progress_gap_seconds = 0.0
         state.max_silence_seconds = 0.0
@@ -372,90 +625,172 @@ def _evaluate(
     maximum_progress_gap_seconds: float = 2.0,
     maximum_total_silence_seconds: float = 0.5,
     maximum_startup_delay_seconds: float = 60.0,
+    decoded_audio_mode: bool = False,
+    maximum_decoded_audio_gap_seconds: float = 0.25,
 ) -> dict[str, Any]:
-    measured = [row for row in snapshots if row.get("measurement_active", True)]
-    # Older saved fixtures and reports have no startup fields. Keep their old
-    # behavior while new runs require a successful acquisition window.
-    has_startup_metrics = any("startup_delay_seconds" in row for row in snapshots)
-    startup_rows = [row for row in measured if "startup_delay_seconds" in row]
-    startup_delay = max(
-        (
-            float(row["startup_delay_seconds"])
-            for row in startup_rows
-            if row["startup_delay_seconds"] is not None
-        ),
-        default=None,
+    metrics = _empty_evaluation_metrics()
+    for row in snapshots:
+        _accumulate_evaluation_metrics(metrics, row)
+    return _evaluate_metrics(
+        metrics,
+        minimum_margin_seconds=minimum_margin_seconds,
+        maximum_progress_age_seconds=maximum_progress_age_seconds,
+        maximum_silence_seconds=maximum_silence_seconds,
+        maximum_progress_gap_seconds=maximum_progress_gap_seconds,
+        maximum_total_silence_seconds=maximum_total_silence_seconds,
+        maximum_startup_delay_seconds=maximum_startup_delay_seconds,
+        decoded_audio_mode=decoded_audio_mode,
+        maximum_decoded_audio_gap_seconds=maximum_decoded_audio_gap_seconds,
     )
-    startup_age = max(
-        (float(row.get("startup_progress_age_seconds") or 0.0) for row in startup_rows),
-        default=0.0,
+
+
+def _empty_evaluation_metrics() -> dict[str, Any]:
+    return {
+        "sample_count": 0,
+        "has_startup_metrics": False,
+        "startup_delay": None,
+        "startup_age": 0.0,
+        "startup_transport_errors": 0,
+        "readiness_ok": True,
+        "minimum_margin": None,
+        "maximum_progress_age": 0.0,
+        "maximum_progress_gap": 0.0,
+        "maximum_decoded_audio_gap": 0.0,
+        "maximum_decoded_audio_seconds": 0.0,
+        "maximum_silence": 0.0,
+        "maximum_total_silence": 0.0,
+        "unexpected_exit": False,
+        "exit_codes": set(),
+        "diagnostic_tail": [],
+        "transport_errors": 0,
+    }
+
+
+def _accumulate_evaluation_metrics(metrics: dict[str, Any], row: dict[str, Any]) -> None:
+    if not row.get("measurement_active", True):
+        return
+    metrics["sample_count"] += 1
+    if "startup_delay_seconds" in row:
+        metrics["has_startup_metrics"] = True
+        startup_delay = row["startup_delay_seconds"]
+        if startup_delay is not None:
+            value = float(startup_delay)
+            metrics["startup_delay"] = max(
+                metrics["startup_delay"] or value, value
+            )
+        metrics["startup_age"] = max(
+            metrics["startup_age"],
+            float(row.get("startup_progress_age_seconds") or 0.0),
+        )
+        metrics["startup_transport_errors"] = max(
+            metrics["startup_transport_errors"],
+            int(row.get("startup_transport_errors", 0)),
+        )
+        metrics["readiness_ok"] = metrics["readiness_ok"] and bool(
+            row.get("readiness_satisfied", False)
+        )
+    margin = row.get("playback_margin_seconds")
+    if margin is not None:
+        value = float(margin)
+        current = metrics["minimum_margin"]
+        metrics["minimum_margin"] = value if current is None else min(current, value)
+    metrics["maximum_progress_age"] = max(
+        metrics["maximum_progress_age"], float(row["progress_age_seconds"])
     )
-    startup_transport_errors = max(
-        (int(row.get("startup_transport_errors", 0)) for row in startup_rows),
-        default=0,
+    metrics["maximum_progress_gap"] = max(
+        metrics["maximum_progress_gap"],
+        float(row.get("max_progress_gap_seconds", 0.0)),
     )
+    if row.get("decoded_audio_gap_seconds") is not None:
+        metrics["maximum_decoded_audio_gap"] = max(
+            metrics["maximum_decoded_audio_gap"],
+            float(row["decoded_audio_gap_seconds"]),
+        )
+    if row.get("decoded_audio_seconds") is not None:
+        metrics["maximum_decoded_audio_seconds"] = max(
+            metrics["maximum_decoded_audio_seconds"],
+            float(row["decoded_audio_seconds"]),
+        )
+    metrics["maximum_silence"] = max(
+        metrics["maximum_silence"], float(row.get("max_silence_seconds", 0.0))
+    )
+    metrics["maximum_total_silence"] = max(
+        metrics["maximum_total_silence"],
+        float(row.get("total_silence_seconds", 0.0)),
+    )
+    if bool(row.get("unexpected_exit", False)):
+        metrics["unexpected_exit"] = True
+        if row.get("exit_code") is not None:
+            metrics["exit_codes"].add(int(row["exit_code"]))
+    metrics["transport_errors"] = max(
+        metrics["transport_errors"], int(row.get("transport_errors", 0))
+    )
+    if row.get("diagnostic_tail"):
+        metrics["diagnostic_tail"] = list(row["diagnostic_tail"])
+
+
+def _evaluate_metrics(
+    metrics: dict[str, Any],
+    *,
+    minimum_margin_seconds: float,
+    maximum_progress_age_seconds: float,
+    maximum_silence_seconds: float,
+    maximum_progress_gap_seconds: float,
+    maximum_total_silence_seconds: float,
+    maximum_startup_delay_seconds: float,
+    decoded_audio_mode: bool = False,
+    maximum_decoded_audio_gap_seconds: float = 0.25,
+) -> dict[str, Any]:
+    has_startup_metrics = bool(metrics["has_startup_metrics"])
+    startup_delay = metrics["startup_delay"]
+    startup_age = float(metrics["startup_age"])
+    startup_transport_errors = int(metrics["startup_transport_errors"])
     startup_ok = not has_startup_metrics or (
         startup_delay is not None
         and startup_delay <= maximum_startup_delay_seconds
         and startup_age <= maximum_progress_age_seconds
         and startup_transport_errors == 0
-        and all(bool(row.get("readiness_satisfied", False)) for row in startup_rows)
+        and bool(metrics["readiness_ok"])
     )
-    minimum_margin = min(
-        (
-            float(row["playback_margin_seconds"])
-            for row in measured
-            if row["playback_margin_seconds"] is not None
-        ),
-        default=None,
-    )
-    maximum_progress_age = max(
-        (float(row["progress_age_seconds"]) for row in measured),
-        default=0.0,
-    )
-    maximum_progress_gap = max(
-        (
-            float(row.get("max_progress_gap_seconds", 0.0))
-            for row in measured
-        ),
-        default=0.0,
-    )
-    maximum_silence = max(
-        (float(row["max_silence_seconds"]) for row in measured),
-        default=0.0,
-    )
-    maximum_total_silence = max(
-        (float(row.get("total_silence_seconds", 0.0)) for row in measured),
-        default=0.0,
-    )
-    unexpected_exit = any(bool(row["unexpected_exit"]) for row in measured)
-    exit_codes = [
-        int(row["exit_code"])
-        for row in measured
-        if row["unexpected_exit"] and row["exit_code"] is not None
-    ]
-    diagnostic_tail = next(
-        (
-            list(row["diagnostic_tail"])
-            for row in reversed(measured)
-            if row.get("diagnostic_tail")
-        ),
-        [],
-    )
+    minimum_margin = metrics["minimum_margin"]
+    maximum_progress_age = float(metrics["maximum_progress_age"])
+    maximum_progress_gap = float(metrics["maximum_progress_gap"])
+    maximum_decoded_audio_gap = float(metrics["maximum_decoded_audio_gap"])
+    maximum_decoded_audio_seconds = float(metrics["maximum_decoded_audio_seconds"])
+    maximum_silence = float(metrics["maximum_silence"])
+    maximum_total_silence = float(metrics["maximum_total_silence"])
+    unexpected_exit = bool(metrics["unexpected_exit"])
+    exit_codes = metrics["exit_codes"]
+    diagnostic_tail = list(metrics["diagnostic_tail"])
+    transport_errors = int(metrics["transport_errors"])
+    if decoded_audio_mode:
+        gap_ok = (
+            maximum_decoded_audio_gap <= maximum_decoded_audio_gap_seconds
+            and maximum_decoded_audio_seconds > 0.0
+        )
+    else:
+        gap_ok = maximum_progress_gap <= maximum_progress_gap_seconds
     continuity_ok = (
-        startup_ok
+        metrics["sample_count"] > 0
+        and startup_ok
         and not unexpected_exit
         and minimum_margin is not None
         and minimum_margin >= minimum_margin_seconds
         and maximum_progress_age <= maximum_progress_age_seconds
-        and maximum_progress_gap <= maximum_progress_gap_seconds
-        and maximum_silence <= maximum_silence_seconds
-        and maximum_total_silence <= maximum_total_silence_seconds
+        and gap_ok
+        and (
+            decoded_audio_mode
+            or (
+                maximum_silence <= maximum_silence_seconds
+                and maximum_total_silence <= maximum_total_silence_seconds
+            )
+        )
         and startup_transport_errors == 0
-        and max((int(row["transport_errors"]) for row in measured), default=0) == 0
+        and transport_errors == 0
     )
     return {
         "continuity_ok": continuity_ok,
+        "measurement_samples": metrics["sample_count"],
         "startup_ok": startup_ok,
         "startup_delay_seconds": startup_delay,
         "startup_progress_age_seconds": startup_age,
@@ -463,12 +798,14 @@ def _evaluate(
         "minimum_playback_margin_seconds": minimum_margin,
         "maximum_progress_age_seconds": maximum_progress_age,
         "maximum_progress_gap_seconds": maximum_progress_gap,
+        "maximum_decoded_audio_gap_seconds": maximum_decoded_audio_gap,
+        "maximum_decoded_audio_seconds": maximum_decoded_audio_seconds,
         "maximum_silence_seconds": maximum_silence,
         "total_silence_seconds": maximum_total_silence,
         "unexpected_exit": unexpected_exit,
-        "unexpected_exit_codes": sorted(set(exit_codes)),
+        "unexpected_exit_codes": sorted(exit_codes),
         "diagnostic_tail": diagnostic_tail,
-        "transport_errors": max((int(row["transport_errors"]) for row in measured), default=0),
+        "transport_errors": transport_errors,
     }
 
 
@@ -483,14 +820,78 @@ def run(args: argparse.Namespace) -> int:
     if not ffmpeg.is_file():
         raise RuntimeError(f"FFmpeg is missing: {ffmpeg}")
     output = Path(args.output).expanduser().resolve()
-    output.parent.mkdir(parents=True, exist_ok=True)
     streams = args.stream or list(DEFAULT_STREAMS)
     labels = [label for label, _url in streams]
     if len(labels) != len(set(labels)):
         raise RuntimeError("stream labels must be unique")
+    roster = (
+        _load_expected_roster(Path(args.expected_roster_file), streams)
+        if args.expected_roster_file
+        else None
+    )
+    decoded_pcm = roster is not None
+    if decoded_pcm and (
+        output.exists()
+        or output.with_suffix(output.suffix + ".summary.json").exists()
+    ):
+        raise RuntimeError("strict evidence output already exists; choose a new output path")
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    source_path = Path(__file__).resolve()
+    identity = {
+        "monitor_source_path": str(source_path),
+        "monitor_source_sha256": _sha256_path(source_path),
+        "ffmpeg_path": str(ffmpeg),
+        "ffmpeg_sha256": _sha256_path(ffmpeg),
+        "roster_manifest": roster,
+        "canonical_code_roster_match": bool(
+            roster and roster.get("canonical_code_roster_match") is True
+        ),
+        "canonical_roster_version": (
+            roster.get("canonical_roster_version") if roster else None
+        ),
+        "canonical_roster_sha256": (
+            roster.get("canonical_roster_sha256") if roster else None
+        ),
+        "live_runtime_roster_authoritative": False,
+        "roster_authority_scope": "checked-in DEFAULT_STREAMS only; live runtime inventory not verified",
+        "endpoints": [
+            _endpoint_identity(label, url)
+            for label, url in streams
+        ],
+    }
+    settings = {
+        "duration_seconds": args.duration_seconds,
+        "sample_seconds": args.sample_seconds,
+        "warmup_seconds": args.warmup_seconds,
+        "readiness_stable_seconds": args.readiness_stable_seconds,
+        "maximum_startup_delay_seconds": args.maximum_startup_delay_seconds,
+        "minimum_margin_seconds": args.minimum_margin_seconds,
+        "maximum_progress_age_seconds": args.maximum_progress_age_seconds,
+        "maximum_progress_gap_seconds": args.maximum_progress_gap_seconds,
+        "maximum_decoded_audio_gap_seconds": args.maximum_decoded_audio_gap_seconds,
+        "maximum_silence_seconds": args.maximum_silence_seconds,
+        "maximum_total_silence_seconds": args.maximum_total_silence_seconds,
+        "silence_thresholds_applied": not decoded_pcm,
+        "legacy_progress_gap_threshold_applied": not decoded_pcm,
+        "decoded_audio_mode": decoded_pcm,
+        "decoded_audio_format": (
+            f"s16le/{_PCM_SAMPLE_RATE}Hz/{_PCM_CHANNELS}ch" if decoded_pcm else None
+        ),
+        "decoded_audio_stream_selection": "0:a:0" if decoded_pcm else None,
+        "ffmpeg_input_policy": {
+            "rw_timeout_microseconds": 15_000_000,
+            "reconnect": True,
+            "reconnect_at_eof": True,
+            "reconnect_streamed": True,
+            "reconnect_delay_max_seconds": 5,
+            "threads": 1,
+        },
+        "output_path": str(output),
+    }
 
     states: list[StreamState] = []
-    history: dict[str, list[dict[str, Any]]] = {label: [] for label in labels}
+    metrics = {label: _empty_evaluation_metrics() for label in labels}
     started = time.monotonic()
     with output.open("a", encoding="utf-8", newline="\n") as handle:
         _write_json_line(
@@ -498,18 +899,26 @@ def run(args: argparse.Namespace) -> int:
             {
                 "type": "continuity_start",
                 "timestamp": _utc_now(),
-                "duration_seconds": args.duration_seconds,
-                "sample_seconds": args.sample_seconds,
-                "warmup_seconds": args.warmup_seconds,
-                "readiness_stable_seconds": args.readiness_stable_seconds,
-                "maximum_startup_delay_seconds": args.maximum_startup_delay_seconds,
+                "mode": (
+                    "decoded_pcm_checked_in_canonical_roster_only"
+                    if decoded_pcm
+                    else "legacy_progress_roster_unverified"
+                ),
+                **identity,
+                "config": settings,
                 "labels": labels,
             },
         )
         try:
-            states = [_start_stream(ffmpeg, label, url) for label, url in streams]
+            for label, url in streams:
+                states.append(_start_stream(ffmpeg, label, url, decoded_pcm=decoded_pcm))
             warmup_deadline = started + args.warmup_seconds
             startup_deadline = started + args.maximum_startup_delay_seconds
+            readiness_gap_limit = (
+                args.maximum_decoded_audio_gap_seconds
+                if decoded_pcm
+                else args.maximum_progress_gap_seconds
+            )
             readiness_last_progress: dict[str, float | None] = {
                 state.label: None for state in states
             }
@@ -530,7 +939,7 @@ def run(args: argparse.Namespace) -> int:
                         if (
                             previous_progress is None
                             or last_progress - previous_progress
-                            > args.maximum_progress_gap_seconds
+                            > readiness_gap_limit
                         ):
                             stable_since = last_progress
                         elif stable_since is None:
@@ -538,7 +947,7 @@ def run(args: argparse.Namespace) -> int:
                         readiness_last_progress[state.label] = last_progress
                     if (
                         last_progress is None
-                        or now - last_progress > args.maximum_progress_gap_seconds
+                        or now - last_progress > readiness_gap_limit
                     ):
                         stable_since = None
                     readiness_stable_since[state.label] = stable_since
@@ -571,23 +980,39 @@ def run(args: argparse.Namespace) -> int:
                     "warmup_elapsed_seconds": round(measurement_started - started, 3),
                     "readiness_stable_seconds": args.readiness_stable_seconds,
                     "all_mounts_stable": readiness_satisfied,
+                    "canonical_code_roster_match": bool(
+                        roster and roster.get("canonical_code_roster_match") is True
+                    ),
+                    "live_runtime_roster_authoritative": False,
                     "streams": startup_rows,
                 },
             )
             next_sample = measurement_started
-            while time.monotonic() - measurement_started < args.duration_seconds:
+            measurement_deadline = measurement_started + args.duration_seconds
+            measurement_boundary_monotonic: float | None = None
+            while True:
                 now = time.monotonic()
                 if now < next_sample:
                     time.sleep(min(0.25, next_sample - now))
                     continue
+                at_boundary = now >= measurement_deadline
                 rows = [_snapshot(state, now) for state in states]
                 for row in rows:
-                    history[str(row["label"])].append(row)
+                    _accumulate_evaluation_metrics(metrics[str(row["label"])], row)
                 _write_json_line(
                     handle,
-                    {"type": "continuity_sample", "timestamp": _utc_now(), "streams": rows},
+                    {
+                        "type": "continuity_sample",
+                        "timestamp": _utc_now(),
+                        "measurement_elapsed_seconds": round(now - measurement_started, 3),
+                        "duration_boundary_sample": at_boundary,
+                        "streams": rows,
+                    },
                 )
-                next_sample += args.sample_seconds
+                if at_boundary:
+                    measurement_boundary_monotonic = now
+                    break
+                next_sample = min(next_sample + args.sample_seconds, measurement_deadline)
         finally:
             for state in states:
                 if state.process.poll() is None:
@@ -601,28 +1026,63 @@ def run(args: argparse.Namespace) -> int:
 
         summary_streams: dict[str, dict[str, Any]] = {}
         for label in labels:
-            summary_streams[label] = _evaluate(
-                history[label],
+            summary_streams[label] = _evaluate_metrics(
+                metrics[label],
                 minimum_margin_seconds=args.minimum_margin_seconds,
                 maximum_progress_age_seconds=args.maximum_progress_age_seconds,
                 maximum_silence_seconds=args.maximum_silence_seconds,
                 maximum_progress_gap_seconds=args.maximum_progress_gap_seconds,
                 maximum_total_silence_seconds=args.maximum_total_silence_seconds,
                 maximum_startup_delay_seconds=args.maximum_startup_delay_seconds,
+                decoded_audio_mode=decoded_pcm,
+                maximum_decoded_audio_gap_seconds=args.maximum_decoded_audio_gap_seconds,
             )
+        finished_monotonic = time.monotonic()
+        measured_until = measurement_boundary_monotonic or finished_monotonic
+        measured_duration = measured_until - measurement_started
+        all_streams_ok = all(row["continuity_ok"] for row in summary_streams.values())
+        continuity_ok = all_streams_ok and (
+            not decoded_pcm
+            or (
+                roster is not None
+                and roster.get("canonical_code_roster_match") is True
+                and measurement_boundary_monotonic is not None
+                and measured_duration >= args.duration_seconds
+            )
+        )
         summary = {
             "type": "continuity_summary",
             "timestamp": _utc_now(),
-            "elapsed_seconds": round(time.monotonic() - started, 3),
+            "mode": (
+                "decoded_pcm_checked_in_canonical_roster_only"
+                if decoded_pcm
+                else "legacy_progress_roster_unverified"
+            ),
+            **identity,
+            "config": settings,
+            "elapsed_seconds": round(finished_monotonic - started, 3),
             "warmup_elapsed_seconds": round(measurement_started - started, 3),
-            "measured_duration_seconds": round(time.monotonic() - measurement_started, 3),
+            "measured_duration_seconds": round(measured_duration, 3),
+            "requested_measurement_duration_seconds": args.duration_seconds,
+            "duration_boundary_sampled": measurement_boundary_monotonic is not None,
+            "duration_boundary_lateness_seconds": (
+                round(measurement_boundary_monotonic - measurement_deadline, 3)
+                if measurement_boundary_monotonic is not None
+                else None
+            ),
             "warmup_seconds": args.warmup_seconds,
             "readiness_stable_seconds": args.readiness_stable_seconds,
-            "continuity_ok": all(row["continuity_ok"] for row in summary_streams.values()),
+            "continuity_ok": continuity_ok,
+            "evidence_grade": (
+                "decoded_pcm_checked_in_canonical_roster_not_live_runtime_authority"
+                if decoded_pcm
+                else "legacy_progress_roster_unverified"
+            ),
             "streams": summary_streams,
         }
         _write_json_line(handle, summary)
     summary_path = output.with_suffix(output.suffix + ".summary.json")
+    summary["jsonl_sha256"] = _sha256_path(output)
     temporary = summary_path.with_suffix(summary_path.suffix + ".tmp")
     temporary.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     os.replace(temporary, summary_path)
@@ -636,6 +1096,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--ffmpeg", required=True)
     parser.add_argument("--stream", action="append", type=_parse_stream_arg)
+    parser.add_argument(
+        "--expected-roster-file",
+        help=(
+            "fresh schema-v1 JSON with source, captured_at_utc, and streams "
+            "[{label,url}] exactly matching the pinned checked-in DEFAULT_STREAMS; "
+            "enables decoded-PCM evidence for that code roster only, not the live runtime inventory"
+        ),
+    )
     parser.add_argument("--duration-seconds", type=float, default=300.0)
     parser.add_argument("--sample-seconds", type=float, default=2.0)
     parser.add_argument("--warmup-seconds", type=float, default=10.0)
@@ -644,6 +1112,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--minimum-margin-seconds", type=float, default=-5.0)
     parser.add_argument("--maximum-progress-age-seconds", type=float, default=5.0)
     parser.add_argument("--maximum-progress-gap-seconds", type=float, default=2.0)
+    parser.add_argument("--maximum-decoded-audio-gap-seconds", type=float, default=0.25)
     parser.add_argument("--maximum-silence-seconds", type=float, default=0.25)
     parser.add_argument("--maximum-total-silence-seconds", type=float, default=0.5)
     parser.add_argument(
@@ -664,6 +1133,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("readiness-stable-seconds must be between 0 and 300")
     if not 1.0 <= args.maximum_startup_delay_seconds <= 600.0:
         parser.error("maximum-startup-delay-seconds must be between 1 and 600")
+    if not 0.0 <= args.maximum_decoded_audio_gap_seconds <= 60.0:
+        parser.error("maximum-decoded-audio-gap-seconds must be between 0 and 60")
     return run(args)
 
 
