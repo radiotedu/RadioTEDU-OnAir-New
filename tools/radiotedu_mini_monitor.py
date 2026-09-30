@@ -237,7 +237,8 @@ def _read_maincharacter_runtime() -> dict | None:
         )
         updated_epoch = float(payload.get("updated_epoch") or 0)
         age = time.time() - updated_epoch
-        tick_age = float(payload.get("scheduler_tick_age_seconds") or 999999)
+        tick_age_value = payload.get("scheduler_tick_age_seconds")
+        tick_age = 999999.0 if tick_age_value is None else float(tick_age_value)
         runtime = payload.get("runtime_status")
         if (
             int(payload.get("station_id") or 0) != 11

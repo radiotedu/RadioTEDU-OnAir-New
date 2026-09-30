@@ -26,7 +26,8 @@ def _maincharacter_station_row() -> dict[str, object] | None:
         runtime = dict(payload.get("runtime_status") or {})
         mount = dict(runtime.get("icecast_mount_health") or {})
         age = time.time() - float(payload.get("updated_epoch") or 0)
-        tick_age = float(payload.get("scheduler_tick_age_seconds") or 999999)
+        tick_age_value = payload.get("scheduler_tick_age_seconds")
+        tick_age = 999999.0 if tick_age_value is None else float(tick_age_value)
     except (OSError, ValueError, TypeError, AttributeError):
         return None
     fresh = (
