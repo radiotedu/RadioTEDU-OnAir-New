@@ -12,19 +12,15 @@ import json
 import os
 from pathlib import Path
 import queue
-import sqlite3
 import threading
 import time
 import tkinter as tk
-import traceback
 from tkinter import font as tkfont
-from datetime import date, datetime, time as day_time, timezone, timedelta
-from zoneinfo import ZoneInfo
 
 
-DATA_ROOT = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / "RadioTEDU" / "OnAir"
-HEARTBEAT_ROOT = DATA_ROOT / "State" / "StationWorkers"
-DATABASE = DATA_ROOT / "cleanroom.db"
+MONITOR_API_HOST = "127.0.0.1"
+MONITOR_API_PORT = 8100
+MONITOR_API_PATH = "/api/monitor/snapshot"
 STATIONS = (
     (1, "Classical", "/classic"),
     (2, "Lo-Fi", "/lofi"),
@@ -40,14 +36,6 @@ LISTENER_HOST = "stream.radiotedu.com"
 LISTENER_PORT = 11154
 _LISTENER_LOCK = threading.Lock()
 _LISTENER_RESULTS: dict[int, dict] = {}
-try:
-    _LISTENER_RESULTS.update({
-        int(key): value for key, value in json.loads(
-            (DATA_ROOT / "Logs" / "mini_monitor_listener.json").read_text(encoding="utf-8")
-        ).items()
-    })
-except (OSError, ValueError, TypeError, AttributeError):
-    pass
 
 
 def _probe_listeners() -> None:
@@ -78,12 +66,6 @@ def _probe_listeners() -> None:
                     "ok": ok, "at": time.time(), "detail": detail,
                     "failures": 0 if ok else int(previous.get("failures") or 0) + 1,
                 }
-                try:
-                    (DATA_ROOT / "Logs" / "mini_monitor_listener.json").write_text(
-                        json.dumps(_LISTENER_RESULTS, ensure_ascii=False), encoding="utf-8"
-                    )
-                except OSError:
-                    pass
             time.sleep(19)
 
 
@@ -332,17 +314,85 @@ def _parse_utc(value: object) -> float:
 
 
 def _snapshot() -> dict:
-    heartbeats = _read_heartbeats()
-    playing, ad, error = _database_snapshot()
+    connection = http.client.HTTPConnection(
+        MONITOR_API_HOST, MONITOR_API_PORT, timeout=3.0
+    )
+    try:
+        connection.request("GET", MONITOR_API_PATH, headers={"Accept": "application/json"})
+        response = connection.getresponse()
+        payload = response.read(262144)
+        if response.status != 200:
+            raise OSError(f"Health API HTTP {response.status}")
+        snapshot = json.loads(payload.decode("utf-8"))
+        if not isinstance(snapshot, dict):
+            raise ValueError("Health API response is not an object")
+    finally:
+        connection.close()
+
+    observed_at = (
+        (snapshot.get("freshness") or {}).get("runtime_observed_at")
+        or snapshot.get("generated_at")
+        or time.time()
+    )
+    stations = {
+        int(item["station_id"]): item
+        for item in snapshot.get("stations", [])
+        if isinstance(item, dict) and item.get("station_id") is not None
+    }
+    heartbeats: dict[int, dict] = {}
+    playing: dict[int, dict] = {}
+    for station_id, _, _ in STATIONS:
+        station = stations.get(station_id)
+        if station is None:
+            continue
+        runtime = station.get("runtime") or {}
+        playout = station.get("playout_monitor")
+        if not isinstance(playout, dict):
+            playout = {"state": "unavailable"}
+        current = station.get("now_playing") or station.get("preserved_item") or {}
+        if isinstance(current, str):
+            current = {"title": current}
+        if not isinstance(current, dict):
+            current = {}
+        playing[station_id] = {
+            **playout,
+            "title": str(
+                runtime.get("active_stream_title")
+                or current.get("title")
+                or current.get("name")
+                or ""
+            ),
+            "artist": str(
+                runtime.get("active_stream_artist")
+                or current.get("artist")
+                or ""
+            ),
+            "track_type": str(
+                runtime.get("active_track_type")
+                or current.get("track_type")
+                or ""
+            ),
+        }
+        heartbeats[station_id] = {
+            "updated_epoch": observed_at,
+            "running": station.get("health") != "unavailable",
+            "runtime_status": runtime,
+        }
     with _LISTENER_LOCK:
         listeners = dict(_LISTENER_RESULTS)
-    return {"heartbeats": heartbeats, "playing": playing, "listeners": listeners,
-            "ad": ad, "error": error, "at": time.time()}
+    return {
+        "heartbeats": heartbeats,
+        "playing": playing,
+        "listeners": listeners,
+        "ad": snapshot.get("ad_monitor") or {"state": "unavailable"},
+        "error": None,
+        "at": time.time(),
+    }
 
 
 def _classify(heartbeat: dict, prior: dict | None, listener: dict | None) -> tuple[str, str]:
     if not heartbeat:
-        return "DURDU", "bad"
+        return "SAĞLIK VERİSİ YOK", "warn"
     age = time.time() - float(heartbeat.get("updated_epoch") or 0)
     if age > 20 or not heartbeat.get("running"):
         return "DURDU", "bad"
@@ -448,9 +498,10 @@ class Monitor(tk.Tk):
     def _collect(self) -> None:
         try:
             data = _snapshot()
-        except Exception as exc:
-            data = {"heartbeats": _read_heartbeats(), "playing": {}, "listeners": {},
-                    "ad": None, "error": f"Okuma hatası: {type(exc).__name__}",
+        except (OSError, ValueError, TypeError, http.client.HTTPException) as exc:
+            data = {"heartbeats": {}, "playing": {}, "listeners": {},
+                    "ad": {"state": "unavailable"},
+                    "error": f"Yerel sağlık API'si okunamadı: {type(exc).__name__}",
                     "at": time.time()}
         try:
             self._result_queue.put_nowait(data)
@@ -482,8 +533,13 @@ class Monitor(tk.Tk):
                 artist = str(playout.get("artist") or "").strip()
                 title = str(playout.get("title") or "").strip()
                 song = f"Şimdi: {artist} · {title}" if artist else f"Şimdi: {title}"
+            elif playout.get("program_ready"):
+                song = (
+                    "Program hazır · "
+                    f"{int(playout.get('eligible_music_count') or 0)} uygun müzik"
+                )
             elif state in {"ÜRETİCİ DURDU", "SES KAYNAĞI DURDU"}:
-                song = "Şu anki içerik kaynağı çalışmıyor"
+                song = "Yayın kaynağı toparlanıyor"
             else:
                 song = "Şu an çalan içerik bilgisi yok"
             song_label.configure(text=(song[:82] + "…") if len(song) > 83 else song)
@@ -497,8 +553,12 @@ class Monitor(tk.Tk):
             next_label.configure(text=(next_text[:82] + "…") if len(next_text) > 83 else next_text)
             inventory_label.configure(
                 text=(
-                    f"Otomatik uygun müzik: {int(playout.get('eligible_count') or 0)}"
-                    f" · sıradaki öğeler: {int(playout.get('pending_count') or 0)}"
+                    "Program envanteri okunamadı"
+                    if playout.get("state") == "unavailable"
+                    else (
+                        f"Otomatik uygun müzik: {int(playout.get('eligible_music_count') or 0)}"
+                        f" · sıradaki öğeler: {int(playout.get('pending_count') or 0)}"
+                    )
                 )
             )
             health = (heartbeat.get("runtime_status") or {}).get("icecast_mount_health") or {}
@@ -532,6 +592,8 @@ class Monitor(tk.Tk):
                 text = f"Reklam zamanı geldi · plan kuyruğa yazılmamış ({ad.get('name') or 'adsız plan'})"
             elif ad.get("state") == "countdown":
                 text = f"{int(ad.get('remaining') or 0)} şarkı kaldı · {ad.get('name') or 'reklam planı'}"
+            elif ad.get("state") == "unavailable":
+                text = "Reklam durumu sağlık API'sinden alınamadı"
             else:
                 text = "Reklam planı durumu belirlenemedi"
             self.ad_text.configure(text=text)
@@ -543,9 +605,4 @@ class Monitor(tk.Tk):
 
 
 if __name__ == "__main__" and _single_instance():
-    try:
-        Monitor().mainloop()
-    except Exception:
-        (DATA_ROOT / "Logs" / "mini_monitor_error.log").write_text(
-            traceback.format_exc(), encoding="utf-8"
-        )
+    Monitor().mainloop()
