@@ -15,10 +15,11 @@ import threading
 import time
 import tkinter as tk
 from tkinter import font as tkfont
+from datetime import datetime
 
 
 MONITOR_API_HOST = "127.0.0.1"
-MONITOR_API_PORT = 8100
+MONITOR_API_PORT = 18110
 MONITOR_API_PATH = "/api/monitor/snapshot"
 STATIONS = (
     (1, "Classical", "/classic"),
@@ -82,7 +83,7 @@ def _single_instance() -> bool:
 
 def _snapshot() -> dict:
     connection = http.client.HTTPConnection(
-        MONITOR_API_HOST, MONITOR_API_PORT, timeout=3.0
+        MONITOR_API_HOST, MONITOR_API_PORT, timeout=15.0
     )
     try:
         connection.request("GET", MONITOR_API_PATH, headers={"Accept": "application/json"})
@@ -116,13 +117,26 @@ def _snapshot() -> dict:
         playout = station.get("playout_monitor")
         if not isinstance(playout, dict):
             playout = {"state": "unavailable"}
-        current = station.get("now_playing") or station.get("preserved_item") or {}
+        public_status = station.get("public_status")
+        if not public_status:
+            public_status = "live" if station.get("health") == "healthy" else "unknown"
+        is_live = public_status == "live"
+        current = station.get("now_playing") if is_live else {}
+        last_item = station.get("preserved_item") if not is_live else {}
         if isinstance(current, str):
             current = {"title": current}
         if not isinstance(current, dict):
             current = {}
+        if isinstance(last_item, str):
+            last_item = {"title": last_item}
+        if not isinstance(last_item, dict):
+            last_item = {}
         playing[station_id] = {
             **playout,
+            "is_live": is_live,
+            "station_health": str(station.get("health") or "unknown"),
+            "active_show_name": str(station.get("active_show_name") or ""),
+            "program_running": bool(runtime.get("program_running")),
             "title": str(
                 runtime.get("active_stream_title")
                 or current.get("title")
@@ -139,11 +153,18 @@ def _snapshot() -> dict:
                 or current.get("track_type")
                 or ""
             ),
+            "last_title": str(last_item.get("title") or last_item.get("name") or ""),
+            "last_artist": str(last_item.get("artist") or ""),
         }
         heartbeats[station_id] = {
             "updated_epoch": observed_at,
-            "running": station.get("health") != "unavailable",
+            "running": bool(
+                runtime.get("alive")
+                or runtime.get("running")
+                or runtime.get("program_running")
+            ),
             "runtime_status": runtime,
+            "station_health": str(station.get("health") or "unknown"),
         }
     with _LISTENER_LOCK:
         listeners = dict(_LISTENER_RESULTS)
@@ -151,7 +172,11 @@ def _snapshot() -> dict:
         "heartbeats": heartbeats,
         "playing": playing,
         "listeners": listeners,
-        "ad": snapshot.get("ad_monitor") or {"state": "unavailable"},
+        "ad": (
+            snapshot.get("ad_monitor")
+            if isinstance(snapshot.get("ad_monitor"), dict)
+            else {"state": "unsupported"}
+        ),
         "error": None,
         "at": time.time(),
     }
@@ -161,18 +186,49 @@ def _classify(heartbeat: dict, prior: dict | None, listener: dict | None) -> tup
     if not heartbeat:
         return "SAĞLIK VERİSİ YOK", "warn"
     age = time.time() - float(heartbeat.get("updated_epoch") or 0)
-    if age > 20 or not heartbeat.get("running"):
+    if age > 20:
+        return "SAĞLIK VERİSİ ESKİ", "warn"
+    if not heartbeat.get("running"):
         return "DURDU", "bad"
     runtime = heartbeat.get("runtime_status") or {}
+    station_health = str(heartbeat.get("station_health") or "unknown").lower()
     health = runtime.get("icecast_mount_health") or {}
+    if runtime.get("program_pcm_stalled") is True:
+        return "PROGRAM SESİ DURDU", "bad"
+    if runtime.get("producer_eof") is True:
+        return "PROGRAM KAYNAĞI BİTTİ", "bad"
     if not runtime.get("program_running"):
         if runtime.get("output_feed_active"):
-            return "SES KAYNAĞI DURDU", "warn"
-        return "ÜRETİCİ DURDU", "bad"
+            return "PROGRAM İŞÇİSİ DURDU", "bad"
+        return "PROGRAM HAZIR DEĞİL", "bad"
+    if station_health == "unavailable":
+        return "DİNLEYİCİ AKIŞI YOK", "bad"
+    if runtime.get("output_feed_active") is False:
+        return "ÇIKIŞ SESİ DURDU", "bad"
+    deliveries = runtime.get("deliveries") or runtime.get("branches") or {}
+    required = runtime.get("required_outputs") or {}
+    required_names = [str(name) for name, value in required.items() if value]
+    if any(deliveries.get(name) is False for name in required_names):
+        return "GEREKLİ ÇIKIŞ KESİK", "bad"
+    if not health:
+        if station_health == "degraded":
+            return "SAĞLIK BOZUK", "warn"
+        if listener and time.time() - float(listener.get("at") or 0) < 300:
+            if listener.get("ok"):
+                return "DİNLEYİCİ CANARY OK", "ok"
+            if int(listener.get("failures") or 0) >= 2:
+                return "DİNLEYİCİ KESİK", "bad"
+            return "DİNLEYİCİ?", "warn"
+        if station_health == "healthy":
+            return "KAYNAK SAĞLIKLI · DİNLEYİCİ BEKLENİYOR", "warn"
+        return "SAĞLIK TELEMETRİSİ EKSİK", "warn"
     write_age = health.get("last_network_write_age_seconds")
     if write_age is None or float(write_age) > 15 or not health.get("process_running"):
         return "KAYNAK KESİK", "bad"
-    if health.get("mount_healthy") is False or runtime.get("recovery", {}).get("state") not in (None, "idle"):
+    if health.get("mount_healthy") is False:
+        return "DİNLEYİCİ ÇIKIŞI KESİK", "bad"
+    recovery = runtime.get("recovery") or {}
+    if recovery.get("state") not in (None, "idle", "healthy"):
         return "TOPARLANIYOR", "warn"
     if prior and int(health.get("encoded_bytes_sent") or 0) <= int(prior.get("bytes") or 0):
         if time.time() - float(prior.get("at") or 0) >= 10:
@@ -281,9 +337,14 @@ class Monitor(tk.Tk):
         except queue.Empty:
             self.after(500, self._drain)
             return
-        self._busy = False
-        self._render(data)
-        self.after(500, self._drain)
+        try:
+            self._render(data)
+        except Exception as exc:
+            self.summary.configure(text="GÖRÜNÜM HATASI", fg="#FF7F82")
+            self.updated.configure(text=f"Ekran güncellenemedi · {type(exc).__name__}")
+        finally:
+            self._busy = False
+            self.after(500, self._drain)
 
     def _render(self, data: dict) -> None:
         counts = {"ok": 0, "warn": 0, "bad": 0}
@@ -294,21 +355,32 @@ class Monitor(tk.Tk):
                                      data["listeners"].get(sid))
             counts[level] += 1
             state_label, song_label, next_label, inventory_label = self.rows[sid]
-            state_label.configure(text=state, fg=palette[level])
             playout = data["playing"].get(sid) or {}
-            if playout.get("title"):
+            if playout.get("station_health") == "degraded" and level == "ok":
+                level = "warn"
+                counts["ok"] -= 1
+                counts["warn"] += 1
+            state_label.configure(text=state, fg=palette[level])
+            if playout.get("title") and playout.get("is_live"):
                 artist = str(playout.get("artist") or "").strip()
                 title = str(playout.get("title") or "").strip()
                 song = f"Şimdi: {artist} · {title}" if artist else f"Şimdi: {title}"
+            elif playout.get("active_show_name") and playout.get("program_running"):
+                song = f"Yayında: {playout['active_show_name']} · parça bilgisi bekleniyor"
+            elif playout.get("program_running"):
+                song = "Yayın programı çalışıyor · içerik etiketi bekleniyor"
             elif playout.get("program_ready"):
                 song = (
-                    "Program envanteri mevcut · "
+                    "Program kuyruğu hazır · "
                     f"{int(playout.get('eligible_music_count') or 0)} uygun müzik"
                 )
-            elif state in {"ÜRETİCİ DURDU", "SES KAYNAĞI DURDU"}:
+            elif playout.get("last_title"):
+                last = f"{playout.get('last_artist')} · {playout.get('last_title')}".strip(" ·")
+                song = f"Son çalan: {last} · yayın dışı"
+            elif state in {"PROGRAM HAZIR DEĞİL", "PROGRAM SESİ DURDU", "PROGRAM KAYNAĞI BİTTİ"}:
                 song = "Yayın kaynağı toparlanıyor"
             else:
-                song = "Şu an çalan içerik bilgisi yok"
+                song = "Program içeriği sağlık API'sinden doğrulanamadı"
             song_label.configure(text=(song[:82] + "…") if len(song) > 83 else song)
             next_title = str(playout.get("next_title") or "").strip()
             next_artist = str(playout.get("next_artist") or "").strip()
@@ -361,6 +433,12 @@ class Monitor(tk.Tk):
                 text = f"{int(ad.get('remaining') or 0)} şarkı kaldı · {ad.get('name') or 'reklam planı'}"
             elif ad.get("state") == "unavailable":
                 text = "Reklam durumu sağlık API'sinden alınamadı"
+            elif ad.get("state") == "unsupported":
+                text = "Bu yayın API sürümü reklam kuyruğu/plan bilgisini sunmuyor"
+            elif ad.get("state") == "no_plan":
+                text = "RadioTEDU için reklam planı yapılandırılmamış"
+            elif ad.get("state") == "playing_unverified":
+                text = "Reklam kuyruğu çalıyor görünüyor · dinleyici sesi doğrulanmadı"
             else:
                 text = "Reklam planı durumu belirlenemedi"
             self.ad_text.configure(text=text)

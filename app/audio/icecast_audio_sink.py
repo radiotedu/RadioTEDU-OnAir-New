@@ -269,6 +269,7 @@ class IcecastAudioSink:
         )
         self._pcm_dispatch_stop = threading.Event()
         self._pcm_dispatch_thread = None
+        self._pcm_dispatch_start_lock = threading.Lock()
         self._pcm_dispatch_pending_chunk = None
         # The programme dispatcher survives an output-only reconnect. It can
         # keep accepting PCM into its bounded FIFO while the encoder/source is
@@ -446,40 +447,49 @@ class IcecastAudioSink:
     def _start_pcm_dispatch_worker(self) -> None:
         if not self._decouple_input_backpressure:
             return
-        if (
-            self._pcm_dispatch_thread is not None
-            and self._pcm_dispatch_thread.is_alive()
-        ):
-            return
-        self._pcm_dispatch_stop.clear()
+        with self._pcm_dispatch_start_lock:
+            if (
+                self._pcm_dispatch_thread is not None
+                and self._pcm_dispatch_thread.is_alive()
+            ):
+                return
+            self._pcm_dispatch_stop.clear()
 
-        def run() -> None:
-            while not self._pcm_dispatch_stop.is_set():
-                # A preserved output restart stops only the encoder writer.
-                # Keep this worker alive with its current pending frame so
-                # producer writes can continue filling the dispatch reserve.
-                if not self._writer_ready.wait(timeout=0.05):
-                    continue
-                payload = self._pcm_dispatch_pending_chunk
-                if payload is None:
+            def run() -> None:
+                last_error_log = 0.0
+                while not self._pcm_dispatch_stop.is_set():
                     try:
-                        payload = self._pcm_dispatch_queue.get(timeout=0.05)
-                    except queue.Empty:
-                        continue
-                    self._pcm_dispatch_pending_chunk = payload
-                # This worker may wait for its own encoder/network branch. The
-                # primary mount and other auxiliary mounts keep receiving PCM.
-                if self._write_pcm_blocking(payload, count_accepted=False):
-                    self._pcm_dispatch_pending_chunk = None
-                elif self._pcm_dispatch_stop.is_set():
-                    break
+                        # A preserved output restart stops only the encoder writer.
+                        # Keep this worker alive with its current pending frame so
+                        # producer writes can continue filling the dispatch reserve.
+                        if not self._writer_ready.wait(timeout=0.05):
+                            continue
+                        payload = self._pcm_dispatch_pending_chunk
+                        if payload is None:
+                            try:
+                                payload = self._pcm_dispatch_queue.get(timeout=0.05)
+                            except queue.Empty:
+                                continue
+                            self._pcm_dispatch_pending_chunk = payload
+                        # This worker may wait for its own encoder/network branch. The
+                        # primary mount and other auxiliary mounts keep receiving PCM.
+                        if self._write_pcm_blocking(payload, count_accepted=False):
+                            self._pcm_dispatch_pending_chunk = None
+                        elif self._pcm_dispatch_stop.is_set():
+                            break
+                    except Exception:
+                        now = time.monotonic()
+                        if now - last_error_log >= 5.0:
+                            _log.exception("Icecast PCM dispatch worker iteration failed")
+                            last_error_log = now
+                        self._pcm_dispatch_stop.wait(0.05)
 
-        self._pcm_dispatch_thread = threading.Thread(
-            target=run,
-            name="icecast-pcm-dispatch",
-            daemon=True,
-        )
-        self._pcm_dispatch_thread.start()
+            self._pcm_dispatch_thread = threading.Thread(
+                target=run,
+                name="icecast-pcm-dispatch",
+                daemon=True,
+            )
+            self._pcm_dispatch_thread.start()
 
     def health_snapshot(self) -> dict:
         queued_pcm_bytes = self._queued_pcm_bytes()
@@ -1192,6 +1202,10 @@ class IcecastAudioSink:
     ):
         signature = self._cfg_signature(cfg)
         if self.is_running() and self._signature == signature:
+            # The encoder can remain healthy while the decoupled PCM dispatcher
+            # has exited. Restart only that worker so this recovery does not
+            # disconnect an otherwise live Icecast source.
+            self._start_pcm_dispatch_worker()
             return self._process
         self.stop(preserve_probe_state=False, preserve_pcm=preserve_pcm)
         profile = str(cfg.stream_codec_profile or "").strip().lower()

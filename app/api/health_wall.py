@@ -82,6 +82,20 @@ def _safe_runtime(value: dict) -> dict:
         if key in value
     }
     result["worker_loop"] = _safe_worker_loop(value.get("worker_loop"))
+    recovery = value.get("recovery")
+    if isinstance(recovery, dict):
+        result["recovery"] = {
+            key: recovery.get(key)
+            for key in ("state", "attempt_count", "error_code", "retry_in_seconds")
+            if key in recovery
+        }
+    required = value.get("required_outputs")
+    if isinstance(required, dict):
+        result["required_outputs"] = {
+            str(name)[:80]: bool(is_required)
+            for name, is_required in required.items()
+            if isinstance(name, str)
+        }
     branches = value.get("branch_health")
     if isinstance(branches, dict):
         result["branches"] = {
@@ -133,6 +147,7 @@ def _monitor_playout_snapshot(conn, station_id: int) -> dict:
             "(SELECT COUNT(*) FROM queue_items q JOIN tracks qt ON qt.id=q.track_id "
             " WHERE q.station_id=? AND qt.station_id=? AND q.status='pending' "
             " AND qt.is_active=1 AND COALESCE(qt.file_path,'')<>'' "
+            " AND LOWER(COALESCE(qt.track_type,'music'))='music' "
             " AND (q.retry_after IS NULL OR datetime(q.retry_after)<=CURRENT_TIMESTAMP)) AS pending "
             "FROM tracks WHERE station_id=?",
             (int(station_id), int(station_id), int(station_id)),
@@ -192,7 +207,9 @@ def _monitor_ad_snapshot(conn, station_id: int) -> dict:
             (int(station_id),),
         ).fetchone()
         if playing:
-            return {"state": "playing", **dict(playing)}
+            # This table row alone cannot prove that the playout worker or
+            # listener is currently carrying the ad audio.
+            return {"state": "playing_unverified", **dict(playing)}
 
         pending = conn.execute(
             "SELECT a.id, a.status, a.due_at, COALESCE(t.title,'') AS title, "
@@ -410,16 +427,25 @@ def _collect_fast() -> dict:
             station_id = int(row["id"])
             runtime = dict(_runtime_status_payload(station_id))
             public_station = public_by_id.get(station_id)
-            public_status = str((public_station or {}).get("status") or "offline")
+            public_status = (
+                str(public_station.get("status") or "unknown")
+                if public_station is not None
+                else "unknown"
+            )
             reported_item = _public_now_playing(conn, station_id)
             stations.append({
                 "station_id": station_id,
                 "name": str(row["name"]),
-                "health": {
-                    "live": "healthy",
-                    "degraded": "degraded",
-                    "offline": "unavailable",
-                }.get(public_status, _runtime_health(runtime)),
+                "health": (
+                    {
+                        "live": "healthy",
+                        "degraded": "degraded",
+                        "offline": "unavailable",
+                    }.get(public_status, _runtime_health(runtime))
+                    if public_station is not None
+                    else _runtime_health(runtime)
+                ),
+                "public_status": public_status,
                 "now_playing": (public_station or {}).get("now_playing"),
                 "preserved_item": (
                     (public_station or {}).get("preserved_item")
