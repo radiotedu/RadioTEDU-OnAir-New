@@ -213,13 +213,15 @@ def song_ad_progress(conn, plan: dict, station_id: int) -> dict:
             continue
         latest_by_cycle.setdefault(item_cycle, str(item["status"] or ""))
 
-    # A failed spot is not a delivered spot. Work through overdue cycles in
-    # order so a later cadence never hides an interrupted earlier campaign.
+    # A failed spot is not a delivered spot. A cancelled cycle is an explicit
+    # operator/reconciliation skip, so it must not be re-created. Work through
+    # overdue cycles in order so a later cadence never hides an interrupted
+    # earlier campaign.
     # Missing rows are also due: this covers the first materialization and
     # repairs any cycle previously skipped by older versions of this policy.
     for cycle in range(1, completed_song_cycles + 1):
         status = latest_by_cycle.get(cycle, "")
-        if status != "done":
+        if status not in {"done", "cancelled"}:
             return {
                 "music_count": music_count,
                 "remaining_songs": 0,
@@ -238,6 +240,42 @@ def song_ad_progress(conn, plan: dict, station_id: int) -> dict:
     }
 
 
+def reconcile_song_cadence_backlog(
+    conn, plan_id: int, station_id: int, oldest_unfinished_cycle: int
+) -> int:
+    """Cancel stale later pending cycles for one plan/station without touching history."""
+    sid = int(station_id)
+    plan = int(plan_id)
+    keep_cycle = max(1, int(oldest_unfinished_cycle))
+    prefix = f"broadcast-plan:{plan}:song:{sid}:"
+    rows = conn.execute(
+        "SELECT id,dedupe_key FROM ad_break_items WHERE station_id=? AND status='pending' "
+        "AND dedupe_key LIKE ? ORDER BY id",
+        (sid, f"{prefix}%"),
+    ).fetchall()
+    cancelled = 0
+    for row in rows:
+        key = str(row["dedupe_key"] or "")
+        suffix = key[len(prefix):] if key.startswith(prefix) else ""
+        if not suffix.isdecimal():
+            continue
+        try:
+            cycle = int(suffix)
+        except ValueError:
+            continue
+        if cycle < 1:
+            continue
+        if cycle <= keep_cycle:
+            continue
+        cursor = conn.execute(
+            "UPDATE ad_break_items SET status='cancelled' "
+            "WHERE id=? AND station_id=? AND status='pending' AND dedupe_key=?",
+            (int(row["id"]), sid, key),
+        )
+        cancelled += max(0, int(cursor.rowcount or 0))
+    return cancelled
+
+
 def materialize_song_cadence_ads(conn, station_id: int) -> int:
     """Queue each due song-cadence spot once, at the boundary after a finished song."""
     sid = int(station_id)
@@ -246,8 +284,15 @@ def materialize_song_cadence_ads(conn, station_id: int) -> int:
         return 0
     now = datetime.now(timezone.utc)
     inserted = 0
+    cancelled = 0
     for plan in plans:
         progress = song_ad_progress(conn, plan, sid)
+        cancelled += reconcile_song_cadence_backlog(
+            conn,
+            int(plan["plan_id"]),
+            sid,
+            int(progress["cycle"]),
+        )
         if not progress["due"]:
             continue
         cycle = int(progress["cycle"])
@@ -281,7 +326,7 @@ def materialize_song_cadence_ads(conn, station_id: int) -> int:
             (sid, int(plan["track_id"]), due_at, int(plan["priority"]), dedupe_key),
         )
         inserted += 1
-    if inserted:
+    if inserted or cancelled:
         conn.commit()
         with _CACHE_LOCK:
             _AD_CACHE.pop(sid, None)

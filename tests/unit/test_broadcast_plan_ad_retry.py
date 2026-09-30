@@ -35,6 +35,10 @@ class SongCadenceAdRetryTests(unittest.TestCase):
                 priority INTEGER NOT NULL,
                 dedupe_key TEXT NOT NULL
             );
+            CREATE UNIQUE INDEX idx_test_plan_ad_dedupe
+                ON ad_break_items(station_id, dedupe_key)
+                WHERE dedupe_key LIKE 'broadcast-plan:%'
+                  AND status IN ('pending','playing','done');
             INSERT INTO tracks (id, track_type) VALUES (1, 'music');
             """
         )
@@ -56,12 +60,20 @@ class SongCadenceAdRetryTests(unittest.TestCase):
     def tearDown(self):
         self.conn.close()
 
-    def _insert_ad(self, status, due_at="2026-09-29T00:00:00+00:00"):
+    def _insert_ad(
+        self,
+        status,
+        cycle=1,
+        plan_id=7,
+        station_id=4,
+        due_at="2026-09-29T00:00:00+00:00",
+    ):
+        key = f"broadcast-plan:{plan_id}:song:{station_id}:{cycle}"
         cur = self.conn.execute(
             "INSERT INTO ad_break_items "
             "(station_id,track_id,due_at,status,priority,dedupe_key) "
-            "VALUES (4,99,?,?,10,?)",
-            (due_at, status, self.key),
+            "VALUES (?,99,?,?,10,?)",
+            (station_id, due_at, status, key),
         )
         self.conn.commit()
         return int(cur.lastrowid)
@@ -115,6 +127,114 @@ class SongCadenceAdRetryTests(unittest.TestCase):
         self.assertFalse(progress["due"])
         self.assertEqual(progress["cycle"], 2)
         self.assertEqual(progress["remaining_songs"], 5)
+
+    def test_materialize_cancels_only_later_pending_cycles_and_is_idempotent(self):
+        for idx in range(5, 15):
+            self.conn.execute(
+                "INSERT INTO queue_items "
+                "(station_id,status,track_id,finished_at) VALUES (4,'done',1,?)",
+                (f"2026-09-29 10:{idx:02d}:00",),
+            )
+        self._insert_ad("pending", cycle=1)
+        self._insert_ad("failed", cycle=2)
+        self._insert_ad("pending", cycle=2)
+        self._insert_ad("pending", cycle=3)
+        self._insert_ad("done", cycle=4)
+        self._insert_ad("playing", cycle=5)
+        self._insert_ad("cancelled", cycle=6)
+        self._insert_ad("failed", cycle=7)
+        self._insert_ad("pending", cycle=1, plan_id=8)
+        self._insert_ad("pending", cycle=1, station_id=5)
+        self.conn.execute(
+            "INSERT INTO ad_break_items "
+            "(station_id,track_id,due_at,status,priority,dedupe_key) "
+            "VALUES (4,99,'2026-09-29T00:00:00+00:00','pending',10,'operator-ad')"
+        )
+        self.conn.commit()
+
+        with patch(
+            "app.engine.broadcast_plan_policy.resolve_song_ad_plans",
+            return_value=[self.plan],
+        ):
+            self.assertEqual(materialize_song_cadence_ads(self.conn, 4), 0)
+            rows_after_first = self.conn.execute(
+                "SELECT dedupe_key,status FROM ad_break_items ORDER BY id"
+            ).fetchall()
+            changes_after_first = self.conn.total_changes
+            self.assertEqual(materialize_song_cadence_ads(self.conn, 4), 0)
+
+        self.assertEqual(self.conn.total_changes, changes_after_first)
+        states = {str(row["dedupe_key"]): str(row["status"]) for row in rows_after_first}
+        self.assertEqual(states[self.key], "pending")
+        self.assertEqual(states["broadcast-plan:7:song:4:2"], "cancelled")
+        self.assertEqual(states["broadcast-plan:7:song:4:3"], "cancelled")
+        self.assertEqual(states["broadcast-plan:7:song:4:4"], "done")
+        self.assertEqual(states["broadcast-plan:7:song:4:5"], "playing")
+        self.assertEqual(states["broadcast-plan:7:song:4:6"], "cancelled")
+        self.assertEqual(states["broadcast-plan:7:song:4:7"], "failed")
+        self.assertEqual(states["broadcast-plan:8:song:4:1"], "pending")
+        self.assertEqual(states["broadcast-plan:7:song:5:1"], "pending")
+        self.assertEqual(states["operator-ad"], "pending")
+
+    def test_oldest_failed_cycle_keeps_retry_history_and_cancels_later_pending(self):
+        for idx in range(5, 15):
+            self.conn.execute(
+                "INSERT INTO queue_items "
+                "(station_id,status,track_id,finished_at) VALUES (4,'done',1,?)",
+                (f"2026-09-29 11:{idx:02d}:00",),
+            )
+        self._insert_ad("failed", cycle=1)
+        self._insert_ad("pending", cycle=2)
+        self._insert_ad("pending", cycle=3)
+        self.conn.commit()
+
+        with patch(
+            "app.engine.broadcast_plan_policy.resolve_song_ad_plans",
+            return_value=[self.plan],
+        ):
+            self.assertEqual(materialize_song_cadence_ads(self.conn, 4), 1)
+
+        rows = self.conn.execute(
+            "SELECT dedupe_key,status FROM ad_break_items ORDER BY id"
+        ).fetchall()
+        states_by_key: dict[str, list[str]] = {}
+        for row in rows:
+            states_by_key.setdefault(str(row["dedupe_key"]), []).append(str(row["status"]))
+        self.assertEqual(states_by_key[self.key], ["failed", "pending"])
+        self.assertEqual(states_by_key["broadcast-plan:7:song:4:2"], ["cancelled"])
+        self.assertEqual(states_by_key["broadcast-plan:7:song:4:3"], ["cancelled"])
+
+    def test_cancelled_cycle_is_terminal_and_next_due_cycle_is_materialized(self):
+        for idx in range(5, 10):
+            self.conn.execute(
+                "INSERT INTO queue_items "
+                "(station_id,status,track_id,finished_at) VALUES (4,'done',1,?)",
+                (f"2026-09-29 12:{idx:02d}:00",),
+            )
+        self._insert_ad("cancelled", cycle=1)
+        self.conn.commit()
+
+        progress = song_ad_progress(self.conn, self.plan, 4)
+        self.assertTrue(progress["due"])
+        self.assertEqual(progress["cycle"], 2)
+        self.assertEqual(progress["item_status"], "")
+
+        with patch(
+            "app.engine.broadcast_plan_policy.resolve_song_ad_plans",
+            return_value=[self.plan],
+        ):
+            self.assertEqual(materialize_song_cadence_ads(self.conn, 4), 1)
+
+        rows = self.conn.execute(
+            "SELECT dedupe_key,status FROM ad_break_items ORDER BY id"
+        ).fetchall()
+        self.assertEqual(
+            [(str(row["dedupe_key"]), str(row["status"])) for row in rows],
+            [
+                ("broadcast-plan:7:song:4:1", "cancelled"),
+                ("broadcast-plan:7:song:4:2", "pending"),
+            ],
+        )
 
 
 if __name__ == "__main__":
