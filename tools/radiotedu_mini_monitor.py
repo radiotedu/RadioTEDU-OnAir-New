@@ -14,6 +14,7 @@ import queue
 import threading
 import time
 import tkinter as tk
+from pathlib import Path
 from tkinter import font as tkfont
 from datetime import datetime
 
@@ -21,6 +22,7 @@ from datetime import datetime
 MONITOR_API_HOST = "127.0.0.1"
 MONITOR_API_PORT = 18110
 MONITOR_API_PATH = "/api/monitor/snapshot"
+STATE_ROOT = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / "RadioTEDU" / "OnAir" / "State" / "StationWorkers"
 STATIONS = (
     (1, "Classical", "/classic"),
     (2, "Lo-Fi", "/lofi"),
@@ -114,14 +116,38 @@ def _snapshot() -> dict:
         if station is None:
             continue
         runtime = station.get("runtime") or {}
+        station_health = str(station.get("health") or "unknown")
+        station_observed_at = observed_at
+        external_live = False
+        if station_id == 11:
+            external = _read_maincharacter_runtime()
+            if external:
+                runtime = {**runtime, **external["runtime"]}
+                station_observed_at = external["updated_epoch"]
+                mount = runtime.get("icecast_mount_health") or {}
+                external_live = bool(
+                    runtime.get("program_running")
+                    and runtime.get("output_feed_active")
+                    and runtime.get("program_pcm_stalled") is not True
+                    and mount.get("mount_healthy") is True
+                )
+                station_health = (
+                    "healthy"
+                    if external_live
+                    else "degraded"
+                )
         playout = station.get("playout_monitor")
         if not isinstance(playout, dict):
             playout = {"state": "unavailable"}
         public_status = station.get("public_status")
         if not public_status:
             public_status = "live" if station.get("health") == "healthy" else "unknown"
-        is_live = public_status == "live"
-        current = station.get("now_playing") if is_live else {}
+        is_live = public_status == "live" or external_live
+        current = (
+            station.get("now_playing")
+            if public_status == "live"
+            else (station.get("preserved_item") if external_live else {})
+        )
         last_item = station.get("preserved_item") if not is_live else {}
         if isinstance(current, str):
             current = {"title": current}
@@ -134,7 +160,7 @@ def _snapshot() -> dict:
         playing[station_id] = {
             **playout,
             "is_live": is_live,
-            "station_health": str(station.get("health") or "unknown"),
+            "station_health": station_health,
             "active_show_name": str(station.get("active_show_name") or ""),
             "program_running": bool(runtime.get("program_running")),
             "title": str(
@@ -157,14 +183,14 @@ def _snapshot() -> dict:
             "last_artist": str(last_item.get("artist") or ""),
         }
         heartbeats[station_id] = {
-            "updated_epoch": observed_at,
+            "updated_epoch": station_observed_at,
             "running": bool(
                 runtime.get("alive")
                 or runtime.get("running")
                 or runtime.get("program_running")
             ),
             "runtime_status": runtime,
-            "station_health": str(station.get("health") or "unknown"),
+            "station_health": station_health,
         }
     with _LISTENER_LOCK:
         listeners = dict(_LISTENER_RESULTS)
@@ -180,6 +206,80 @@ def _snapshot() -> dict:
         "error": None,
         "at": time.time(),
     }
+
+
+def _read_maincharacter_runtime() -> dict | None:
+    """Use the standalone station-11 heartbeat missing from the legacy API."""
+    try:
+        payload = json.loads(
+            (STATE_ROOT / "station-11.heartbeat.json").read_text(encoding="utf-8")
+        )
+        updated_epoch = float(payload.get("updated_epoch") or 0)
+        age = time.time() - updated_epoch
+        tick_age = float(payload.get("scheduler_tick_age_seconds") or 999999)
+        runtime = payload.get("runtime_status")
+        if (
+            int(payload.get("station_id") or 0) != 11
+            or not payload.get("running")
+            or payload.get("scheduler_stalled")
+            or age < 0
+            or age > 20
+            or tick_age < 0
+            or tick_age > 5
+            or not isinstance(runtime, dict)
+        ):
+            return None
+        safe = {
+            key: runtime.get(key)
+            for key in (
+                "state",
+                "alive",
+                "running",
+                "program_running",
+                "output_feed_active",
+                "program_pcm_stalled",
+                "producer_eof",
+                "active_stream_title",
+                "active_stream_artist",
+                "active_track_type",
+            )
+            if key in runtime
+        }
+        mount = runtime.get("icecast_mount_health")
+        if isinstance(mount, dict):
+            safe["icecast_mount_health"] = {
+                key: mount.get(key)
+                for key in (
+                    "process_running",
+                    "mount_healthy",
+                    "consecutive_probe_failures",
+                    "last_network_write_age_seconds",
+                    "encoded_bytes_sent",
+                )
+                if key in mount
+            }
+        for source_key, safe_key in (
+            ("branch_health", "branches"),
+            ("delivery_health", "deliveries"),
+            ("required_outputs", "required_outputs"),
+        ):
+            values = runtime.get(source_key)
+            if isinstance(values, dict):
+                safe[safe_key] = {
+                    str(name)[:80]: bool(value)
+                    for name, value in values.items()
+                    if isinstance(name, str)
+                }
+        recovery = runtime.get("recovery")
+        if isinstance(recovery, dict):
+            safe["recovery"] = {
+                key: recovery.get(key)
+                for key in ("state", "attempt_count", "error_code", "retry_in_seconds")
+                if key in recovery
+            }
+        return {"runtime": safe, "updated_epoch": updated_epoch}
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
 
 
 def _classify(heartbeat: dict, prior: dict | None, listener: dict | None) -> tuple[str, str]:
