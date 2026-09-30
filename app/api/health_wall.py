@@ -132,7 +132,8 @@ def _monitor_playout_snapshot(conn, station_id: int) -> dict:
             "AND COALESCE(exclude_from_autoplay,0)=0 THEN 1 ELSE 0 END) AS eligible, "
             "(SELECT COUNT(*) FROM queue_items q JOIN tracks qt ON qt.id=q.track_id "
             " WHERE q.station_id=? AND qt.station_id=? AND q.status='pending' "
-            " AND qt.is_active=1 AND COALESCE(qt.file_path,'')<>'') AS pending "
+            " AND qt.is_active=1 AND COALESCE(qt.file_path,'')<>'' "
+            " AND (q.retry_after IS NULL OR datetime(q.retry_after)<=CURRENT_TIMESTAMP)) AS pending "
             "FROM tracks WHERE station_id=?",
             (int(station_id), int(station_id), int(station_id)),
         ).fetchone()

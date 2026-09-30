@@ -302,7 +302,7 @@ class Monitor(tk.Tk):
                 song = f"Şimdi: {artist} · {title}" if artist else f"Şimdi: {title}"
             elif playout.get("program_ready"):
                 song = (
-                    "Program hazır · "
+                    "Program envanteri mevcut · "
                     f"{int(playout.get('eligible_music_count') or 0)} uygun müzik"
                 )
             elif state in {"ÜRETİCİ DURDU", "SES KAYNAĞI DURDU"}:
