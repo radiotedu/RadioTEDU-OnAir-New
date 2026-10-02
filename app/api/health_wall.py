@@ -430,7 +430,7 @@ def _collect_fast() -> dict:
     try:
         public_by_id = {
             int(item["id"]): item
-            for item in list_public_station_summaries().get("stations", [])
+            for item in list_public_station_summaries(probe_origin=False).get("stations", [])
         }
     except Exception:
         public_by_id = {}

@@ -142,3 +142,29 @@ def test_operator_programme_metadata_requires_current_real_source_audio():
     assert _local_programme_is_active({**value, "program_pcm_age_seconds": float("nan")}) is False
     assert _local_programme_is_active({**value, "active_input_uri": "silence://continuity"}) is False
     assert _local_programme_is_active({**value, "program_running": False}) is False
+
+
+def test_local_public_snapshot_can_skip_blocking_listener_requests(monkeypatch):
+    import app.api.public as public
+    from app.db import get_connection, init_db
+    from app.repositories.station_output_repo import StationOutputRepository
+
+    init_db()
+    conn = get_connection()
+    try:
+        StationOutputRepository(conn).upsert(
+            1, False, "", True, "example.invalid", 8000, "/radio", "source", "",
+        )
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(public.runtime_registry, "status", lambda _sid: _status())
+    monkeypatch.setattr(public.worker_loop_manager, "status", lambda _sid: {"running": True})
+
+    def unexpected_listener_request(*_args, **_kwargs):
+        raise AssertionError("local snapshot must not wait for a listener request")
+
+    monkeypatch.setattr(public, "_probe_icecast_origin", unexpected_listener_request)
+    result = public.list_public_station_summaries(probe_origin=False)
+    assert result["stations"]
+    assert result["stations"][0]["status"] != "live"

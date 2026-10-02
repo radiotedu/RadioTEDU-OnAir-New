@@ -188,7 +188,7 @@ def _public_active_show_name(conn, station_id: int) -> str | None:
 
 
 @router.get("/api/public/stations")
-def list_public_station_summaries():
+def list_public_station_summaries(probe_origin: bool = True):
     init_db()
     with closing(get_connection()) as conn:
         stations = []
@@ -214,7 +214,8 @@ def list_public_station_summaries():
                 runtime_state.get("required_outputs")
             )
             if (
-                (
+                probe_origin
+                and (
                     bool(runtime_state.get("running"))
                     or bool(runtime_state.get("program_running"))
                 )

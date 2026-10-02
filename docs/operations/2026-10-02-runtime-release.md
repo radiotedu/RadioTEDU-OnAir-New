@@ -39,6 +39,9 @@ the obsolete separate stream keeper remains disabled.
   The loopback Health Wall displays the playing title/artist when the real
   programme is rendering fresh PCM, even when public delivery is unverified.
   Its public delivery status remains independent.
+- Fast local health snapshots skip synchronous origin listener requests. A
+  failed origin must not queue eight network timeouts inside each desktop
+  monitor refresh. Public endpoint probing remains available separately.
 
 ## Backup and deployment
 
