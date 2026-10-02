@@ -19,6 +19,9 @@ from tools.monitor_stream_continuity import (
     _parse_stream_arg,
     _read_decoded_audio,
     _read_diagnostics,
+    _retry_exited_readers,
+    _snapshot,
+    _empty_evaluation_metrics,
     StreamState,
     build_ffmpeg_command,
 )
@@ -58,7 +61,9 @@ def test_strict_ffmpeg_command_emits_normalized_decoded_pcm() -> None:
     assert command[command.index("-f") + 1] == "s16le"
     assert "pipe:1" in command
     assert "-progress" not in command
-    assert not any(value.startswith("silencedetect=") for value in command)
+    # A transparent diagnostic filter measures quiet passages independently
+    # of sample delivery; it must not trim or suppress valid programme audio.
+    assert command[command.index("-af") + 1] == "silencedetect=noise=-65dB:d=0.5"
 
 
 def test_expected_roster_rejects_matching_but_incomplete_eight_mount_subset(
@@ -172,6 +177,76 @@ def test_diagnostics_accumulate_many_short_silence_events() -> None:
     assert state.max_silence_seconds == pytest.approx(0.021)
     assert state.total_silence_seconds == pytest.approx(0.042)
     assert state.silence_events == 2
+
+
+def test_decoded_diagnostics_measure_silence_without_losing_pcm() -> None:
+    state = StreamState(
+        label="test",
+        url="http://example.test/stream",
+        process=SimpleNamespace(),  # type: ignore[arg-type]
+        started_monotonic=0.0,
+        decoded_audio_mode=True,
+    )
+    _read_decoded_audio(state, io.BytesIO(bytes(192_000)))
+    _read_diagnostics(
+        state,
+        io.StringIO(
+            "[silencedetect] silence_start: 0.0\n"
+            "[silencedetect] silence_end: 1.0 | silence_duration: 1.0\n"
+        ),
+    )
+    assert state.decoded_audio_bytes_total == 192_000
+    assert state.media_seconds == pytest.approx(1.0)
+    assert state.total_silence_seconds == pytest.approx(1.0)
+    assert state.silence_events == 1
+
+
+def test_reader_retry_keeps_failed_evidence_and_current_generation_scope(monkeypatch):
+    from tools import monitor_stream_continuity as monitor
+
+    old = StreamState("test", "http://example.test/audio", SimpleNamespace(poll=lambda: 17), 0.0, decoded_audio_mode=True)
+    old.media_seconds = 10.0
+    old.decoded_audio_bytes_total = 10 * 192000
+    old.first_progress_monotonic = 0.1
+    old.last_progress_monotonic = 10.0
+    _begin_measurement(old, 10.0, listener_buffer_seconds=4.0)
+    states = [old]
+    metrics = {"test": _empty_evaluation_metrics()}
+    events = []
+    monkeypatch.setattr(monitor, "_write_json_line", lambda handle, value: events.append(value))
+    replacement = StreamState("test", old.url, SimpleNamespace(poll=lambda: None), 25.0, decoded_audio_mode=True)
+    monkeypatch.setattr(monitor, "_start_stream", lambda *args, **kwargs: replacement)
+    _retry_exited_readers(states, Path("ffmpeg.exe"), 20.0, metrics, io.StringIO(), measuring=True)
+    assert states[0] is old
+    assert old.reader_restart_due_monotonic == 25.0
+    _retry_exited_readers(states, Path("ffmpeg.exe"), 24.0, metrics, io.StringIO(), measuring=True)
+    assert states[0] is old
+    _retry_exited_readers(states, Path("ffmpeg.exe"), 25.0, metrics, io.StringIO(), measuring=True)
+    assert states[0] is replacement
+    assert replacement.reader_restart_count == 1
+    assert replacement.reader_previous_decoded_audio_bytes == 10 * 192000
+    snapshot = _snapshot(replacement, 25.0)
+    assert snapshot["process_alive"] is True
+    assert snapshot["exit_code"] is None
+    assert snapshot["last_unexpected_exit_code"] == 17
+    assert snapshot["unexpected_exit"] is True
+    assert snapshot["readiness_satisfied"] is False
+    assert metrics["test"]["unexpected_exit"] is True
+    assert metrics["test"]["exit_codes"] == {17}
+    assert [v["type"] for v in events] == ["continuity_reader_exit", "continuity_reader_restarted"]
+
+
+def test_warmup_reader_failure_is_not_erased_by_retry_backoff(monkeypatch):
+    from tools import monitor_stream_continuity as monitor
+
+    old = StreamState("test", "http://example.test/audio", SimpleNamespace(poll=lambda: 0), 0.0, decoded_audio_mode=True)
+    old.reader_restart_count = 12
+    metrics = {"test": _empty_evaluation_metrics()}
+    monkeypatch.setattr(monitor, "_write_json_line", lambda *args: None)
+    _retry_exited_readers([old], Path("ffmpeg.exe"), 10.0, metrics, io.StringIO(), measuring=False)
+    assert old.reader_restart_due_monotonic == 70.0
+    assert metrics["test"]["unexpected_exit"] is True
+    assert metrics["test"]["exit_codes"] == {0}
 
 
 def test_evaluate_fails_real_playback_deficit() -> None:

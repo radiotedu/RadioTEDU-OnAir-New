@@ -23,6 +23,9 @@ class FakeSocket:
     def settimeout(self, value):
         self.timeout = value
 
+    def gettimeout(self):
+        return self.timeout
+
     def sendall(self, payload):
         self.sent.append(bytes(payload))
 
@@ -144,5 +147,65 @@ def test_explicit_source_write_timeout_is_still_supported():
     )
     try:
         assert source_socket.timeout == 2.5
+    finally:
+        transport.close()
+
+
+def test_delayed_final_rejection_is_reported_without_credential_echo(monkeypatch):
+    from app.audio import icecast_source_transport as module
+
+    source_socket = FakeSocket(b"HTTP/1.1 100 Continue\r\n\r\n")
+    transport = IcecastSourceTransport(
+        _config(), socket_factory=lambda *_args, **_kwargs: source_socket
+    )
+    monkeypatch.setattr(module.select, "select", lambda *_args: ([source_socket], [], []))
+    source_socket.response = b"HTTP/1.1 403 private-source-secret\r\n\r\n"
+    try:
+        with pytest.raises(IcecastSourceProtocolError, match="HTTP 403") as exc:
+            transport.send(b"encoded-audio")
+        assert "private-source-secret" not in str(exc.value)
+        assert not transport.source_response_confirmed
+        assert source_socket.timeout == 10.0
+        assert len(source_socket.sent) == 1
+    finally:
+        transport.close()
+
+
+def test_partial_delayed_success_never_blocks_audio_writes(monkeypatch):
+    from app.audio import icecast_source_transport as module
+
+    source_socket = FakeSocket(b"HTTP/1.1 100 Continue\r\n\r\n")
+    transport = IcecastSourceTransport(
+        _config(), socket_factory=lambda *_args, **_kwargs: source_socket
+    )
+    monkeypatch.setattr(
+        module.select, "select",
+        lambda *_args: ([source_socket] if source_socket.response else [], [], []),
+    )
+    try:
+        source_socket.response = b"HTTP/1.1 200"
+        transport.send(b"first-audio")
+        assert not transport.source_response_confirmed
+        assert source_socket.sent[-1] == b"first-audio"
+        source_socket.response = b" OK\r\nServer: test\r\n\r\n"
+        transport.send(b"next-audio")
+        assert transport.source_response_confirmed
+        assert source_socket.sent[-1] == b"next-audio"
+        assert source_socket.timeout == 10.0
+    finally:
+        transport.close()
+
+
+def test_coalesced_continue_and_success_are_both_consumed():
+    source_socket = FakeSocket(
+        b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\n\r\n"
+    )
+    transport = IcecastSourceTransport(
+        _config(), socket_factory=lambda *_args, **_kwargs: source_socket
+    )
+    try:
+        assert transport.source_response_confirmed
+        transport.send(b"encoded-audio")
+        assert source_socket.sent[-1] == b"encoded-audio"
     finally:
         transport.close()

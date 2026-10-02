@@ -80,8 +80,8 @@ class IcecastSourceTransport:
             # encoder creates a deadlock: the client times out, the empty mount
             # disappears, and listeners hear a reconnect every few seconds.
             # Give conventional origins a short confirmation window, then
-            # optimistically start the body. Authentication/duplicate-source
-            # failures still surface on the first bounded send.
+            # optimistically start the body. Consume the delayed final response
+            # during body writes so rejection cannot masquerade as a live mount.
             source_socket.settimeout(
                 min(
                     max(0.1, float(handshake_timeout_sec)),
@@ -144,17 +144,17 @@ class IcecastSourceTransport:
                 raise IcecastSourceProtocolError(
                     "Icecast source handshake returned no complete HTTP response"
                 )
+            remainder = b""
             if not optimistic_handshake:
-                status = bytes(response).split(b"\r\n", 1)[0].decode(
-                    "ascii", errors="replace"
-                )
-                if " 100 " in f" {status} ":
+                header, remainder = bytes(response).split(b"\r\n\r\n", 1)
+                status = self._response_status(header)
+                if status == 100:
                     # The final 200 is emitted after the first request-body
                     # bytes on origins that implement Expect/Continue exactly.
                     optimistic_handshake = True
-                elif " 200 " not in f" {status} ":
+                elif status != 200:
                     raise IcecastSourceProtocolError(
-                        f"Icecast rejected source: {status[:120]}"
+                        f"Icecast rejected source: HTTP {status}"
                     )
             source_socket.settimeout(
                 None
@@ -162,7 +162,11 @@ class IcecastSourceTransport:
                 else max(0.1, float(write_timeout_sec))
             )
             self._socket = source_socket
+            self._response_pending = optimistic_handshake
+            self._response_buffer = bytearray(remainder)
+            self.source_response_confirmed = not optimistic_handshake
             self.content_type = str(profile.get("content_type") or "")
+            self._consume_response_headers()
         except Exception:
             if source_socket is not None:
                 try:
@@ -171,6 +175,75 @@ class IcecastSourceTransport:
                     pass
             raise
 
+    @staticmethod
+    def _response_status(header: bytes) -> int:
+        # Report only the status code. A server-controlled reason phrase must
+        # never echo source credentials or arbitrary response content into logs.
+        parts = header.split(b"\r\n", 1)[0].split()
+        if (
+            len(parts) < 2
+            or not (parts[0].startswith(b"HTTP/") or parts[0] == b"ICY")
+            or len(parts[1]) != 3
+            or not parts[1].isdigit()
+        ):
+            raise IcecastSourceProtocolError("Icecast source response is invalid")
+        return int(parts[1])
+
+    def _consume_response_headers(self) -> None:
+        while self._response_pending and b"\r\n\r\n" in self._response_buffer:
+            header, _, remainder = self._response_buffer.partition(b"\r\n\r\n")
+            self._response_buffer = bytearray(remainder)
+            if len(header) > 16_384:
+                raise IcecastSourceProtocolError("Icecast source response header is too large")
+            status = self._response_status(bytes(header))
+            if 100 <= status < 200:
+                continue
+            if status != 200:
+                raise IcecastSourceProtocolError(
+                    f"Icecast rejected source: HTTP {status}"
+                )
+            self._response_pending = False
+            self.source_response_confirmed = True
+            self._response_buffer.clear()
+        if len(self._response_buffer) > 16_384:
+            raise IcecastSourceProtocolError("Icecast source response header is too large")
+
+    def _check_pending_response(self) -> None:
+        if not self._response_pending:
+            return
+        self._consume_response_headers()
+        if not self._response_pending:
+            return
+        source_socket = self._socket
+        try:
+            buffered = isinstance(source_socket, ssl.SSLSocket) and source_socket.pending() > 0
+            readable, _, exceptional = select.select(
+                [source_socket], [], [source_socket], 0
+            )
+        except (TypeError, ValueError):
+            # File-like adapters used by offline diagnostics may have no fd.
+            return
+        if exceptional:
+            raise IcecastSourceProtocolError("Icecast source connection failed")
+        if not readable and not buffered:
+            return
+        # This is protocol housekeeping on the same connector thread. A partial
+        # TLS record must not block PCM forwarding for the write deadline.
+        previous_timeout = source_socket.gettimeout()
+        try:
+            source_socket.settimeout(0.0)
+            chunk = source_socket.recv(2048)
+        except (BlockingIOError, InterruptedError, ssl.SSLWantReadError):
+            return
+        finally:
+            source_socket.settimeout(previous_timeout)
+        if not chunk:
+            raise IcecastSourceProtocolError(
+                "Icecast source closed before final response"
+            )
+        self._response_buffer.extend(chunk)
+        self._consume_response_headers()
+
     def send(self, payload: bytes) -> None:
         if payload:
             source_socket = getattr(self, "_socket", None)
@@ -178,7 +251,9 @@ class IcecastSourceTransport:
                 raise IcecastSourceProtocolError(
                     "Icecast source connection is closed"
                 )
+            self._check_pending_response()
             source_socket.sendall(payload)
+            self._check_pending_response()
 
     def peer_closed(self) -> bool:
         """Detect a graceful/half-open peer close without consuming protocol data."""

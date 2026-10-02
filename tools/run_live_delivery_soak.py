@@ -259,6 +259,8 @@ def run(args) -> int:
     thread.start()
     output = output_dir / "decoded-delivery.jsonl"
     argv = ["--ffmpeg", args.ffmpeg, "--expected-roster-file", str(manifest), "--duration-seconds", str(args.duration_seconds), "--sample-seconds", "10", "--listener-buffer-seconds", "4", "--minimum-margin-seconds", "0", "--maximum-decoded-audio-gap-seconds", "4", "--maximum-progress-age-seconds", "4", "--warmup-seconds", "20", "--readiness-stable-seconds", "20", "--output", str(output)]
+    if args.observe_unready:
+        argv.append("--restart-exited-readers")
     for label, url in streams:
         argv.extend(["--stream", f"{label}={url}"])
     try:

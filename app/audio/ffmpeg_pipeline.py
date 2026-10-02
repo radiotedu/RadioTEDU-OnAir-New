@@ -1,6 +1,7 @@
 import os
 import threading
 import hashlib
+import json
 import logging
 import shutil
 import stat
@@ -267,6 +268,9 @@ def _silence_filter_spec() -> str:
 
 FAST_AUDIO_CACHE_DIR = r"C:\ProgramData\RadioTEDU\OnAir\FastAudioCache"
 _FAST_AUDIO_CACHE_MAX_BYTES = 4 * 1024 * 1024 * 1024
+_FAST_AUDIO_CACHE_MIN_FREE_BYTES = 2 * 1024 * 1024 * 1024
+_FAST_AUDIO_CACHE_POLICY_CACHE: tuple[str, float, dict[str, int]] | None = None
+_FAST_AUDIO_CACHE_POLICY_LOCK = threading.Lock()
 _FAST_AUDIO_CACHE_IN_FLIGHT: set[str] = set()
 _FAST_AUDIO_CACHE_LOCK = threading.Lock()
 _FAST_AUDIO_CACHE_PRUNE_IN_FLIGHT = False
@@ -296,6 +300,34 @@ def _touch_fast_cached_path(cached_path: str, *, force: bool = False) -> None:
         _FAST_AUDIO_CACHE_LAST_TOUCH[cached_path] = now
 
 
+def _fast_cache_policy() -> dict[str, int]:
+    """Load a bounded site policy without editing credentials or library media."""
+    global _FAST_AUDIO_CACHE_POLICY_CACHE
+    policy_path = os.path.join(os.path.dirname(FAST_AUDIO_CACHE_DIR), "fast-audio-cache-policy.json")
+    now = time.monotonic()
+    with _FAST_AUDIO_CACHE_POLICY_LOCK:
+        cached = _FAST_AUDIO_CACHE_POLICY_CACHE
+        if cached and cached[0] == policy_path and now - cached[1] < 60.0:
+            return cached[2]
+        policy = {
+            "max_bytes": _FAST_AUDIO_CACHE_MAX_BYTES,
+            "minimum_free_bytes": _FAST_AUDIO_CACHE_MIN_FREE_BYTES,
+        }
+        try:
+            with open(policy_path, "r", encoding="utf-8") as handle:
+                raw = json.loads(handle.read(65_537))
+            if isinstance(raw, dict):
+                for key in policy:
+                    value = raw.get(key)
+                    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                        policy[key] = value
+        except (OSError, ValueError, TypeError):
+            pass
+        policy["max_bytes"] = max(256 * 1024 * 1024, policy["max_bytes"])
+        _FAST_AUDIO_CACHE_POLICY_CACHE = (policy_path, now, policy)
+        return policy
+
+
 def _fast_cache_max_bytes() -> int:
     raw = str(os.getenv("CLEANROOM_FAST_AUDIO_CACHE_MAX_BYTES", "") or "").strip()
     if raw:
@@ -303,7 +335,16 @@ def _fast_cache_max_bytes() -> int:
             return max(256 * 1024 * 1024, int(raw))
         except (TypeError, ValueError):
             pass
-    return int(_FAST_AUDIO_CACHE_MAX_BYTES)
+    return int(_fast_cache_policy()["max_bytes"])
+
+
+def _fast_cache_has_copy_space(input_uri: str) -> bool:
+    try:
+        source_bytes = os.path.getsize(input_uri)
+        free_bytes = shutil.disk_usage(FAST_AUDIO_CACHE_DIR).free
+        return free_bytes - source_bytes >= _fast_cache_policy()["minimum_free_bytes"]
+    except OSError:
+        return False
 
 
 def _fast_cache_key(input_uri: str) -> str:
@@ -368,6 +409,16 @@ def prune_fast_audio_cache(
         }
 
     before_bytes = total_bytes
+    try:
+        free_bytes = shutil.disk_usage(root).free
+        # Include existing cache bytes: using free space alone as the budget
+        # would make retention oscillate as files are copied and evicted.
+        target_bytes = min(
+            target_bytes,
+            max(0, total_bytes + free_bytes - _fast_cache_policy()["minimum_free_bytes"]),
+        )
+    except OSError:
+        pass
     deleted_files = 0
     failed_files = 0
     for modified_at, path, size in sorted(entries, key=lambda item: (item[0], item[1])):
@@ -474,6 +525,9 @@ def _resolve_fast_cached_uri(input_uri: str, *, copy_if_missing: bool = True) ->
             # A cold cache must not delay decoder startup by a whole-file copy.
             # Read the source now while a daemon warms future uses of this file.
             prefetch_fast_cached_uri(input_uri)
+            return input_uri
+        if not _fast_cache_has_copy_space(input_uri):
+            request_fast_audio_cache_prune()
             return input_uri
         # Copy to a sidecar and atomically publish it. A background prefetch
         # must never expose a half-written file to the next FFmpeg process.

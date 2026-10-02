@@ -569,6 +569,9 @@ class IcecastAudioSink:
                 "remote_mount_verified": bool(
                     self._mount_probe is not None and self._mount_healthy is True
                 ),
+                "source_response_confirmed": bool(
+                    getattr(self._source, "source_response_confirmed", False)
+                ),
                 "mount_probe_age_seconds": (
                     None if mount_probe_age is None else round(mount_probe_age, 3)
                 ),

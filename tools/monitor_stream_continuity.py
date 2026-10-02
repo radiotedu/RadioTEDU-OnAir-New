@@ -272,6 +272,12 @@ def build_ffmpeg_command(
                 str(_PCM_SAMPLE_RATE),
                 "-c:a",
                 "pcm_s16le",
+                # Keep signal diagnostics separate from sample delivery.
+                # Quiet programme audio is valid and does not fail the
+                # decoded-delivery gate, but operators still need measured
+                # silence to correlate with source-generated filler frames.
+                "-af",
+                "silencedetect=noise=-65dB:d=0.5",
                 "-flush_packets",
                 "1",
                 "-f",
@@ -327,6 +333,10 @@ class StreamState:
     stderr_tail: deque[str] = field(default_factory=lambda: deque(maxlen=5))
     unexpected_exit_code: int | None = None
     input_audio_description: str | None = None
+    reader_restart_count: int = 0
+    reader_restart_due_monotonic: float | None = None
+    reader_previous_decoded_audio_bytes: int = 0
+    reader_threads: list[threading.Thread] = field(default_factory=list)
 
 
 def _read_progress(state: StreamState, stream: IO[str]) -> None:
@@ -508,6 +518,10 @@ def _snapshot(state: StreamState, now: float, *, stopping: bool = False) -> dict
             "label": state.label,
             "process_alive": state.process.poll() is None,
             "exit_code": state.process.poll(),
+            "last_unexpected_exit_code": state.unexpected_exit_code,
+            "reader_restart_count": state.reader_restart_count,
+            "decoded_audio_bytes_scope": "current_reader_generation",
+            "reader_previous_decoded_audio_bytes": state.reader_previous_decoded_audio_bytes,
             "elapsed_seconds": round(elapsed, 3),
             "measurement_active": measuring,
             "startup_delay_seconds": (
@@ -550,7 +564,10 @@ def _snapshot(state: StreamState, now: float, *, stopping: bool = False) -> dict
             "silence_events": state.silence_events,
             "transport_errors": state.transport_errors,
             "diagnostic_tail": list(state.stderr_tail),
-            "unexpected_exit": bool(state.process.poll() is not None and not stopping),
+            "unexpected_exit": bool(
+                state.unexpected_exit_code is not None
+                or (state.process.poll() is not None and not stopping)
+            ),
         }
 
 
@@ -571,7 +588,7 @@ def _start_stream(
     state = StreamState(
         label, url, process, time.monotonic(), decoded_audio_mode=decoded_pcm
     )
-    threading.Thread(
+    audio_thread = threading.Thread(
         target=_read_decoded_audio if decoded_pcm else _read_progress,
         args=(state, process.stdout),
         name=(
@@ -580,13 +597,16 @@ def _start_stream(
             else f"continuity-progress-{label}"
         ),
         daemon=True,
-    ).start()
-    threading.Thread(
+    )
+    diagnostic_thread = threading.Thread(
         target=_read_diagnostics,
         args=(state, process.stderr),
         name=f"continuity-diagnostics-{label}",
         daemon=True,
-    ).start()
+    )
+    state.reader_threads.extend((audio_thread, diagnostic_thread))
+    audio_thread.start()
+    diagnostic_thread.start()
     return state
 
 
@@ -751,6 +771,8 @@ def _accumulate_evaluation_metrics(metrics: dict[str, Any], row: dict[str, Any])
         metrics["unexpected_exit"] = True
         if row.get("exit_code") is not None:
             metrics["exit_codes"].add(int(row["exit_code"]))
+        if row.get("last_unexpected_exit_code") is not None:
+            metrics["exit_codes"].add(int(row["last_unexpected_exit_code"]))
     metrics["transport_errors"] = max(
         metrics["transport_errors"], int(row.get("transport_errors", 0))
     )
@@ -845,6 +867,81 @@ def _write_json_line(handle: IO[str], payload: dict[str, Any]) -> None:
     os.fsync(handle.fileno())
 
 
+def _retry_exited_readers(
+    states: list[StreamState],
+    ffmpeg: Path,
+    now: float,
+    metrics: dict[str, dict[str, Any]],
+    handle: IO[str],
+    *,
+    measuring: bool,
+) -> None:
+    """Resume observation after an exit while retaining the failed-run evidence.
+
+    Samples after a retry describe the new reader generation. The global run
+    duration and sticky failure metrics never restart or become a clean pass.
+    Only diagnostic listener processes are replaced; sources are not touched.
+    """
+    for index, state in enumerate(states):
+        exit_code = state.process.poll()
+        if exit_code is None:
+            continue
+        if state.reader_restart_due_monotonic is None:
+            state.unexpected_exit_code = int(exit_code)
+            metric = metrics[state.label]
+            metric["unexpected_exit"] = True
+            metric["exit_codes"].add(int(exit_code))
+            _accumulate_evaluation_metrics(metric, _snapshot(state, now))
+            delay = min(60.0, 5.0 * 2 ** min(state.reader_restart_count, 4))
+            state.reader_restart_due_monotonic = now + delay
+            _write_json_line(handle, {
+                "type": "continuity_reader_exit", "timestamp": _utc_now(),
+                "label": state.label, "exit_code": exit_code,
+                "reader_restart_count": state.reader_restart_count,
+                "retry_delay_seconds": delay,
+                "clean_run_possible": False,
+            })
+            continue
+        if now < state.reader_restart_due_monotonic:
+            continue
+        for thread in state.reader_threads:
+            thread.join(timeout=0.1)
+        _accumulate_evaluation_metrics(metrics[state.label], _snapshot(state, now))
+        try:
+            replacement = _start_stream(
+                ffmpeg, state.label, state.url, decoded_pcm=state.decoded_audio_mode
+            )
+        except OSError as exc:
+            state.reader_restart_due_monotonic = now + 60.0
+            _write_json_line(handle, {
+                "type": "continuity_reader_retry_failed", "timestamp": _utc_now(),
+                "label": state.label, "error_type": type(exc).__name__,
+                "clean_run_possible": False,
+            })
+            continue
+        with state.lock, replacement.lock:
+            replacement.reader_restart_count = state.reader_restart_count + 1
+            replacement.unexpected_exit_code = state.unexpected_exit_code
+            replacement.reader_previous_decoded_audio_bytes = (
+                state.reader_previous_decoded_audio_bytes + state.decoded_audio_bytes_total
+            )
+            replacement.transport_errors += state.transport_errors
+        if measuring:
+            _begin_measurement(replacement, now, readiness_satisfied=False)
+        states[index] = replacement
+        if not any(thread.is_alive() for thread in state.reader_threads):
+            for stream_name in ("stdout", "stderr"):
+                stream = getattr(state.process, stream_name, None)
+                if stream is not None:
+                    stream.close()
+        _write_json_line(handle, {
+            "type": "continuity_reader_restarted", "timestamp": _utc_now(),
+            "label": state.label, "reader_restart_count": replacement.reader_restart_count,
+            "reader_previous_decoded_audio_bytes": replacement.reader_previous_decoded_audio_bytes,
+            "clean_run_possible": False,
+        })
+
+
 def run(args: argparse.Namespace) -> int:
     ffmpeg = Path(args.ffmpeg).expanduser().resolve()
     if not ffmpeg.is_file():
@@ -910,6 +1007,10 @@ def run(args: argparse.Namespace) -> int:
         ),
         "decoded_audio_stream_selection": "0:a:0" if decoded_pcm else None,
         "listener_buffer_seconds": getattr(args, "listener_buffer_seconds", 0.0),
+        "restart_exited_readers": getattr(args, "restart_exited_readers", False),
+        "reader_retry_clears_failures": False,
+        "silence_diagnostics_applied": True,
+        "silence_diagnostic_threshold_db": -65 if decoded_pcm else None,
         "ffmpeg_input_policy": {
             "rw_timeout_microseconds": 15_000_000,
             "reconnect": True,
@@ -958,6 +1059,8 @@ def run(args: argparse.Namespace) -> int:
             }
             while True:
                 now = time.monotonic()
+                if getattr(args, "restart_exited_readers", False):
+                    _retry_exited_readers(states, ffmpeg, now, metrics, handle, measuring=False)
                 all_ready = True
                 for state in states:
                     with state.lock:
@@ -1028,6 +1131,8 @@ def run(args: argparse.Namespace) -> int:
                     time.sleep(min(0.25, next_sample - now))
                     continue
                 at_boundary = now >= measurement_deadline
+                if not at_boundary and getattr(args, "restart_exited_readers", False):
+                    _retry_exited_readers(states, ffmpeg, now, metrics, handle, measuring=True)
                 rows = [_snapshot(state, now) for state in states]
                 for row in rows:
                     _accumulate_evaluation_metrics(metrics[str(row["label"])], row)
@@ -1143,6 +1248,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--maximum-startup-delay-seconds", type=float, default=60.0)
     parser.add_argument("--minimum-margin-seconds", type=float, default=-5.0)
     parser.add_argument("--listener-buffer-seconds", type=float, default=0.0)
+    parser.add_argument(
+        "--restart-exited-readers", action="store_true",
+        help="Retry exited diagnostic listeners; retain all failures and never reset the run clock.",
+    )
     parser.add_argument("--maximum-progress-age-seconds", type=float, default=5.0)
     parser.add_argument("--maximum-progress-gap-seconds", type=float, default=2.0)
     parser.add_argument("--maximum-decoded-audio-gap-seconds", type=float, default=0.25)
