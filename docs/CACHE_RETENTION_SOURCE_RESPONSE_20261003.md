@@ -83,6 +83,31 @@ continuous listener audio.
 
 ## Rollback
 
+### Observer timestamp repair after live retry observation
+
+Live samples exposed negative progress ages when creating a replacement reader
+took longer than the caller's saved sample clock. Refresh the clock after retry
+housekeeping and ensure a per-reader snapshot never predates its last received
+PCM. This corrects reported ages and reserves; it does not clear any recorded
+failure or change a broadcast. The additional regression passed, bringing the
+focused selection to 57 tests (plus the 20 pipeline builder tests).
+
+The public origin status reported 19 sources, including the excluded `/en`,
+`/fr`, `/spark` channels. At 22:06:16 UTC it reported 205 listeners on `/energize`,
+despite the local decoder receiving no PCM there. This does not prove a listener
+leak or identify a server limit. It confirms that a listed mount and its listener
+counter cannot be treated as audio-delivery proof. Server-side inspection is
+still needed to explain this discrepancy.
+
+All eight workers eventually loaded the new source-response health field. The
+Classic settle failure recovered without another Classic reload. The six other
+explicit reloads passed their short source-counter checks; those are not
+listener continuity certificates. During rollout some workers also recovered
+automatically; further deployments should inspect generation/loaded health
+fields before requesting another reload.
+
+## Source and policy rollback
+
 Restore the backed-up source files in the manifest and restore the policy file
 if it previously existed; otherwise remove only that explicitly named policy
 file after confirming its absolute path. Reload only affected station workers

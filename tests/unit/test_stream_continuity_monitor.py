@@ -249,6 +249,21 @@ def test_warmup_reader_failure_is_not_erased_by_retry_backoff(monkeypatch):
     assert metrics["test"]["exit_codes"] == {0}
 
 
+def test_snapshot_cannot_use_a_clock_older_than_arrived_audio():
+    state = StreamState("test", "http://example.test/audio", SimpleNamespace(poll=lambda: None), 0.0, decoded_audio_mode=True)
+    state.media_seconds = 10.0
+    state.decoded_audio_bytes_total = 10 * 192000
+    state.first_progress_monotonic = 0.1
+    state.last_progress_monotonic = 10.0
+    _begin_measurement(state, 10.0, listener_buffer_seconds=4.0)
+    state.media_seconds = 11.0
+    state.last_progress_monotonic = 11.0
+    snapshot = _snapshot(state, 10.0)
+    assert snapshot["progress_age_seconds"] == 0.0
+    assert snapshot["elapsed_seconds"] == 1.0
+    assert snapshot["playback_margin_seconds"] == 4.0
+
+
 def test_evaluate_fails_real_playback_deficit() -> None:
     snapshots = [
         {

@@ -468,6 +468,10 @@ def _read_diagnostics(state: StreamState, stream: IO[str] | IO[bytes]) -> None:
 
 def _snapshot(state: StreamState, now: float, *, stopping: bool = False) -> dict[str, Any]:
     with state.lock:
+        # Reader startup/retry and preceding rows may take time after the
+        # caller sampled its clock. Never describe later PCM with an earlier
+        # instant: that creates negative ages and inflates the playback reserve.
+        now = max(now, state.started_monotonic, state.last_progress_monotonic or now)
         measurement_started = state.measurement_started_monotonic
         measuring = measurement_started is not None
         elapsed = (
@@ -1061,6 +1065,7 @@ def run(args: argparse.Namespace) -> int:
                 now = time.monotonic()
                 if getattr(args, "restart_exited_readers", False):
                     _retry_exited_readers(states, ffmpeg, now, metrics, handle, measuring=False)
+                    now = time.monotonic()
                 all_ready = True
                 for state in states:
                     with state.lock:
@@ -1130,9 +1135,10 @@ def run(args: argparse.Namespace) -> int:
                 if now < next_sample:
                     time.sleep(min(0.25, next_sample - now))
                     continue
-                at_boundary = now >= measurement_deadline
-                if not at_boundary and getattr(args, "restart_exited_readers", False):
+                if now < measurement_deadline and getattr(args, "restart_exited_readers", False):
                     _retry_exited_readers(states, ffmpeg, now, metrics, handle, measuring=True)
+                    now = time.monotonic()
+                at_boundary = now >= measurement_deadline
                 rows = [_snapshot(state, now) for state in states]
                 for row in rows:
                     _accumulate_evaluation_metrics(metrics[str(row["label"])], row)
