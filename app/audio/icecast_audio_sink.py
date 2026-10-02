@@ -52,6 +52,11 @@ _PCM_CONTINUITY_INTERVAL_SECONDS = (
     _PCM_CONTINUITY_CHUNK_BYTES / _PCM_BYTES_PER_SECOND
 )
 _ENCODED_CHUNK_BYTES = 4 * 1024
+# Recover ordinary Windows scheduling jitter without losing elapsed media
+# time on every late pipe write. At 48 kHz stereo s16, this permits at most
+# 48 KiB of PCM catch-up, well below a multi-second programme burst. A longer
+# stall still rebases the clock instead of flooding a recovering origin.
+_PCM_CLOCK_MAX_CATCHUP_SECONDS = 0.25
 _ENCODER_ERROR_TOKENS = (
     "error",
     "failed",
@@ -301,6 +306,7 @@ class IcecastAudioSink:
         self._effective_stream_codec_profile = ""
         self._requested_stream_codec_profile = ""
         self._profile_fallback_active = False
+        self._encoded_pipe_read_policy = "not_started"
 
     @property
     def process(self):
@@ -629,6 +635,8 @@ class IcecastAudioSink:
                 ),
                 "last_network_error": self._last_network_error,
                 "network_error_count": int(self._network_error_count),
+                "encoded_pipe_read_policy": self._encoded_pipe_read_policy,
+                "pcm_clock_max_catchup_seconds": _PCM_CLOCK_MAX_CATCHUP_SECONDS,
             }
 
     @staticmethod
@@ -918,13 +926,19 @@ class IcecastAudioSink:
                     continue
                 wrote_at = time.monotonic()
                 frame_seconds = len(chunk) / _PCM_BYTES_PER_SECOND
-                # Sustained output cannot outrun its PCM clock. Permit at most
-                # one frame of catch-up after a late Windows scheduling quantum
-                # instead of draining the entire queue into TinyIce as a burst.
+                # Preserve the absolute media deadline through short timer
+                # and pipe-write delays. Rebasing on every late frame slowly
+                # reduces the audio delivery rate and exhausts listener
+                # buffers even when all writes succeed. Bound accumulated
+                # catch-up so a long outage cannot dump the retained FIFO as
+                # one large source burst.
                 next_write = (
                     wrote_at + frame_seconds
                     if not output_clock_started
-                    else max(next_write + frame_seconds, wrote_at)
+                    else max(
+                        next_write + frame_seconds,
+                        wrote_at - _PCM_CLOCK_MAX_CATCHUP_SECONDS,
+                    )
                 )
                 output_clock_started = True
 
@@ -1025,13 +1039,24 @@ class IcecastAudioSink:
                     encoded = getattr(proc, "stdout", None)
                     if encoded is None:
                         raise RuntimeError("Icecast encoder output is unavailable")
+                    # BufferedReader.read(n) waits for n bytes. Quiet FLAC
+                    # pages can stay below that size for many seconds even
+                    # though the encoder is producing valid audio. Forward
+                    # available pipe data promptly so the origin and local
+                    # recovery logic do not mistake compression for a stall.
+                    read_encoded = getattr(encoded, "read1", None)
+                    if not callable(read_encoded):
+                        read_encoded = encoded.read
+                        self._encoded_pipe_read_policy = "read"
+                    else:
+                        self._encoded_pipe_read_policy = "read1"
                     while not self._writer_stop.is_set():
                         if self._mount_reconnect_requested.is_set():
                             self._mount_reconnect_requested.clear()
                             raise _MountProbeReconnect(
                                 "Icecast mount remained unavailable after repeated probes"
                             )
-                        chunk = encoded.read(_ENCODED_CHUNK_BYTES)
+                        chunk = read_encoded(_ENCODED_CHUNK_BYTES)
                         if not chunk:
                             if proc.poll() is None:
                                 time.sleep(0.01)
