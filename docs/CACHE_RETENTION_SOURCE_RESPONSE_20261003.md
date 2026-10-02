@@ -108,6 +108,29 @@ fields before requesting another reload.
 
 ## Source and policy rollback
 
+### Separate cache cleanup budget
+
+Post-deployment inspection found that `scripts/run_fast_audio_cache_prune.cmd`
+still supplied a hard-coded 4 GiB budget. Its Python entry point also defaulted
+to 4 GiB. Both now defer to the persistent site policy unless the operator
+explicitly supplies `--max-bytes`. This preserves the intentional override while
+preventing scheduled cleanup from defeating the larger retained cache. Loading
+these two scripts needs no station or backend restart. Verify the scheduled
+action uses this wrapper rather than separately passing its own fixed budget.
+
+This correction does not itself prove a sustained physical write-rate reduction.
+The later physical disk sampling helper failed to return valid counter JSON.
+Application code and cache policy are verified independently of that failed
+counter sample.
+
+The actual scheduled task `RadioTEDU-OnAir-FastAudioCache-Prune` invoked the
+Python script directly with `--max-bytes 4294967296`, so editing only its wrapper
+was insufficient. Its action was updated to omit that fixed budget, preserving
+the executable, working directory and other parameters. Original task XML was
+saved in `H:\RadioTEDU-Backups\20261002T222740Z-cache-prune-task` before the update,
+and the installed action was read back and verified. No station worker or
+backend restart was required for this task correction.
+
 Restore the backed-up source files in the manifest and restore the policy file
 if it previously existed; otherwise remove only that explicitly named policy
 file after confirming its absolute path. Reload only affected station workers

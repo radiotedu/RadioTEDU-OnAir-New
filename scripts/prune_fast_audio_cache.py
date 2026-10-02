@@ -12,7 +12,10 @@ from pathlib import Path
 
 def _arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--max-bytes", type=int, default=4 * 1024 * 1024 * 1024)
+    parser.add_argument(
+        "--max-bytes", type=int, default=None,
+        help="Optional explicit budget; otherwise use the persistent site cache policy.",
+    )
     parser.add_argument("--min-age-seconds", type=float, default=900.0)
     parser.add_argument("--max-deletions", type=int, default=2000)
     return parser.parse_args()
