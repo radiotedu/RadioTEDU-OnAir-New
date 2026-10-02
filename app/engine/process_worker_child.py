@@ -20,6 +20,20 @@ from app.engine.station_worker import StationWorker
 from app.engine.worker_loop import _failure_backoff_seconds
 
 
+def _new_completed_producer_generation(runtime_registry, station_id, last_generation):
+    boundary = getattr(runtime_registry, "completed_producer_generation", None)
+    if not callable(boundary):
+        return None
+    try:
+        generation = boundary(station_id)
+        if (isinstance(generation, int) and not isinstance(generation, bool)
+                and generation >= 0 and generation != last_generation):
+            return generation
+    except Exception:
+        pass
+    return None
+
+
 class RemoteRuntimeRegistry:
     def __init__(self, *, address: str, family: str, authkey: bytes, station_id: int):
         self.station_id = int(station_id)
@@ -540,6 +554,7 @@ def run_station_worker_process() -> int:
     runtime_supervisor = RuntimeSupervisor(runtime_registry)
     worker_id = str(config["worker_id"])
     ticks = 0
+    last_boundary_generation = None
     failure_count = 0
     last_command_id = ""
     last_heartbeat_error_log = 0.0
@@ -725,6 +740,15 @@ def run_station_worker_process() -> int:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
+                if not failure_count:
+                    boundary_generation = _new_completed_producer_generation(
+                        runtime_registry, station_id, last_boundary_generation
+                    )
+                    if boundary_generation is not None:
+                        # Wake once when the full previous tail has drained;
+                        # do not wait out the regular scheduler poll interval.
+                        last_boundary_generation = boundary_generation
+                        break
                 if runtime_was_running and not runtime_registry.is_process_running(station_id):
                     break
                 last_command_id = _process_runtime_command(

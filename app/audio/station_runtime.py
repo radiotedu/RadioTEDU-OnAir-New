@@ -19,6 +19,7 @@ from app.audio.ffmpeg_pipeline import (
     build_ffmpeg_pcm_producer_cmd,
     build_ffmpeg_local_pcm_cmd,
     build_ffplay_local_cmd,
+    pcm_producer_preparation_key,
     release_fast_cached_uri,
 )
 from app.audio.gst_pipeline import StationPipelineConfig, build_gst_pipeline
@@ -29,6 +30,7 @@ from app.audio.local_audio_sink import LocalAudioSink
 from app.audio.output_health_router import OutputHealthRouter
 from app.audio.output_health import icecast_mount_transport_is_healthy
 from app.audio.sound_effect_player import SoundEffectPlayer
+from app.audio.prepared_pcm_source import PreparedPCMSource
 from app.runtime_paths import resolve_binary
 
 _log = logging.getLogger("cleanroom.runtime")
@@ -271,6 +273,8 @@ class StationRuntime:
         self._process_factory = process_factory or self._spawn
         self._process = None
         self._local_process = None
+        self._prepared_source = None
+        self._prepared_handoff_count = 0
         self._icecast_sink = None
         self._extra_icecast_sinks: dict[str, object] = {}
         self._extra_icecast_configs: dict[str, StationPipelineConfig] = {}
@@ -310,6 +314,7 @@ class StationRuntime:
         # Final ownership ledger for children whose narrower runtime reference
         # may be lost during a failed hand-off or transition.
         self._owned_processes = []
+        self._owned_process_lock = threading.Lock()
         # Register atexit handler to clean up on normal shutdown
         atexit.register(self._atexit_cleanup)
 
@@ -699,6 +704,7 @@ class StationRuntime:
     def _atexit_cleanup(self):
         """Kill any running child processes on Python exit."""
         try:
+            self.cancel_prepared_source()
             self._stop_silence_floor_worker()
             self._stop_producers()
             if self._icecast_sink is not None:
@@ -767,12 +773,13 @@ class StationRuntime:
             except TypeError:
                 proc = self._process_factory(cmd)
         if callable(getattr(proc, "poll", None)):
-            self._owned_processes = [
-                item
-                for item in self._owned_processes
-                if callable(getattr(item, "poll", None)) and item.poll() is None
-            ]
-            self._owned_processes.append(proc)
+            with self._owned_process_lock:
+                self._owned_processes = [
+                    item
+                    for item in self._owned_processes
+                    if callable(getattr(item, "poll", None)) and item.poll() is None
+                ]
+                self._owned_processes.append(proc)
         return proc
 
     def _signature(self, cfg: StationPipelineConfig) -> tuple:
@@ -866,8 +873,9 @@ class StationRuntime:
                     pass
 
     def _terminate_owned_processes(self) -> None:
-        owned = list(self._owned_processes)
-        self._owned_processes = []
+        with self._owned_process_lock:
+            owned = list(self._owned_processes)
+            self._owned_processes = []
         for proc in owned:
             self._terminate_process(proc)
 
@@ -966,6 +974,13 @@ class StationRuntime:
 
     def _clear_transition_window(self) -> None:
         self._transition_until_monotonic = None
+
+    def completed_producer_generation(self) -> int | None:
+        """Cheap boundary notification, with the same full FIFO completion gate."""
+        done, _draining = self._producer_exit_drain_state(
+            current=self._producer_exit_generation == self._playout_generation
+        )
+        return self._playout_generation if done else None
 
     def _is_transition_active(self) -> bool:
         if self._transition_until_monotonic is None:
@@ -1718,6 +1733,21 @@ class StationRuntime:
                 raise FileNotFoundError("ffmpeg")
         if not self.ffmpeg_bin:
             raise FileNotFoundError("ffmpeg")
+        prepared = self._prepared_source
+        if prepared is not None:
+            self._prepared_source = None
+            try:
+                key = self._preparation_key(cfg)
+            except OSError:
+                key = None
+            producer = (
+                prepared.take(key)
+                if float(start_offset_seconds or 0.0) <= 0.0 else None
+            )
+            if producer is not None:
+                self._prepared_handoff_count += 1
+                return producer
+            prepared.cancel()
         cmd = build_ffmpeg_pcm_producer_cmd(
             cfg,
             self.ffmpeg_bin,
@@ -1734,6 +1764,67 @@ class StationRuntime:
             stderr=subprocess.DEVNULL,
         )
         return producer
+
+    def _preparation_key(self, cfg: StationPipelineConfig) -> tuple:
+        stat = os.stat(cfg.input_uri)
+        return (pcm_producer_preparation_key(cfg, self.ffmpeg_bin),
+                stat.st_size, stat.st_mtime_ns)
+
+    def prepare_next_source(self, input_uri: str, *, stream_title="",
+                            stream_artist="", stream_album="", track_type="music") -> bool:
+        """Decode a successor while the current item's encoder FIFO drains.
+
+        No PCM is sent, no source is marked complete, and no metadata changes.
+        The real scheduler decision and an unchanged file/filter identity are
+        required before the prepared source can be used by start().
+        """
+        cfg = self._active_cfg
+        if (cfg is None or not self.ffmpeg_bin or self._should_use_live_mix()
+                or cfg.local_output_enabled or not input_uri or "://" in input_uri):
+            return False
+        _finished, draining = self._producer_exit_drain_state(
+            current=self._producer_exit_generation == self._playout_generation
+        )
+        if not draining:
+            return False
+        next_cfg = replace(cfg, input_uri=str(input_uri), stream_title=stream_title,
+                           stream_artist=stream_artist, stream_album=stream_album,
+                           track_type=track_type)
+        try:
+            key = self._preparation_key(next_cfg)
+        except OSError:
+            return False
+        prepared = self._prepared_source
+        if prepared is not None and prepared.key == key:
+            return bool(prepared.snapshot()["ready"])
+        self.cancel_prepared_source()
+        self._prepared_source = PreparedPCMSource(
+            key,
+            lambda: build_ffmpeg_pcm_producer_cmd(
+                next_cfg, self.ffmpeg_bin,
+                initial_burst_seconds=LOCAL_MONITOR_INITIAL_BURST_SECONDS,
+                catchup_rate=LOCAL_MONITOR_CATCHUP_RATE),
+            self._spawn_process, self._terminate_process,
+        )
+        return False
+
+    def cancel_prepared_source(self) -> None:
+        prepared = self._prepared_source
+        self._prepared_source = None
+        if prepared is not None:
+            prepared.cancel()
+
+    def _decoder_preparation_status(self) -> dict:
+        prepared = self._prepared_source
+        snapshot = prepared.snapshot() if prepared is not None else {}
+        return {
+            "ready": bool(snapshot.get("ready")),
+            "buffered_seconds": float(snapshot.get("buffered_pcm_bytes", 0))
+            / _PCM_BYTES_PER_SECOND,
+            "failed": bool(snapshot.get("failed")),
+            "cancelled": bool(snapshot.get("cancelled")),
+            "prepared_handoff_count": self._prepared_handoff_count,
+        }
 
     def _spawn_crossfade_pcm_producer(
         self,
@@ -1999,6 +2090,7 @@ class StationRuntime:
         )
 
     def _start_crossfade(self, cfg: StationPipelineConfig) -> None:
+        self.cancel_prepared_source()
         if self._active_cfg is None or not self.ffmpeg_bin:
             raise RuntimeError("transition backend unavailable")
         previous_cfg = self._active_cfg
@@ -2429,6 +2521,7 @@ class StationRuntime:
         return self.status()
 
     def stop(self) -> None:
+        self.cancel_prepared_source()
         station_id = self._live_station_id()
         if station_id is not None:
             try:
@@ -2759,6 +2852,7 @@ class StationRuntime:
             "producer_eof": producer_eof,
             "producer_draining": producer_draining,
             "producer_drain_scope": "encoder_input_fifo",
+            "decoder_preparation": self._decoder_preparation_status(),
             "producer_exit_code": (
                 self._producer_exit_code if producer_exit_current else None
             ),

@@ -474,8 +474,14 @@ class StationWorker:
 
     def _broadcast_worker_state(self, *, include_queue: bool = False, include_track: bool = False) -> None:
         try:
-            from app.api.legacy import legacy_liquidsoap_status, list_legacy_queue
             from app.ws.broadcaster import broadcaster
+
+            # WebSocket clients belong to the API process. Isolated audio
+            # workers have none, so assembling a full legacy API payload here
+            # only adds database/API work between EOF and the next producer.
+            if not broadcaster.manager.presence().get("count", 0):
+                return
+            from app.api.legacy import legacy_liquidsoap_status, list_legacy_queue
 
             status_payload = legacy_liquidsoap_status(station_id=self.station_id)
             broadcaster.on_runtime_updated(self.station_id, status_payload)
@@ -3540,6 +3546,45 @@ class StationWorker:
         except Exception:
             pass
 
+    def _prepare_successor_while_draining(self, show_session=None) -> None:
+        prepare = getattr(self.runtime_registry, "prepare_next_station_source", None)
+        if not callable(prepare):
+            return
+        try:
+            status = self.runtime_registry.status(self.station_id)
+            if not status.get("producer_draining"):
+                return
+            # Show transitions own their own audio pipeline. Preparation of
+            # ordinary automation must not compete with a host transition.
+            if show_session is not None:
+                return
+            due_ad = self._next_due_ad_if_allowed()
+            scheduled = self.schedule_repo.next_ready(self.station_id)
+            pending = self.queue_repo.next_pending(self.station_id)
+            host_pending = None
+            if self.program_queue_repo.get_source(self.station_id) == "host":
+                host_pending = self.program_queue_repo.next_pending(self.station_id)
+            source = choose_source(
+                manual_count=1 if pending else 0, ad_due=bool(due_ad),
+                schedule_ready=bool(scheduled), fallback_ready=False,
+                host_count=1 if host_pending and self._host_retry_allowed(
+                    int(host_pending["id"])) else 0,
+            )
+            item = {"ads": due_ad, "schedule": scheduled,
+                    "manual": pending, "host": host_pending}.get(source)
+            if not item:
+                return
+            uri, title, artist, album, track_type = self._track_runtime_fields(
+                int(item["track_id"]))
+            if uri:
+                prepare(self.station_id, uri, stream_title=title,
+                        stream_artist=artist, stream_album=album, track_type=track_type)
+        except Exception:
+            # Preparation is optional. The normal durable scheduler remains
+            # authoritative even when a file is missing or priorities change.
+            _log.debug("Successor preparation unavailable station_id=%s",
+                       self.station_id, exc_info=True)
+
     def process_once(self) -> dict:
         if not self.lease_service.try_acquire(self.station_id, self.worker_id):
             return {"source": "none", "reason": "lease_denied"}
@@ -3639,6 +3684,8 @@ class StationWorker:
 
         # Prepare queue-native AI announcements before the next song when due.
         self._maybe_prepare_ai_queue()
+
+        self._prepare_successor_while_draining(show_session)
 
         # Background prefetch owns upcoming intro generation. Doing that work
         # inline here blocks the worker loop and stalls playback on cold cache.

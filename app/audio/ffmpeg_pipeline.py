@@ -709,6 +709,11 @@ def build_ffmpeg_encoded_sink_cmd(
     ]
 
 
+def pcm_producer_preparation_key(cfg: StationPipelineConfig, ffmpeg_bin: str) -> tuple:
+    """Identity of decoded PCM; output credentials and metadata are irrelevant."""
+    return (str(cfg.input_uri), str(ffmpeg_bin), tuple(_programme_filter_chain(cfg)))
+
+
 def build_ffmpeg_pcm_producer_cmd(
     cfg: StationPipelineConfig,
     ffmpeg_bin: str,

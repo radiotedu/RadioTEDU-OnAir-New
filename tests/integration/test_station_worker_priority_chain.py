@@ -38,7 +38,7 @@ class _FakeRuntimeRegistry:
         }
 
 
-def test_worker_follows_manual_ads_schedule_fallback_priority(tmp_path, monkeypatch):
+def test_worker_honors_due_ads_and_waits_for_active_sources(tmp_path, monkeypatch):
     monkeypatch.setenv("CLEANROOM_DB_PATH", str(tmp_path / "cleanroom.db"))
     init_db()
     conn = get_connection()
@@ -82,20 +82,22 @@ def test_worker_follows_manual_ads_schedule_fallback_priority(tmp_path, monkeypa
     )
 
     out1 = worker.process_once()
-    while_song_plays = worker.process_once()
-    assert out1["source"] == "manual"
+    assert out1["source"] == "ads"
+    while_ad_plays = worker.process_once()
+    assert while_ad_plays["reason"] == "ad_in_progress"
+    fake_runtime.finished_inputs.add("C:/music/ad.mp3")
 
-    # A due ad and schedule wait instead of replacing the current song.
+    out2 = worker.process_once()
+    assert out2["source"] == "manual"
+    while_song_plays = worker.process_once()
+
+    # Due ads take precedence at a free boundary. Active songs and ads retain
+    # their ownership until their exact producer reaches a clean EOF.
     assert while_song_plays == {
         "source": "playing",
         "reason": "track_in_progress",
     }
-    current_song = QueueRepository(conn).current_playing(9)
-    QueueRepository(conn).mark_done(int(current_song["id"]))
-
-    out2 = worker.process_once()
-    assert out2["source"] == "ads"
-    fake_runtime.finished_inputs.add("C:/music/ad.mp3")
+    fake_runtime.finished_inputs.add("C:/music/manual.mp3")
 
     out3 = worker.process_once()
     assert out3["source"] == "schedule"
@@ -104,8 +106,8 @@ def test_worker_follows_manual_ads_schedule_fallback_priority(tmp_path, monkeypa
     out4 = worker.process_once()
     assert out4["source"] == "fallback"
     assert fake_runtime.starts == [
-        (9, "C:/music/manual.mp3"),
         (9, "C:/music/ad.mp3"),
+        (9, "C:/music/manual.mp3"),
         (9, "C:/music/schedule.mp3"),
         (9, "C:/music/fallback.mp3"),
     ]

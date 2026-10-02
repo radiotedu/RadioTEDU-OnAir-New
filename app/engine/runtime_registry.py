@@ -1359,6 +1359,22 @@ class StationRuntimeRegistry:
         }
         return self.status(station_id)
 
+    def prepare_next_station_source(self, station_id: int, input_uri: str, **fields) -> bool:
+        """Preparation never starts a source or changes its ownership/metadata."""
+        with self._operation_lock(station_id):
+            runtime = self._runtimes.get(int(station_id))
+            prepare = getattr(runtime, "prepare_next_source", None)
+            if not callable(prepare):
+                return False
+            return bool(prepare(resolve_runtime_media_path(input_uri), **fields))
+
+    def completed_producer_generation(self, station_id: int) -> int | None:
+        # Called only from the child's short idle wait. No database/status read
+        # or source recovery is needed to observe an encoder FIFO boundary.
+        runtime = self._runtimes.get(int(station_id))
+        boundary = getattr(runtime, "completed_producer_generation", None)
+        return boundary() if callable(boundary) else None
+
     def stop_station(self, station_id: int) -> dict:
         with self._operation_lock(station_id):
             return self._stop_station_unlocked(station_id)
