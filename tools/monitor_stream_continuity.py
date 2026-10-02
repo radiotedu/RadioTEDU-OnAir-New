@@ -48,7 +48,9 @@ _SILENCE_END = re.compile(
 )
 _TRANSPORT_ERROR = re.compile(
     r"connection reset|connection refused|timed out|server returned|"
-    r"input/output error|end of file|http error|broken pipe|error while decoding",
+    r"input/output error|end of file|http error|broken pipe|error while decoding|"
+    r"error submitting packet|invalid data found when processing input|"
+    r"channel element.*not allocated|number of bands.*exceeds limit",
     re.IGNORECASE,
 )
 _PCM_SAMPLE_RATE = 48_000
@@ -236,7 +238,8 @@ def build_ffmpeg_command(
         "-hide_banner",
         "-nostdin",
         "-loglevel",
-        "warning",
+        "info" if decoded_pcm else "warning",
+        "-nostats",
         "-stats_period",
         "1",
         "-rw_timeout",
@@ -309,6 +312,7 @@ class StreamState:
     measurement_media_baseline: float = 0.0
     measurement_last_progress_monotonic: float | None = None
     measurement_max_progress_gap_seconds: float = 0.0
+    measurement_minimum_playback_margin: float | None = None
     decoded_audio_bytes_total: int = 0
     measurement_audio_bytes_baseline: int = 0
     startup_delay_seconds: float | None = None
@@ -322,6 +326,7 @@ class StreamState:
     transport_errors: int = 0
     stderr_tail: deque[str] = field(default_factory=lambda: deque(maxlen=5))
     unexpected_exit_code: int | None = None
+    input_audio_description: str | None = None
 
 
 def _read_progress(state: StreamState, stream: IO[str]) -> None:
@@ -370,6 +375,17 @@ def _read_decoded_audio(state: StreamState, stream: IO[bytes]) -> None:
         now = time.monotonic()
         with state.lock:
             previous = state.last_progress_monotonic
+            if state.measurement_started_monotonic is not None:
+                # Check the reserve before newly arrived PCM repairs a deficit.
+                # A transient underrun between periodic samples must stay visible.
+                margin = state.media_seconds - (
+                    state.measurement_media_baseline
+                    + now - state.measurement_started_monotonic
+                )
+                current = state.measurement_minimum_playback_margin
+                state.measurement_minimum_playback_margin = (
+                    margin if current is None else min(current, margin)
+                )
             if state.first_progress_monotonic is None:
                 state.first_progress_monotonic = now
                 state.first_media_seconds = 0.0
@@ -415,6 +431,8 @@ def _read_diagnostics(state: StreamState, stream: IO[str] | IO[bytes]) -> None:
         start = _SILENCE_START.search(line)
         end = _SILENCE_END.search(line)
         with state.lock:
+            if state.input_audio_description is None and re.search(r"Stream #0:\d+.*Audio:", line):
+                state.input_audio_description = line.partition("Audio:")[2].strip()
             if start:
                 state.current_silence_started_at = float(start.group(1))
             if end:
@@ -506,6 +524,7 @@ def _snapshot(state: StreamState, now: float, *, stopping: bool = False) -> dict
             "readiness_satisfied": state.readiness_satisfied,
             "media_seconds": round(media_seconds, 3),
             "decoded_audio_mode": state.decoded_audio_mode,
+            "input_audio_description": state.input_audio_description,
             "decoded_audio_bytes": decoded_audio_bytes if state.decoded_audio_mode else None,
             "decoded_audio_seconds": (
                 round(decoded_audio_bytes / _PCM_BYTES_PER_SECOND, 6)
@@ -520,6 +539,7 @@ def _snapshot(state: StreamState, now: float, *, stopping: bool = False) -> dict
             "playback_margin_seconds": (
                 round(playback_margin, 3) if playback_margin is not None else None
             ),
+            "minimum_playback_margin_seconds": state.measurement_minimum_playback_margin,
             "progress_age_seconds": round(progress_age, 3),
             "max_progress_gap_seconds": round(maximum_progress_gap, 3),
             "current_silence_seconds": round(current_silence, 3),
@@ -575,6 +595,7 @@ def _begin_measurement(
     now: float,
     *,
     readiness_satisfied: bool = True,
+    listener_buffer_seconds: float = 0.0,
 ) -> dict[str, Any]:
     """Separate connection acquisition from the steady-state measurement window."""
     with state.lock:
@@ -591,7 +612,9 @@ def _begin_measurement(
         state.startup_transport_errors = state.transport_errors
         state.readiness_satisfied = readiness_satisfied
         state.measurement_started_monotonic = now
-        state.measurement_media_baseline = state.media_seconds
+        reserve = min(max(0.0, float(listener_buffer_seconds)), state.media_seconds)
+        state.measurement_media_baseline = state.media_seconds - reserve
+        state.measurement_minimum_playback_margin = reserve
         state.measurement_audio_bytes_baseline = state.decoded_audio_bytes_total
         state.measurement_last_progress_monotonic = state.last_progress_monotonic
         state.measurement_max_progress_gap_seconds = 0.0
@@ -647,6 +670,7 @@ def _evaluate(
 def _empty_evaluation_metrics() -> dict[str, Any]:
     return {
         "sample_count": 0,
+        "input_audio_description": None,
         "has_startup_metrics": False,
         "startup_delay": None,
         "startup_age": 0.0,
@@ -670,6 +694,8 @@ def _accumulate_evaluation_metrics(metrics: dict[str, Any], row: dict[str, Any])
     if not row.get("measurement_active", True):
         return
     metrics["sample_count"] += 1
+    if row.get("input_audio_description"):
+        metrics["input_audio_description"] = row["input_audio_description"]
     if "startup_delay_seconds" in row:
         metrics["has_startup_metrics"] = True
         startup_delay = row["startup_delay_seconds"]
@@ -690,6 +716,9 @@ def _accumulate_evaluation_metrics(metrics: dict[str, Any], row: dict[str, Any])
             row.get("readiness_satisfied", False)
         )
     margin = row.get("playback_margin_seconds")
+    observed_minimum = row.get("minimum_playback_margin_seconds")
+    if observed_minimum is not None:
+        margin = min(float(margin), float(observed_minimum)) if margin is not None else observed_minimum
     if margin is not None:
         value = float(margin)
         current = metrics["minimum_margin"]
@@ -790,6 +819,7 @@ def _evaluate_metrics(
     )
     return {
         "continuity_ok": continuity_ok,
+        "input_audio_description": metrics.get("input_audio_description"),
         "measurement_samples": metrics["sample_count"],
         "startup_ok": startup_ok,
         "startup_delay_seconds": startup_delay,
@@ -879,6 +909,7 @@ def run(args: argparse.Namespace) -> int:
             f"s16le/{_PCM_SAMPLE_RATE}Hz/{_PCM_CHANNELS}ch" if decoded_pcm else None
         ),
         "decoded_audio_stream_selection": "0:a:0" if decoded_pcm else None,
+        "listener_buffer_seconds": getattr(args, "listener_buffer_seconds", 0.0),
         "ffmpeg_input_policy": {
             "rw_timeout_microseconds": 15_000_000,
             "reconnect": True,
@@ -969,6 +1000,7 @@ def run(args: argparse.Namespace) -> int:
                     state,
                     measurement_started,
                     readiness_satisfied=readiness_satisfied,
+                    listener_buffer_seconds=getattr(args, "listener_buffer_seconds", 0.0),
                 )
                 for state in states
             ]
@@ -1110,6 +1142,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--readiness-stable-seconds", type=float, default=10.0)
     parser.add_argument("--maximum-startup-delay-seconds", type=float, default=60.0)
     parser.add_argument("--minimum-margin-seconds", type=float, default=-5.0)
+    parser.add_argument("--listener-buffer-seconds", type=float, default=0.0)
     parser.add_argument("--maximum-progress-age-seconds", type=float, default=5.0)
     parser.add_argument("--maximum-progress-gap-seconds", type=float, default=2.0)
     parser.add_argument("--maximum-decoded-audio-gap-seconds", type=float, default=0.25)
@@ -1135,6 +1168,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("maximum-startup-delay-seconds must be between 1 and 600")
     if not 0.0 <= args.maximum_decoded_audio_gap_seconds <= 60.0:
         parser.error("maximum-decoded-audio-gap-seconds must be between 0 and 60")
+    if not 0.0 <= args.listener_buffer_seconds <= 10.0:
+        parser.error("listener-buffer-seconds must be between 0 and 10")
     return run(args)
 
 

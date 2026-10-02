@@ -271,6 +271,29 @@ _FAST_AUDIO_CACHE_IN_FLIGHT: set[str] = set()
 _FAST_AUDIO_CACHE_LOCK = threading.Lock()
 _FAST_AUDIO_CACHE_PRUNE_IN_FLIGHT = False
 _FAST_AUDIO_CACHE_PRUNE_LOCK = threading.Lock()
+_FAST_AUDIO_CACHE_PRUNE_INTERVAL_SECONDS = 60.0
+_FAST_AUDIO_CACHE_LAST_PRUNE_STARTED: float | None = None
+_FAST_AUDIO_CACHE_TOUCH_INTERVAL_SECONDS = 60.0
+_FAST_AUDIO_CACHE_LAST_TOUCH: dict[str, float] = {}
+_FAST_AUDIO_CACHE_TOUCH_LOCK = threading.Lock()
+
+
+def _touch_fast_cached_path(cached_path: str, *, force: bool = False) -> None:
+    """Refresh LRU age without rewriting file metadata on every queue poll."""
+
+    now = time.monotonic()
+    with _FAST_AUDIO_CACHE_TOUCH_LOCK:
+        previous = _FAST_AUDIO_CACHE_LAST_TOUCH.get(cached_path)
+        if not force and previous is not None and now - previous < _FAST_AUDIO_CACHE_TOUCH_INTERVAL_SECONDS:
+            return
+        try:
+            os.utime(cached_path, None)
+        except OSError:
+            return
+        # Keep bookkeeping bounded even if a library changes continuously.
+        if len(_FAST_AUDIO_CACHE_LAST_TOUCH) >= 8192:
+            _FAST_AUDIO_CACHE_LAST_TOUCH.clear()
+        _FAST_AUDIO_CACHE_LAST_TOUCH[cached_path] = now
 
 
 def _fast_cache_max_bytes() -> int:
@@ -378,11 +401,19 @@ def prune_fast_audio_cache(
 def request_fast_audio_cache_prune() -> None:
     """Prune in a daemon so a track handoff never waits on directory cleanup."""
 
-    global _FAST_AUDIO_CACHE_PRUNE_IN_FLIGHT
+    global _FAST_AUDIO_CACHE_PRUNE_IN_FLIGHT, _FAST_AUDIO_CACHE_LAST_PRUNE_STARTED
     with _FAST_AUDIO_CACHE_PRUNE_LOCK:
         if _FAST_AUDIO_CACHE_PRUNE_IN_FLIGHT:
             return
+        now = time.monotonic()
+        if (
+            _FAST_AUDIO_CACHE_LAST_PRUNE_STARTED is not None
+            and now - _FAST_AUDIO_CACHE_LAST_PRUNE_STARTED
+            < _FAST_AUDIO_CACHE_PRUNE_INTERVAL_SECONDS
+        ):
+            return
         _FAST_AUDIO_CACHE_PRUNE_IN_FLIGHT = True
+        _FAST_AUDIO_CACHE_LAST_PRUNE_STARTED = now
 
     def _worker() -> None:
         global _FAST_AUDIO_CACHE_PRUNE_IN_FLIGHT
@@ -410,44 +441,23 @@ def request_fast_audio_cache_prune() -> None:
 
 
 def release_fast_cached_uri(input_uri: str, *, delay_seconds: float = 2.0) -> bool:
-    """Delete one consumed cache entry if it has not been reused meanwhile."""
+    """Retain consumed media for reuse until bounded LRU eviction is needed."""
 
+    del delay_seconds  # Kept for callers from older worker releases.
     if not input_uri or not os.path.isfile(input_uri):
         return False
     drive, _ = os.path.splitdrive(input_uri)
     if drive and drive.upper() == "C:":
         return False
     cached_path = _fast_cached_path(input_uri)
-    try:
-        expected = os.stat(cached_path)
-    except OSError:
+    if not os.path.isfile(cached_path):
         return False
-
-    expected_fingerprint = (int(expected.st_size), int(expected.st_mtime_ns))
-
-    def _worker() -> None:
-        if delay_seconds > 0:
-            time.sleep(float(delay_seconds))
-        try:
-            current = os.stat(cached_path)
-            current_fingerprint = (int(current.st_size), int(current.st_mtime_ns))
-            # A cache hit updates mtime.  Never delete an entry another station
-            # or a future queue item reused after this release was scheduled.
-            if current_fingerprint != expected_fingerprint:
-                return
-            os.remove(cached_path)
-        except OSError:
-            request_fast_audio_cache_prune()
-
-    threading.Thread(
-        target=_worker,
-        name="radiotedu-fast-audio-cache-release",
-        daemon=True,
-    ).start()
+    _touch_fast_cached_path(cached_path)
+    request_fast_audio_cache_prune()
     return True
 
 
-def _resolve_fast_cached_uri(input_uri: str) -> str:
+def _resolve_fast_cached_uri(input_uri: str, *, copy_if_missing: bool = True) -> str:
     if not input_uri or not os.path.exists(input_uri):
         return input_uri
     drive, _ = os.path.splitdrive(input_uri)
@@ -457,15 +467,17 @@ def _resolve_fast_cached_uri(input_uri: str) -> str:
         os.makedirs(FAST_AUDIO_CACHE_DIR, exist_ok=True)
         cached_path = _fast_cached_path(input_uri)
         if os.path.exists(cached_path) and os.path.getsize(cached_path) == os.path.getsize(input_uri):
-            try:
-                os.utime(cached_path, None)
-            except OSError:
-                pass
+            _touch_fast_cached_path(cached_path)
             request_fast_audio_cache_prune()
             return cached_path
+        if not copy_if_missing:
+            # A cold cache must not delay decoder startup by a whole-file copy.
+            # Read the source now while a daemon warms future uses of this file.
+            prefetch_fast_cached_uri(input_uri)
+            return input_uri
         # Copy to a sidecar and atomically publish it. A background prefetch
         # must never expose a half-written file to the next FFmpeg process.
-        partial_path = f"{cached_path}.{os.getpid()}.part"
+        partial_path = f"{cached_path}.{os.getpid()}.{threading.get_ident()}.part"
         shutil.copy2(input_uri, partial_path)
         os.replace(partial_path, cached_path)
         try:
@@ -474,7 +486,7 @@ def _resolve_fast_cached_uri(input_uri: str) -> str:
             pass
         # copy2 preserves the library file's old timestamp.  Cache mtime must
         # represent access time or LRU cleanup will evict a brand-new copy.
-        os.utime(cached_path, None)
+        _touch_fast_cached_path(cached_path, force=True)
         request_fast_audio_cache_prune()
         return cached_path
     except Exception:
@@ -501,6 +513,14 @@ def prefetch_fast_cached_uri(input_uri: str) -> None:
     drive, _ = os.path.splitdrive(input_uri)
     if drive and drive.upper() == "C:":
         return
+    try:
+        cached_path = _fast_cached_path(input_uri)
+        if os.path.isfile(cached_path) and os.path.getsize(cached_path) == os.path.getsize(input_uri):
+            _touch_fast_cached_path(cached_path)
+            request_fast_audio_cache_prune()
+            return
+    except OSError:
+        pass
     key = os.path.abspath(input_uri)
     with _FAST_AUDIO_CACHE_LOCK:
         if key in _FAST_AUDIO_CACHE_IN_FLIGHT:
@@ -536,7 +556,7 @@ def _build_input_args(
         args.extend(["-f", "lavfi", "-i", _silence_filter_spec()])
         return args
 
-    effective_uri = _resolve_fast_cached_uri(input_uri)
+    effective_uri = _resolve_fast_cached_uri(input_uri, copy_if_missing=False)
     args: list[str] = [
         "-thread_queue_size", "8192",
         "-probesize", "10000000",

@@ -129,6 +129,30 @@ def test_decoded_audio_reader_counts_pcm_even_when_samples_are_silent() -> None:
     assert state.first_progress_monotonic is not None
 
 
+def test_listener_buffer_covers_packet_delivery_but_preserves_transient_underrun(monkeypatch):
+    from tools import monitor_stream_continuity as monitor
+
+    def receive_after(delay):
+        state = StreamState("test", "http://example.test/audio", SimpleNamespace(poll=lambda: None), 0.0, decoded_audio_mode=True)
+        state.media_seconds = 10.0
+        state.decoded_audio_bytes_total = 10 * 192000
+        state.first_progress_monotonic = 0.0
+        state.last_progress_monotonic = 10.0
+        _begin_measurement(state, 10.0, listener_buffer_seconds=4.0)
+        monkeypatch.setattr(monitor.time, "monotonic", lambda: 10.0 + delay)
+        _read_decoded_audio(state, io.BytesIO(bytes(192000)))
+        return monitor._snapshot(state, 10.0 + delay)
+
+    buffered = receive_after(3.9)
+    assert buffered["minimum_playback_margin_seconds"] == pytest.approx(0.1)
+    recovered = receive_after(4.05)
+    assert recovered["playback_margin_seconds"] > 0
+    assert recovered["minimum_playback_margin_seconds"] == pytest.approx(-0.05)
+    metrics = monitor._empty_evaluation_metrics()
+    monitor._accumulate_evaluation_metrics(metrics, recovered)
+    assert metrics["minimum_margin"] == pytest.approx(-0.05)
+
+
 def test_diagnostics_accumulate_many_short_silence_events() -> None:
     state = StreamState(
         label="test",
