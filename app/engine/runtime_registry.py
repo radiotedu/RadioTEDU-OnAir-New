@@ -1049,7 +1049,9 @@ class StationRuntimeRegistry:
             and str(row["icecast_user"] or "").strip() == "source"
             and str(row["icecast_password"] or "") in {"", "hack" + "me"}
             and abs(gain) <= 1e-9
-            and (profile, bitrate) in {("aac_plus_196", 196), ("opus_96", 96)}
+            and (profile, bitrate) in {
+                ("aac_plus_196", 196), ("opus_96", 96), ("aac_low_192", 192)
+            }
         )
 
     @classmethod
@@ -1739,7 +1741,8 @@ class StationRuntimeRegistry:
                 runtime_status = dict(runtime.status() or {})
             except Exception:
                 status_unavailable = True
-            delivery = dict(runtime_status.get("delivery_health") or {})
+            source_health = runtime_status.get("source_health")
+            delivery = dict(source_health if isinstance(source_health, dict) else runtime_status.get("delivery_health") or {})
             branches = dict(runtime_status.get("branch_health") or {})
             branch_ok = delivery.get(output_branch)
             if branch_ok is None:
@@ -1875,7 +1878,8 @@ class StationRuntimeRegistry:
         ):
             try:
                 runtime_status = dict(runtime.status() or {})
-                delivery = dict(runtime_status.get("delivery_health") or {})
+                source_health = runtime_status.get("source_health")
+                delivery = dict(source_health if isinstance(source_health, dict) else runtime_status.get("delivery_health") or {})
                 branches = dict(runtime_status.get("branch_health") or {})
                 unhealthy_branches = [
                     branch
@@ -2093,7 +2097,9 @@ class StationRuntimeRegistry:
         ]
         if not required_branches:
             return True
-        delivery = dict(status.get("delivery_health") or {})
+        source_health = status.get("source_health")
+        source_evidence_available = isinstance(source_health, dict)
+        delivery = dict(source_health if source_evidence_available else status.get("delivery_health") or {})
         mounts = {
             str(item.get("branch") or ""): dict(item.get("health") or {})
             for item in status.get("extra_icecast_mounts") or ()
@@ -2124,7 +2130,8 @@ class StationRuntimeRegistry:
                     return icecast_mount_transport_is_healthy(
                         mount,
                         require_remote_mount_verified=(
-                            str(status.get("source_protocol") or "icecast")
+                            not source_evidence_available
+                            and str(status.get("source_protocol") or "icecast")
                             .strip()
                             .lower()
                             == "icecast"
@@ -2136,7 +2143,8 @@ class StationRuntimeRegistry:
                     return icecast_mount_transport_is_healthy(
                         mount,
                         require_remote_mount_verified=(
-                            mount_protocols.get(branch, "icecast") == "icecast"
+                            not source_evidence_available
+                            and mount_protocols.get(branch, "icecast") == "icecast"
                         ),
                     )
             return True

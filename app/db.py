@@ -16,7 +16,7 @@ _INIT_LOCK = threading.Lock()
 # API and auth handlers call init_db() defensively on many requests. Cache the
 # successful schema probe per database file so those paths do not reopen SQLite
 # and contend with the live playout writers on every request.
-_INITIALIZED_DATABASES: set[tuple[str, int, int, str]] = set()
+_INITIALIZED_DATABASES: set[tuple] = set()
 _HEALTH_LOCK = threading.Lock()
 _HEALTH_CACHE: dict[str, object] = {"checked_at": 0.0, "path": "", "value": {}}
 _SCHEMA_BOOTSTRAP_KEY = "__schema_bootstrapped__"
@@ -2098,24 +2098,44 @@ def _bootstrap_schema(cur) -> None:
     )
 
 
+def _database_initialization_key(db_path: Path, product_mode: str | None) -> tuple | None:
+    """Invalidate bootstrap evidence when the database or its WAL changes."""
+    try:
+        stat = db_path.stat()
+        try:
+            wal_stat = db_path.with_name(db_path.name + "-wal").stat()
+            wal_signature = (wal_stat.st_ino, wal_stat.st_mtime_ns, wal_stat.st_size)
+        except FileNotFoundError:
+            wal_signature = None
+        return (
+            str(db_path.resolve()), int(stat.st_dev), int(stat.st_ino),
+            str(product_mode or ""), _SCHEMA_VERSION,
+            int(stat.st_mtime_ns), int(stat.st_size), wal_signature,
+        )
+    except OSError:
+        return None
+
+
+def _remember_initialized_database(db_path: Path, product_mode: str | None) -> None:
+    key = _database_initialization_key(db_path, product_mode)
+    if key is not None:
+        # Keep one signature per database/mode; normal WAL writes must not grow
+        # this process cache indefinitely.
+        obsolete = [old for old in _INITIALIZED_DATABASES if old[:4] == key[:4]]
+        _INITIALIZED_DATABASES.difference_update(obsolete)
+        _INITIALIZED_DATABASES.add(key)
+
+
 def init_db(*, product_mode: str | None = None):
     # Endpoints call init_db() frequently; only the first successful bootstrap
     # should perform schema/data writes. Later calls must stay read-only.
     with _INIT_LOCK:
         db_path = get_db_path()
         existing_database = db_path.is_file() and db_path.stat().st_size > 0
-        try:
-            stat = db_path.stat()
-            initialized_key = (
-                str(db_path.resolve()),
-                int(stat.st_dev),
-                int(stat.st_ino),
-                str(product_mode or ""),
-            )
-        except OSError:
-            initialized_key = None
+        initialized_key = _database_initialization_key(db_path, product_mode)
         if initialized_key is not None and initialized_key in _INITIALIZED_DATABASES:
             return
+        verified = False
         conn = get_connection()
         try:
             cur = conn.cursor()
@@ -2130,8 +2150,7 @@ def init_db(*, product_mode: str | None = None):
                 and not _legacy_rbac_needs_sync(cur)
                 and not _post_version_repairs_needed(cur)
             ):
-                if initialized_key is not None:
-                    _INITIALIZED_DATABASES.add(initialized_key)
+                verified = True
                 return
 
             if existing_database:
@@ -2152,19 +2171,11 @@ def init_db(*, product_mode: str | None = None):
             _mark_schema_bootstrap_applied(cur)
             cur.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
             conn.commit()
-            # Initializing a new database creates the file after the first stat.
-            # Cache the resulting file identity only after every write succeeded.
-            try:
-                stat = db_path.stat()
-                _INITIALIZED_DATABASES.add(
-                    (
-                        str(db_path.resolve()),
-                        int(stat.st_dev),
-                        int(stat.st_ino),
-                        str(product_mode or ""),
-                    )
-                )
-            except OSError:
-                pass
+            verified = True
         finally:
             conn.close()
+            if verified:
+                # Closing the last connection may checkpoint/remove the WAL.
+                # Cache its final identity so an unchanged API request needs
+                # neither a new SQLite connection nor another schema probe.
+                _remember_initialized_database(db_path, product_mode)

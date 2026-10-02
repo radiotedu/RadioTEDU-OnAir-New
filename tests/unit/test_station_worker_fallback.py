@@ -221,6 +221,7 @@ def test_worker_fails_blank_pending_reference_before_refilling_active_music(
     init_db()
     conn = get_connection()
     cur = conn.cursor()
+    cur.execute("INSERT OR IGNORE INTO stations (id, name) VALUES (4, 'Pop')")
     cur.execute(
         "INSERT INTO tracks (station_id, title, artist, track_type, duration, file_path, "
         "is_active, play_count, exclude_from_autoplay) "
@@ -251,6 +252,28 @@ def test_worker_fails_blank_pending_reference_before_refilling_active_music(
     ).fetchall()
     assert (broken_track_id, "failed") in [tuple(row) for row in rows]
     assert (available_track_id, "playing") in [tuple(row) for row in rows]
+
+
+def test_valid_pending_media_poll_does_not_open_a_write_transaction(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLEANROOM_DB_PATH", str(tmp_path / "cleanroom.db"))
+    init_db()
+    conn = get_connection()
+    track = conn.execute(
+        "INSERT INTO tracks (station_id,title,track_type,file_path,is_active) "
+        "VALUES (1,'Valid song','music','C:/music/valid.mp3',1)"
+    ).lastrowid
+    conn.execute(
+        "INSERT INTO queue_items (station_id,track_id,position,status) VALUES (1,?,1,'pending')",
+        (track,),
+    )
+    conn.commit()
+    worker = StationWorker(station_id=1)
+    statements = []
+    worker.conn.set_trace_callback(statements.append)
+    for _ in range(20):
+        assert worker._fail_pending_items_without_media_reference() == 0
+        assert not worker.conn.in_transaction
+    assert not any(sql.lstrip().upper().startswith(("UPDATE", "INSERT", "DELETE", "BEGIN", "COMMIT")) for sql in statements)
 
 
 def test_worker_autofill_is_strictly_isolated_to_its_station(
@@ -933,6 +956,7 @@ def test_worker_process_once_prerolls_next_music_track_inside_crossfade_window(
     runtime = _FakeRuntimeRegistry()
     runtime.running[1] = True
     worker = StationWorker(station_id=1, runtime_registry=runtime)
+    monkeypatch.setattr(worker, "_cached_track_duration", lambda *_args: 30.0)
 
     result = worker.process_once()
 
@@ -994,6 +1018,7 @@ def test_worker_process_once_refills_pending_autoplay_when_only_current_music_is
     runtime = _FakeRuntimeRegistry()
     runtime.running[1] = True
     worker = StationWorker(station_id=1, runtime_registry=runtime)
+    monkeypatch.setattr(worker, "_cached_track_duration", lambda *_args: 30.0)
 
     result = worker.process_once()
 

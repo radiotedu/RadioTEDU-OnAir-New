@@ -411,6 +411,20 @@ def _safe_snapshot(factory, sanitizer):
     except Exception:
         return {"state": "unavailable"}
 
+def _local_programme_is_active(runtime: dict) -> bool:
+    """Operator programme metadata does not depend on public listener status."""
+    if not runtime.get("program_running") or runtime.get("program_pcm_stalled"):
+        return False
+    uri = str(runtime.get("active_input_uri") or "").strip().lower()
+    if not uri or uri.startswith("silence://"):
+        return False
+    try:
+        age = float(runtime.get("program_pcm_age_seconds"))
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(age) and 0.0 <= age <= 5.0
+
+
 def _collect_fast() -> dict:
     init_db()
     try:
@@ -446,7 +460,10 @@ def _collect_fast() -> dict:
                     else _runtime_health(runtime)
                 ),
                 "public_status": public_status,
-                "now_playing": (public_station or {}).get("now_playing"),
+                "now_playing": (
+                    reported_item if _local_programme_is_active(runtime)
+                    else (public_station or {}).get("now_playing")
+                ),
                 "preserved_item": (
                     (public_station or {}).get("preserved_item")
                     if public_station is not None

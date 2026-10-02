@@ -12,7 +12,7 @@ from app.repositories.settings_repo import SettingsRepository
 from app.repositories.station_output_repo import StationOutputRepository
 
 
-def test_stale_high_quality_profile_self_heals_to_opus_192():
+def test_stale_high_quality_profile_uses_commissioned_aac_lc_192():
     settings = {
         "station_1_extra_icecast_outputs": json.dumps(
             [
@@ -37,7 +37,7 @@ def test_stale_high_quality_profile_self_heals_to_opus_192():
 
     outputs = runtime_registry_module._extra_icecast_outputs(settings, 1, row)
 
-    assert outputs[0]["stream_codec_profile"] == "opus_192"
+    assert outputs[0]["stream_codec_profile"] == "aac_low_192"
     assert outputs[0]["stream_bitrate_kbps"] == 192
 
 

@@ -2760,14 +2760,25 @@ class StationWorker:
         owner while the autofiller prepares station-owned music behind it.
         """
         cur = self.conn.cursor()
-        cur.execute(
-            "UPDATE queue_items SET status='failed', finished_at=CURRENT_TIMESTAMP "
-            "WHERE station_id=? AND status='pending' AND ("
+        invalid_reference = (
+            "station_id=? AND status='pending' AND ("
             "  NOT EXISTS (SELECT 1 FROM tracks t WHERE t.id=queue_items.track_id) "
             "  OR EXISTS (SELECT 1 FROM tracks t WHERE t.id=queue_items.track_id "
             "            AND (t.station_id<>? OR COALESCE(TRIM(t.file_path),'')=''))"
-            ")",
-            (self.station_id, self.station_id),
+            ")"
+        )
+        parameters = (self.station_id, self.station_id)
+        # The ordinary 100 ms scheduler poll must not reserve SQLite's writer
+        # lock when every pending reference is valid.
+        if cur.execute(
+            "SELECT 1 FROM queue_items WHERE " + invalid_reference + " LIMIT 1",
+            parameters,
+        ).fetchone() is None:
+            return 0
+        cur.execute(
+            "UPDATE queue_items SET status='failed', finished_at=CURRENT_TIMESTAMP "
+            "WHERE " + invalid_reference,
+            parameters,
         )
         failed = int(cur.rowcount or 0)
         if self.conn.in_transaction:

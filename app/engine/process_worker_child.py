@@ -275,7 +275,9 @@ def _transport_is_healthy(runtime_status: dict | None) -> bool:
     # station's primary Icecast mount is configured. Keep the broadcast default
     # fail-closed; an explicit icecast=False still represents an opt-out.
     required.setdefault("icecast", True)
-    delivery = dict(status.get("delivery_health") or {})
+    source_health = status.get("source_health")
+    source_evidence_available = isinstance(source_health, dict)
+    delivery = dict(source_health if source_evidence_available else status.get("delivery_health") or {})
     branches = dict(status.get("branch_health") or {})
     extra_mounts = {
         str(item.get("branch") or ""): dict(item.get("health") or {})
@@ -326,7 +328,8 @@ def _transport_is_healthy(runtime_status: dict | None) -> bool:
                 primary_health,
                 sink_running=status.get("icecast_sink_running"),
                 require_remote_mount_verified=(
-                    str(status.get("source_protocol") or "icecast")
+                    not source_evidence_available
+                    and str(status.get("source_protocol") or "icecast")
                     .strip()
                     .lower()
                     == "icecast"
@@ -343,7 +346,8 @@ def _transport_is_healthy(runtime_status: dict | None) -> bool:
                     mount_health,
                     require_process=False,
                     require_remote_mount_verified=(
-                        extra_protocols.get(branch, "icecast") == "icecast"
+                        not source_evidence_available
+                        and extra_protocols.get(branch, "icecast") == "icecast"
                     ),
                 ):
                     return False

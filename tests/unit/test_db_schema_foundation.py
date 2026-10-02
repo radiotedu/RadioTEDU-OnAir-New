@@ -184,6 +184,25 @@ def test_init_db_does_not_reopen_verified_database_on_each_request(tmp_path, mon
     db.init_db()
 
 
+def test_init_db_rechecks_external_schema_changes_in_an_open_wal(tmp_path, monkeypatch):
+    import app.db as db
+
+    monkeypatch.setenv("CLEANROOM_DB_PATH", str(tmp_path / "open-wal.db"))
+    monkeypatch.setattr(db, "_INITIALIZED_DATABASES", set())
+    db.init_db()
+    writer = sqlite3.connect(str(tmp_path / "open-wal.db"))
+    try:
+        writer.execute("ALTER TABLE queue_items DROP COLUMN retry_after")
+        writer.commit()
+        assert (tmp_path / "open-wal.db-wal").exists()
+        db.init_db()
+        columns = {row[1] for row in writer.execute("PRAGMA table_info(queue_items)")}
+        assert "retry_after" in columns
+        assert len(db._INITIALIZED_DATABASES) == 1
+    finally:
+        writer.close()
+
+
 def test_get_connection_does_not_reassert_wal_for_existing_database(tmp_path, monkeypatch):
     import app.db as db
 

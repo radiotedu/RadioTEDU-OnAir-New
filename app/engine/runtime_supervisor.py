@@ -9,7 +9,11 @@ class RuntimeSupervisor:
         status = self.runtime_registry.status(station_id)
         running = bool(status.get("running", False))
         branches = status.get("branch_health", {}) or {}
-        delivery = status.get("delivery_health", branches) or branches
+        source_health = status.get("source_health")
+        delivery = (
+            source_health if isinstance(source_health, dict)
+            else status.get("delivery_health", branches) or branches
+        )
         required = status.get("required_outputs", {}) or {}
         icecast_ok = bool(delivery.get("icecast", branches.get("icecast", False)))
         local_ok = bool(delivery.get("local", branches.get("local", False)))

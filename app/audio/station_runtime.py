@@ -1084,9 +1084,9 @@ class StationRuntime:
                 self._icecast_sink = IcecastAudioSink(
                     self.ffmpeg_bin,
                     self._spawn_process,
-                    # Verify a complete 512-byte listener canary, not only an
-                    # HTTP 200 header, so a half-open mount cannot stay green.
-                    mount_probe=probe_icecast_mount,
+                    # Listener verification runs independently. A short GET
+                    # must not reconnect a source that is still sending PCM.
+                    mount_probe=None,
                     probe_failure_threshold=2,
                     reconnect_failure_threshold=4,
                     initial_connect_spread_sec=30.0,
@@ -1156,7 +1156,7 @@ class StationRuntime:
                         sink = IcecastAudioSink(
                             self.ffmpeg_bin,
                             self._spawn_process,
-                            mount_probe=probe_icecast_mount,
+                            mount_probe=None,
                             probe_failure_threshold=2,
                             reconnect_failure_threshold=4,
                             initial_connect_spread_sec=30.0,
@@ -2383,7 +2383,7 @@ class StationRuntime:
                     sink = IcecastAudioSink(
                         self.ffmpeg_bin,
                         self._spawn_process,
-                        mount_probe=probe_icecast_mount,
+                        mount_probe=None,
                         probe_failure_threshold=2,
                         reconnect_failure_threshold=4,
                         initial_connect_spread_sec=30.0,
@@ -2636,6 +2636,24 @@ class StationRuntime:
                 }
             )
         branch_health = self.branch_health()
+        # Source recovery uses current encoder/writer evidence. Public listener
+        # verification remains separate and must not become a reconnect signal.
+        source_health = dict(branch_health)
+        source_health["icecast"] = bool(
+            branch_health.get("icecast")
+            and icecast_mount_transport_is_healthy(
+                icecast_mount_health, require_remote_mount_verified=False,
+            )
+        )
+        for item in extra_icecast_mounts:
+            branch = str(item.get("branch") or "")
+            if branch:
+                source_health[branch] = bool(
+                    branch_health.get(branch)
+                    and icecast_mount_transport_is_healthy(
+                        item.get("health"), require_remote_mount_verified=False,
+                    )
+                )
         # Branch health proves that current PCM is reaching an output worker.
         # An unconfirmed initial listener probe does not make a starting branch
         # unhealthy; a confirmed mount miss or stalled writer does.
@@ -2747,6 +2765,7 @@ class StationRuntime:
             "transition_mode": str(self._last_transition_mode or "none"),
             "transition_active": self._is_transition_active(),
             "branch_health": branch_health,
+            "source_health": source_health,
             "delivery_health": delivery_health,
             # SHOUTcast source acceptance is not a listener-side verification;
             # consumers that need public delivery proof must use this map.

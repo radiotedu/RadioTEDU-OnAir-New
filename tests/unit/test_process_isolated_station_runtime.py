@@ -479,6 +479,8 @@ def test_worker_liveness_requires_current_program_audio():
         "program_pcm_stalled": False,
         "required_outputs": {"icecast": True, "local": False},
         "icecast_mount_health": {
+            "mount_healthy": True,
+            "remote_mount_verified": True,
             "last_write_age_seconds": 0.1,
             "last_network_write_age_seconds": 0.1,
             "process_running": True,

@@ -997,6 +997,9 @@ def test_runtime_uses_ffmpeg_transition_for_music_to_music_when_supported(monkey
         )
     )
     clock["value"] = 105.0
+    # Connector retries use the same fake clock in background threads. Pin
+    # this command-builder input instead of depending on their scheduling.
+    monkeypatch.setattr(runtime, "_current_offset_seconds", lambda: 5.0)
     runtime.start(
         _make_cfg(
             input_uri="C:/music/b.mp3",
@@ -1020,6 +1023,17 @@ def test_runtime_uses_ffmpeg_transition_for_music_to_music_when_supported(monkey
     assert procs[1].terminated is False
     assert runtime.is_running() is True
     assert runtime._last_transition_mode == "crossfade"
+
+
+def test_current_program_offset_uses_monotonic_time_and_never_goes_negative(monkeypatch):
+    runtime = StationRuntime(process_factory=lambda *_args, **_kwargs: _FakeProcess())
+    clock = {"value": 105.0}
+    monkeypatch.setattr(runtime_module.time, "monotonic", lambda: clock["value"])
+    assert runtime._current_offset_seconds() == 0.0
+    runtime._active_started_monotonic = 100.0
+    assert runtime._current_offset_seconds() == 5.0
+    clock["value"] = 99.0
+    assert runtime._current_offset_seconds() == 0.0
 
 
 def test_runtime_defers_failed_transition_without_killing_current_source(monkeypatch):
@@ -1540,7 +1554,7 @@ def test_stop_reaps_owned_process_when_active_reference_was_lost():
     assert runtime._owned_processes == []
 
 
-def test_primary_source_uses_audio_byte_listener_probe(monkeypatch):
+def test_primary_source_keeps_listener_verification_outside_reconnect_loop(monkeypatch):
     captured = {}
 
     class Sink:
@@ -1555,12 +1569,13 @@ def test_primary_source_uses_audio_byte_listener_probe(monkeypatch):
     runtime.ffmpeg_bin = "ffmpeg.exe"
     cfg = _make_cfg(local_output_enabled=False)
     assert runtime._ensure_icecast_sink(cfg)
-    assert captured["mount_probe"] is runtime_module.probe_icecast_mount
+    assert captured["mount_probe"] is None
+    assert captured["decouple_input_backpressure"] is True
     assert captured["probe_failure_threshold"] == 2
     assert captured["cfg"] is cfg
 
 
-def test_extra_icecast_source_uses_audio_byte_listener_probe(monkeypatch):
+def test_extra_source_keeps_listener_verification_outside_reconnect_loop(monkeypatch):
     captured = {}
 
     class Sink:
@@ -1582,5 +1597,6 @@ def test_extra_icecast_source_uses_audio_byte_listener_probe(monkeypatch):
     )
 
     assert runtime._ensure_extra_icecast_sinks(cfg) == {"icecast:/backup": True}
-    assert captured["mount_probe"] is runtime_module.probe_icecast_mount
+    assert captured["mount_probe"] is None
+    assert captured["decouple_input_backpressure"] is True
     assert captured["probe_failure_threshold"] == 2

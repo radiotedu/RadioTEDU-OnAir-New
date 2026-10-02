@@ -17,6 +17,7 @@ def _worker_with_active_ad():
     worker._process_show_lifecycle = lambda _session: None
     worker._maybe_insert_startup_sound = lambda: None
     worker._fail_cross_station_queue_items = lambda: None
+    worker._fail_pending_items_without_media_reference = lambda: 0
     worker._remove_unplanned_pending_ads = lambda: None
     worker._autofill_queue = lambda: None
     worker._prefetch_upcoming_audio = lambda: None
@@ -449,6 +450,7 @@ def test_ready_schedule_waits_for_the_current_song_boundary(monkeypatch):
     worker.ad_repo.current_playing = lambda _station_id: None
     worker._advance_playing_ad_item = lambda: False
     worker._advance_playing_queue_item = lambda: False
+    worker._advance_playing_schedule_item = lambda: False
     worker._fail_disabled_active_ads = lambda: 0
     worker._ensure_hourly_ad_break = lambda: None
     worker._advance_host_track = lambda: None

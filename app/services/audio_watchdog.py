@@ -182,8 +182,10 @@ class AudioWatchdogService:
             "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "stations": stations,
             "managed_profiles": profiles,
-            "managed_profiles_ok": len(profiles) == len(CAMPAIGN_STATION_IDS)
-            and all(bool(item["ok"]) for item in profiles),
+            "managed_profiles_ok": active_campaign is None or (
+                len(profiles) == len(CAMPAIGN_STATION_IDS)
+                and all(bool(item["ok"]) for item in profiles)
+            ),
             "last_run": self._last_report(),
         }
 
