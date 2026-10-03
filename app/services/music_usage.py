@@ -413,7 +413,11 @@ class MusicUsageService:
         # CSV mirrors are refreshed asynchronously so the audio worker never
         # waits on a large all-time export.  The immutable row above is already
         # durable before the notification is sent.
-        request_music_usage_export()
+        after_commit = getattr(self.conn, "after_commit", None)
+        if callable(after_commit):
+            after_commit(request_music_usage_export)
+        else:
+            request_music_usage_export()
         return recorded
 
     def list_entries(self, *, station_id: int | None = None, date_from: str | None = None, date_to: str | None = None, limit: int | None = 1000) -> list[dict]:

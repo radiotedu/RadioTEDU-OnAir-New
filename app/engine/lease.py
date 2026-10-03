@@ -16,6 +16,22 @@ class LeaseService:
             seconds=max(1, int(self.lease_seconds)) * 4
         )
         cur = self.conn.cursor()
+        # Check the persisted owner on every tick, but flush a renewal only
+        # after one third of the lease lifetime has elapsed. A 30-second lease
+        # then needs one durable renewal per 10 seconds instead of every tick.
+        # The conditional UPSERT below remains the acquisition/fencing barrier.
+        current = cur.execute(
+            "SELECT worker_id, (julianday(lease_expires_at) - julianday(?)) * 86400.0 "
+            "AS remaining_seconds FROM station_worker_lease WHERE station_id=?",
+            (now.isoformat(), int(station_id)),
+        ).fetchone()
+        if current is not None:
+            remaining = current[1]
+            if remaining is not None and 0 < float(remaining) <= max(1, int(self.lease_seconds)) * 4:
+                if str(current[0]) != str(worker_id):
+                    return False
+                if float(remaining) > max(1.0, float(self.lease_seconds) * 2.0 / 3.0):
+                    return True
         cur.execute(
             "INSERT INTO station_worker_lease "
             "(station_id, worker_id, lease_expires_at) VALUES (?, ?, ?) "

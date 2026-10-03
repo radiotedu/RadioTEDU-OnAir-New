@@ -2,9 +2,11 @@ import logging
 import hashlib
 import json
 import os
+import sqlite3
 import threading
 import time
 from collections import OrderedDict
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -13,6 +15,7 @@ from urllib.parse import unquote
 from app.audio.ffmpeg_pipeline import prefetch_fast_cached_uri
 from app.audio.virtual_sources import is_silence_input_uri
 from app.db import get_connection
+from app.db_commit_batch import commit_batch
 from app.engine.lease import LeaseService
 from app.engine.ad_policy import ads_enabled_from_settings, station_ads_enabled
 from app.engine.broadcast_plan_policy import (
@@ -473,6 +476,11 @@ class StationWorker:
         )
 
     def _broadcast_worker_state(self, *, include_queue: bool = False, include_track: bool = False) -> None:
+        after_commit = getattr(getattr(self, "conn", None), "after_commit", None)
+        if callable(after_commit):
+            after_commit(lambda: self._broadcast_worker_state(
+                include_queue=include_queue, include_track=include_track))
+            return
         try:
             from app.ws.broadcaster import broadcaster
 
@@ -959,8 +967,11 @@ class StationWorker:
             )
             return {"source": source, "reason": "runtime_unavailable"}
 
-        mark_playing(item_id)
-        self._set_playout_state(source, item_id, reason=f"{source}_start")
+        # Both ownership records must be durable before any PCM starts. One
+        # commit preserves that barrier without two separate disk flushes.
+        with self._batch_boundary_writes():
+            mark_playing(item_id)
+            self._set_playout_state(source, item_id, reason=f"{source}_start")
         track_uri, stream_title, stream_artist, stream_album, track_type = self._track_runtime_fields(track_id)
         if not track_uri:
             mark_failed(item_id)
@@ -1249,7 +1260,33 @@ class StationWorker:
         self._set_playout_state("fallback", None, reason=f"{failed_source}_{reason}")
         return True
 
+    @contextmanager
+    def _batch_boundary_writes(self):
+        connection = getattr(self, "conn", None)
+        if not isinstance(connection, sqlite3.Connection) or connection.in_transaction:
+            # Preserve callers' existing transactions and lightweight test
+            # registries. A nested batch already delegates to its outer scope.
+            yield
+            return
+        owners = [self]
+        for name in ("queue_repo", "ad_repo", "schedule_repo", "playout_state"):
+            owner = getattr(self, name, None)
+            if owner is not None and getattr(owner, "conn", None) is connection:
+                owners.append(owner)
+        with commit_batch(connection) as grouped:
+            try:
+                for owner in owners:
+                    owner.conn = grouped
+                yield
+            finally:
+                for owner in owners:
+                    owner.conn = connection
+
     def _complete_queue_item(self, playing) -> None:
+        with self._batch_boundary_writes():
+            self._complete_queue_item_writes(playing)
+
+    def _complete_queue_item_writes(self, playing) -> None:
         """Mark queue item done and update track play statistics."""
         self.queue_repo.mark_done(int(playing["id"]))
         self._set_playout_state("none", None, reason="queue_track_complete")
@@ -1758,11 +1795,12 @@ class StationWorker:
                 return False
             if self._runtime_source_finished_naturally(runtime_status, track_uri):
                 item_id = int(self._row_value(playing, "id", 0) or 0)
-                self.ad_repo.mark_done(item_id)
-                if track_id > 0 and getattr(self, "conn", None) is not None:
-                    TrackRepository(self.conn).mark_played(track_id)
-                self._set_playout_state("none", None, reason="ad_complete")
-                self._broadcast_worker_state(include_track=True)
+                with self._batch_boundary_writes():
+                    self.ad_repo.mark_done(item_id)
+                    if track_id > 0 and getattr(self, "conn", None) is not None:
+                        TrackRepository(self.conn).mark_played(track_id)
+                    self._set_playout_state("none", None, reason="ad_complete")
+                    self._broadcast_worker_state(include_track=True)
                 return True
             if self._runtime_source_is_draining(runtime_status, track_uri):
                 return False
