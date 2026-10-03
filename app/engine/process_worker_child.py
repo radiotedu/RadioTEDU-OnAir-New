@@ -17,6 +17,8 @@ from app.engine.process_audio_bridge import ProcessAudioBridgeClient
 from app.engine.runtime_registry import StationRuntimeRegistry
 from app.engine.runtime_supervisor import RuntimeSupervisor
 from app.engine.station_worker import StationWorker
+from app.engine.worker_heartbeat import WorkerHeartbeatPublisher
+from app.engine.worker_session import StationWorkerSession
 from app.engine.worker_loop import _failure_backoff_seconds
 
 
@@ -559,7 +561,7 @@ def run_station_worker_process() -> int:
     last_command_id = ""
     last_heartbeat_error_log = 0.0
     last_file_error_log = 0.0
-    heartbeat_write_lock = threading.Lock()
+    heartbeat_publisher = WorkerHeartbeatPublisher(config, _write_heartbeat)
     heartbeat_state_lock = threading.Lock()
     heartbeat_stop = threading.Event()
     heartbeat_state = {
@@ -588,13 +590,11 @@ def run_station_worker_process() -> int:
             heartbeat_state["runtime_status"] = dict(runtime_status or {})
             heartbeat_state["scheduler_progress_epoch"] = time.time()
         try:
-            with heartbeat_write_lock:
-                _write_heartbeat(
-                    config,
-                    safe_payload,
-                    runtime_status=runtime_status,
-                    running=running,
-                )
+            heartbeat_publisher.publish(
+                safe_payload,
+                runtime_status=runtime_status,
+                running=running,
+            )
         except OSError:
             now = time.monotonic()
             if now - last_file_error_log >= 60.0:
@@ -641,13 +641,11 @@ def run_station_worker_process() -> int:
                 current_status, status_available
             )
             try:
-                with heartbeat_write_lock:
-                    _write_heartbeat(
-                        config,
-                        payload,
-                        runtime_status=current_status,
-                        running=True,
-                    )
+                heartbeat_publisher.publish(
+                    payload,
+                    runtime_status=current_status,
+                    running=True,
+                )
             except OSError:
                 # A short antivirus/filesystem race must not stop liveness.
                 pass
@@ -657,6 +655,12 @@ def run_station_worker_process() -> int:
         daemon=True,
         name=f"station-worker-liveness-{station_id}",
     )
+    worker_session = StationWorkerSession(lambda: StationWorker(
+        station_id=station_id,
+        worker_id=worker_id,
+        runtime_registry=runtime_registry,
+        fallback_uri=fallback_uri,
+    ))
 
     try:
         emit(
@@ -672,7 +676,6 @@ def run_station_worker_process() -> int:
         liveness_thread.start()
         while not _stop_requested(stop_path):
             started = time.monotonic()
-            worker = None
             result = None
             error_code = ""
             backoff_seconds = 0.0
@@ -695,13 +698,7 @@ def run_station_worker_process() -> int:
                         stream_title="Continuity audio",
                         track_type="startup",
                     )
-                worker = StationWorker(
-                    station_id=station_id,
-                    worker_id=worker_id,
-                    runtime_registry=runtime_registry,
-                    fallback_uri=fallback_uri,
-                )
-                result = worker.process_once()
+                result = worker_session.process_once()
                 failure_count = 0
             except Exception as exc:
                 failure_count += 1
@@ -716,10 +713,6 @@ def run_station_worker_process() -> int:
                     str(exc)[:500],
                     failure_count,
                 )
-            finally:
-                if worker is not None:
-                    worker.conn.close()
-
             ticks += 1
             runtime_status = runtime_registry.status(station_id)
             emit(
@@ -764,6 +757,10 @@ def run_station_worker_process() -> int:
         heartbeat_stop.set()
         if liveness_thread.is_alive():
             liveness_thread.join(timeout=2.0)
+        try:
+            worker_session.close()
+        except Exception:
+            logger.warning("scheduler connection close failed during shutdown")
         try:
             runtime_registry.stop_all()
         except Exception:
