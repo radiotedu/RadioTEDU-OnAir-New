@@ -2195,6 +2195,12 @@ class StationWorker:
                 # duration metadata expires.
                 self._complete_queue_item(playing)
                 return True
+            if self._runtime_source_is_draining(rt_status, track_uri):
+                # A short/fast-decoded source can exit well before catalog
+                # time while its complete tail is still queued. Check this
+                # before the startup/stall and metadata timeout paths, which
+                # otherwise restart the same sweeper/song over its own tail.
+                return False
             if elapsed < advance_at and track_uri:
                 playback_alive = self._runtime_playback_alive(rt_status)
                 playback_matches = self._runtime_playback_matches(
