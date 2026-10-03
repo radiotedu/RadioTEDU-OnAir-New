@@ -2548,7 +2548,7 @@ class StationRuntime:
         producer = self._process
         pipe = self._icecast_pipe_thread
         if not (
-            self._backend == "ffmpeg"
+            self._backend in {"ffmpeg", "ffmpeg-transition"}
             and producer is not None
             and self._icecast_pipe_process is producer
             and self._icecast_pipe_generation == self._playout_generation

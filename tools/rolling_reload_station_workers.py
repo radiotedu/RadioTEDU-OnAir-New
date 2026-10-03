@@ -67,6 +67,7 @@ def _healthy(heartbeat: dict) -> bool:
         and runtime.get("output_feed_active")
         and not runtime.get("program_pcm_stalled")
         and health.get("mount_healthy")
+        and health.get("source_response_confirmed") is True
         and health.get("process_running")
         and health.get("writer_running")
         and not health.get("writer_failed")
@@ -78,6 +79,7 @@ def _healthy(heartbeat: dict) -> bool:
         and branches.get("icecast")
         and all(
             item.get("mount_healthy") and item.get("process_running")
+            and item.get("source_response_confirmed") is True
             and item.get("writer_running") and not item.get("writer_failed")
             and not item.get("network_failed")
             and item.get("last_network_write_age_seconds") is not None

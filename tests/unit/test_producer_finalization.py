@@ -26,8 +26,10 @@ def finishing_runtime():
     return runtime
 
 
-def test_successful_decoder_exit_waits_for_its_current_pcm_pipe():
+@pytest.mark.parametrize("backend", ["ffmpeg", "ffmpeg-transition"])
+def test_successful_decoder_exit_waits_for_its_current_pcm_pipe(backend):
     runtime = finishing_runtime()
+    runtime._backend = backend
     status = runtime.status()
     assert status["program_running"] is False
     assert status["producer_finalizing"] is True
@@ -39,8 +41,10 @@ def test_successful_decoder_exit_waits_for_its_current_pcm_pipe():
     "failed_decoder", "previous_generation", "other_process", "stopped_pipe",
     "dead_pipe", "stalled_pipe", "recorded_exit",
 ])
-def test_dead_or_superseded_pipe_does_not_suppress_recovery(mutation):
+@pytest.mark.parametrize("backend", ["ffmpeg", "ffmpeg-transition"])
+def test_dead_or_superseded_pipe_does_not_suppress_recovery(mutation, backend):
     runtime = finishing_runtime()
+    runtime._backend = backend
     if mutation == "failed_decoder":
         runtime._process.poll = lambda: 1
     elif mutation == "previous_generation":
@@ -92,8 +96,10 @@ def test_finalizing_ad_neither_restarts_nor_completes():
     assert worker._restart_playing_ad_item_if_runtime_mismatched({"id": 518, "track_id": 52944}) is False
 
 
-def test_exited_decoder_with_buffered_pipe_keeps_ad_until_full_fifo_eof():
+@pytest.mark.parametrize("backend", ["ffmpeg", "ffmpeg-transition"])
+def test_exited_decoder_with_buffered_pipe_keeps_ad_until_full_fifo_eof(backend):
     runtime = finishing_runtime()
+    runtime._backend = backend
     blocked, release = threading.Event(), threading.Event()
 
     class BufferedPipe:
