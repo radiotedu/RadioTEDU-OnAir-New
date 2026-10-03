@@ -1438,8 +1438,9 @@ class StationWorker:
     def _runtime_source_is_draining(
         self, rt_status: dict | None, expected_uri: str
     ) -> bool:
-        if not isinstance(rt_status, dict) or not bool(
-            rt_status.get("producer_draining", False)
+        if not isinstance(rt_status, dict) or not (
+            bool(rt_status.get("producer_draining", False))
+            or bool(rt_status.get("producer_finalizing", False))
         ):
             return False
         active_uri = str(rt_status.get("active_input_uri") or "").strip()

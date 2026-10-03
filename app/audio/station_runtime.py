@@ -311,6 +311,7 @@ class StationRuntime:
         self._icecast_pipe_thread = None
         self._icecast_pipe_stop = threading.Event()
         self._icecast_pipe_process = None
+        self._icecast_pipe_generation = None
         # Final ownership ledger for children whose narrower runtime reference
         # may be lost during a failed hand-off or transition.
         self._owned_processes = []
@@ -1593,6 +1594,7 @@ class StationRuntime:
         self._stop_icecast_pipe_worker()
         self._icecast_pipe_stop.clear()
         self._icecast_pipe_process = producer
+        self._icecast_pipe_generation = int(generation)
         self._icecast_pipe_thread = threading.Thread(
             target=self._icecast_pipe_loop,
             args=(producer, sink, generation),
@@ -1614,6 +1616,7 @@ class StationRuntime:
             self._icecast_pipe_thread.join(timeout=1.0)
         self._icecast_pipe_thread = None
         self._icecast_pipe_process = None
+        self._icecast_pipe_generation = None
         self._icecast_pipe_stop.clear()
 
     def _spawn_live_mix_producer(
@@ -2534,6 +2537,33 @@ class StationRuntime:
         self._stop_sinks()
         self._terminate_owned_processes()
 
+    def _producer_pipe_is_finalizing(self) -> bool:
+        """Keep a clean decoder exit owned while its PCM pipe still delivers.
+
+        FFmpeg can exit before the paced pipe has read and admitted the last
+        buffered PCM. That is neither a dead producer nor a certified EOF.
+        Stopped, stale, failed, and superseded pipes must still permit recovery.
+        """
+        producer = self._process
+        pipe = self._icecast_pipe_thread
+        if not (
+            self._backend == "ffmpeg"
+            and producer is not None
+            and self._icecast_pipe_process is producer
+            and self._icecast_pipe_generation == self._playout_generation
+            and self._producer_exit_generation != self._playout_generation
+            and pipe is not None
+            and pipe.is_alive()
+            and not self._icecast_pipe_stop.is_set()
+            and producer.poll() == 0
+        ):
+            return False
+        fanout_inflight, _fanout_age = self._program_fanout_health()
+        pcm_age = max(
+            0.0, time.monotonic() - float(self._last_program_pcm_monotonic or 0.0)
+        )
+        return bool(fanout_inflight or pcm_age < _PROGRAM_PCM_STALL_SECONDS)
+
     def _program_running(self) -> bool:
         return bool(self._process and self._process.poll() is None)
 
@@ -2851,6 +2881,7 @@ class StationRuntime:
             "backend": str(self._backend or "none"),
             "producer_eof": producer_eof,
             "producer_draining": producer_draining,
+            "producer_finalizing": self._producer_pipe_is_finalizing(),
             "producer_drain_scope": "encoder_input_fifo",
             "decoder_preparation": self._decoder_preparation_status(),
             "producer_exit_code": (
