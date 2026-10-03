@@ -252,6 +252,8 @@ class IcecastAudioSink:
         self._decouple_input_backpressure = bool(decouple_input_backpressure)
         self._source = None
         self._connector_thread = None
+        self._connector_started_monotonic = None
+        self._connector_initial_delay_seconds = 0.0
         self._network_failed = False
         self._encoded_bytes_sent = 0
         self._last_network_write_monotonic = None
@@ -504,6 +506,23 @@ class IcecastAudioSink:
                 len(chunk) for chunk in self._pcm_dispatch_queue.queue
             )
         with self._probe_lock, self._writer_lock, self._stderr_lock:
+            connector_running = bool(
+                self._connector_thread and self._connector_thread.is_alive()
+            )
+            startup_age = (
+                None if self._connector_started_monotonic is None
+                else max(0.0, time.monotonic() - self._connector_started_monotonic)
+            )
+            startup_timeout = self._connector_initial_delay_seconds + 10.0
+            connection_starting = bool(
+                connector_running
+                and not self._writer_stop.is_set()
+                and not self._writer_failed
+                and not self._network_failed
+                and self._encoded_bytes_sent == 0
+                and startup_age is not None
+                and startup_age < startup_timeout
+            )
             process_running = bool(
                 self._process and self._process.poll() is None
             )
@@ -564,6 +583,12 @@ class IcecastAudioSink:
                 elif last_write_age is not None and last_write_age > 10.0:
                     mount_healthy = False
             return {
+                "connector_running": connector_running,
+                "connection_starting": connection_starting,
+                "connection_startup_age_seconds": (
+                    None if startup_age is None else round(startup_age, 3)
+                ),
+                "connection_startup_timeout_seconds": startup_timeout,
                 "process_running": process_running,
                 "mount_healthy": mount_healthy,
                 "remote_mount_verified": bool(
@@ -990,6 +1015,13 @@ class IcecastAudioSink:
         *,
         preserve_pcm: bool = False,
     ) -> None:
+        initial_delay = (
+            0.0 if preserve_pcm
+            else _mount_spread_seconds(cfg, self._initial_connect_spread_sec)
+        )
+        self._connector_initial_delay_seconds = initial_delay
+        self._connector_started_monotonic = time.monotonic()
+
         def run() -> None:
             effective_cfg = cfg
             fallback_cfg = current_codec_fallback(cfg)
@@ -999,11 +1031,6 @@ class IcecastAudioSink:
             # Output-only recovery already waits for the origin's old source
             # session to release. Do not make the retained dispatch FIFO drain
             # behind a second, multi-second startup spread.
-            initial_delay = (
-                0.0
-                if preserve_pcm
-                else _mount_spread_seconds(cfg, self._initial_connect_spread_sec)
-            )
             if initial_delay > 0.0 and self._writer_stop.wait(initial_delay):
                 return
             while not self._writer_stop.is_set():
@@ -1307,6 +1334,7 @@ class IcecastAudioSink:
         if self._connector_thread is not None:
             self._connector_thread.join(timeout=4.0)
         self._connector_thread = None
+        self._connector_started_monotonic = None
         if self._stderr_thread is not None:
             self._stderr_thread.join(timeout=3.0)
         self._stderr_thread = None

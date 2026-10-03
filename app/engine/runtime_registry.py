@@ -11,6 +11,8 @@ from app.audio.gst_pipeline import StationPipelineConfig
 from app.audio.metadata_policy import icecast_metadata_outputs
 from app.audio.output_health import (
     ICECAST_MOUNT_PROBE_STARTUP_GRACE_SECONDS,
+    icecast_mount_connection_is_starting,
+    icecast_mount_has_confirmed_transport_progress,
     icecast_mount_has_sustained_saturation,
     icecast_mount_probe_is_pending,
     icecast_mount_transport_is_healthy,
@@ -1666,11 +1668,16 @@ class StationRuntimeRegistry:
             # a successfully read status with process_running=False from a
             # failed or incomplete status read.
             return False
+        if icecast_mount_connection_is_starting(health):
+            return False
         if (
             health.get("mount_healthy") is False
             or bool(health.get("writer_failed"))
             or bool(health.get("network_failed"))
-            or icecast_mount_has_sustained_saturation(health)
+            or (
+                icecast_mount_has_sustained_saturation(health)
+                and not icecast_mount_has_confirmed_transport_progress(health)
+            )
         ):
             return True
         if health.get("process_running") is False:

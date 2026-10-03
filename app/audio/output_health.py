@@ -71,6 +71,58 @@ def icecast_mount_has_sustained_saturation(health: dict | None) -> bool:
     )
 
 
+def icecast_mount_has_confirmed_transport_progress(health: dict | None) -> bool:
+    """A full FIFO does not justify teardown when its accepted source is flowing.
+
+    This is transport progress, not listener delivery. Optimistic writes to an
+    unconfirmed source cannot override saturation or certify healthy transport.
+    """
+    mount = dict(health or {})
+    if (
+        mount.get("source_response_confirmed") is not True
+        or mount.get("mount_healthy") is False
+        or bool(mount.get("delivery_loss_unrecovered"))
+        or bool(mount.get("writer_failed"))
+        or bool(mount.get("network_failed"))
+        or any(mount.get(key) is not True for key in (
+            "process_running", "writer_running", "network_writer_running"
+        ))
+    ):
+        return False
+    try:
+        return bool(
+            int(mount.get("encoded_bytes_sent") or 0) > 0
+            and all(0.0 <= float(mount.get(key)) <= _FRESH_WRITE_AGE_SECONDS
+                    for key in ("last_write_age_seconds", "last_network_write_age_seconds"))
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def icecast_mount_connection_is_starting(health: dict | None) -> bool:
+    """Wait for a live first connection only within its explicit bounded window."""
+    mount = dict(health or {})
+    if (
+        mount.get("connection_starting") is not True
+        or mount.get("connector_running") is not True
+        or mount.get("writer_running") is not True
+        or mount.get("mount_healthy") is False
+        or bool(mount.get("writer_failed"))
+        or bool(mount.get("network_failed"))
+    ):
+        return False
+    try:
+        age = float(mount.get("connection_startup_age_seconds"))
+        timeout = float(mount.get("connection_startup_timeout_seconds"))
+        return bool(
+            int(mount.get("encoded_bytes_sent") or 0) == 0
+            and 0.0 < timeout <= 45.0
+            and 0.0 <= age < timeout
+        )
+    except (TypeError, ValueError):
+        return False
+
+
 def icecast_mount_probe_is_pending(
     health: dict | None,
     *,
@@ -110,6 +162,8 @@ def icecast_mount_transport_is_healthy(
     if not mount:
         return False
     if bool(mount.get("delivery_loss_unrecovered")):
+        return False
+    if mount.get("source_response_confirmed") is False:
         return False
     mount_health = mount.get("mount_healthy")
     if mount_health is False:
@@ -154,4 +208,7 @@ def icecast_mount_transport_is_healthy(
         except (TypeError, ValueError):
             return False
 
-    return not icecast_mount_has_sustained_saturation(mount)
+    return bool(
+        not icecast_mount_has_sustained_saturation(mount)
+        or icecast_mount_has_confirmed_transport_progress(mount)
+    )

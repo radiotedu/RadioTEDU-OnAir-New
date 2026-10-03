@@ -58,6 +58,7 @@ _SILENCE_FLOOR_STARTUP_GRACE_SECONDS = 1.0
 _PROGRAM_PCM_STALL_SECONDS = 5.0
 _PROGRAM_FANOUT_BLOCKED_SECONDS = 0.5
 _DIRECT_ICECAST_STARTUP_GRACE_SECONDS = 2.0
+_ICECAST_INITIAL_CONNECT_SPREAD_SECONDS = 1.0
 # RTSAS registers a replacement source before the previous ingest task's
 # ``finally`` block has necessarily observed the TCP FIN. If the new source is
 # opened immediately, that old task can mark the fresh session disconnected.
@@ -1105,7 +1106,7 @@ class StationRuntime:
                     mount_probe=None,
                     probe_failure_threshold=2,
                     reconnect_failure_threshold=4,
-                    initial_connect_spread_sec=30.0,
+                    initial_connect_spread_sec=_ICECAST_INITIAL_CONNECT_SPREAD_SECONDS,
                     drop_on_backpressure=False,
                     # Stage short source-write stalls in a primary-local FIFO.
                     # It is bounded; sustained backpressure still propagates
@@ -1175,7 +1176,7 @@ class StationRuntime:
                             mount_probe=None,
                             probe_failure_threshold=2,
                             reconnect_failure_threshold=4,
-                            initial_connect_spread_sec=30.0,
+                            initial_connect_spread_sec=_ICECAST_INITIAL_CONNECT_SPREAD_SECONDS,
                             drop_on_backpressure=False,
                             decouple_input_backpressure=True,
                         )
@@ -2481,7 +2482,7 @@ class StationRuntime:
                         mount_probe=None,
                         probe_failure_threshold=2,
                         reconnect_failure_threshold=4,
-                        initial_connect_spread_sec=30.0,
+                        initial_connect_spread_sec=_ICECAST_INITIAL_CONNECT_SPREAD_SECONDS,
                         drop_on_backpressure=False,
                         decouple_input_backpressure=True,
                     )
