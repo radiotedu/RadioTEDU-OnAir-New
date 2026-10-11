@@ -174,6 +174,13 @@ def tmp_path(request):
         shutil.rmtree(path, ignore_errors=True)
 
 
+def pytest_ignore_collect(collection_path, config):
+    # Optional manual browser scripts import Playwright at module scope. Skip
+    # them before import when the optional browser-test plugin is unavailable.
+    path = str(collection_path).replace('\\', '/')
+    return '/tests/playwright/' in path and not config.pluginmanager.hasplugin('playwright')
+
+
 def pytest_collection_modifyitems(config, items):
     if config.pluginmanager.hasplugin("playwright"):
         return
