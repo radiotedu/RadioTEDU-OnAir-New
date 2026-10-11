@@ -42,6 +42,9 @@ def test_data_acl_helper_removes_builtin_users_access_recursively(tmp_path):
         / "v1.0"
         / "powershell.exe"
     )
+    # A PowerShell 7 parent exports its module path. The helper runs in 5.1
+    # and requires that interpreter's built-in Security module.
+    powershell_env = {**os.environ, "PSModulePath": str(powershell.parent / 'Modules')}
     hardened = subprocess.run(
         [
             str(powershell),
@@ -57,6 +60,7 @@ def test_data_acl_helper_removes_builtin_users_access_recursively(tmp_path):
         check=False,
         capture_output=True,
         text=True,
+        env=powershell_env,
     )
 
     assert hardened.returncode == 0, hardened.stdout + hardened.stderr
@@ -93,5 +97,5 @@ foreach ($target in $targets) {
         check=True,
         capture_output=True,
         text=True,
-        env={**os.environ, "RADIOTEDU_ACL_TEST_ROOT": str(root)},
+        env={**powershell_env, "RADIOTEDU_ACL_TEST_ROOT": str(root)},
     )

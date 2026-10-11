@@ -9,8 +9,10 @@ Windows WPF shell and Windows service installer are Windows-only.
 Use Python **3.12** and FFmpeg with the encoder required by your saved station
 configuration. Install FFmpeg using your OS package manager, or select explicit
 binary paths at launch. AAC/HE-AAC configurations that require `libfdk_aac`
-need an appropriate operator-supplied FFmpeg build. Codec availability is
-validated; an unavailable encoder never silently lowers quality.
+need an appropriate operator-supplied FFmpeg build. The launcher checks for
+FFmpeg and ffprobe; verify the selected encoder during commissioning. Existing
+AAC-LC compatibility recovery can use native AAC at the same bitrate if FDK is
+missing. Use the required encoder build to preserve the intended encoding quality.
 
 ```sh
 python3.12 installer/install_onair.py --check

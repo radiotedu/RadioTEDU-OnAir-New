@@ -1,6 +1,5 @@
 import io
 import time
-import stat
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -101,13 +100,14 @@ def test_changed_audio_filters_reject_prepared_decoder(tmp_path, monkeypatch):
     rt._terminate_owned_processes()
 
 
-def test_changed_file_rejects_stale_prepared_audio(tmp_path):
+def test_changed_file_rejects_stale_prepared_audio(tmp_path, monkeypatch):
+    # Isolate identity invalidation from the read-ahead copy, which can hold a
+    # short-lived Windows file lock on the CI runner's D: drive.
+    monkeypatch.setattr('app.audio.ffmpeg_pipeline._resolve_fast_cached_uri',
+                        lambda uri, **_kwargs: uri)
     rt, source, launches, _ = runtime(tmp_path)
     rt.prepare_next_source(str(source))
     wait_ready(rt)
-    # Windows catalog/guard commissioning tests can leave a protected file
-    # attribute. Simulate an authorized external edit for identity validation.
-    source.chmod(stat.S_IWRITE | stat.S_IREAD)
     source.write_bytes(b"a new version with different contents")
     rt._spawn_icecast_pcm_producer(replace(rt._active_cfg, input_uri=str(source)))
     assert len(launches) == 2 and launches[0].code == -1
