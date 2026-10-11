@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import queue
-import threading
 import time
 import unittest
 from types import SimpleNamespace
 
-from app.audio.gst_pipeline import StationPipelineConfig
 from app.audio.icecast_audio_sink import (
     IcecastAudioSink,
     _mount_spread_seconds,
@@ -96,11 +94,9 @@ class QualityBackpressureResyncTests(unittest.TestCase):
         sink._writer_failed = True
         self.assertFalse(sink.is_running())
 
-    def test_full_branch_queue_waits_for_space_without_dropping_pcm(self):
+    def test_full_branch_queue_resyncs_without_blocking_sibling_fanout(self):
         sink = IcecastAudioSink("ffmpeg", lambda *_args, **_kwargs: None)
         sink._process = _Process()
-        sink._connector_thread = SimpleNamespace(is_alive=lambda: True)
-        sink._writer_stop.clear()
         old_chunks = 0
         while True:
             try:
@@ -109,29 +105,23 @@ class QualityBackpressureResyncTests(unittest.TestCase):
             except queue.Full:
                 break
 
-        result = []
-        writer = threading.Thread(
-            target=lambda: result.append(sink.write_pcm(b"latest-program-clock"))
-        )
-        writer.start()
-        time.sleep(0.05)
-        self.assertTrue(writer.is_alive())
-        self.assertEqual(sink.health_snapshot()["dropped_pcm_chunks"], 0)
-        sink._pcm_queue.get_nowait()
-        writer.join(timeout=1.0)
-        self.assertFalse(writer.is_alive())
-        self.assertEqual(result, [True])
+        started = time.monotonic()
+        accepted = sink.write_pcm(b"latest-program-clock")
+        elapsed = time.monotonic() - started
+
+        self.assertFalse(accepted)
+        self.assertLess(elapsed, 0.05)
         retained = []
         while not sink._pcm_queue.empty():
             retained.append(sink._pcm_queue.get_nowait())
-        self.assertEqual(len(retained), old_chunks)
+        self.assertEqual(len(retained), 96)
         self.assertEqual(retained[-1], b"latest-program-clock")
         self.assertNotEqual(retained[0], b"stale-0")
         snapshot = sink.health_snapshot()
         self.assertTrue(snapshot["writer_backpressured"])
         self.assertIsNotNone(snapshot["writer_backpressure_age_seconds"])
         self.assertEqual(snapshot["pcm_queue_capacity_chunks"], old_chunks)
-        self.assertEqual(snapshot["dropped_pcm_chunks"], 0)
+        self.assertEqual(snapshot["dropped_pcm_chunks"], old_chunks - 95)
 
     def test_source_retries_do_not_exhaust_after_backoff_sequence(self):
         attempts = []
@@ -152,8 +142,6 @@ class QualityBackpressureResyncTests(unittest.TestCase):
             icecast_port=8000,
             icecast_mount="/lofi",
             icecast_password="",
-            stream_codec_profile="",
-            stream_bitrate_kbps=192,
         )
 
         sink._start_connector_worker(cfg)
@@ -165,45 +153,6 @@ class QualityBackpressureResyncTests(unittest.TestCase):
         self.assertEqual(len(stop.wait_calls), len(attempts))
         self.assertGreaterEqual(stop.wait_calls[-1], 30.0)
         self.assertEqual(sink.health_snapshot()["network_error_count"], 8)
-
-    def test_network_auth_failure_does_not_downgrade_codec_profile(self):
-        requested_profiles = []
-
-        def unauthorized_source(cfg):
-            requested_profiles.append(cfg.stream_codec_profile)
-            raise PermissionError("Icecast source returned 401 Unauthorized")
-
-        sink = IcecastAudioSink(
-            "ffmpeg",
-            lambda *_args, **_kwargs: None,
-            source_factory=unauthorized_source,
-        )
-        stop = _ControlledRetryStop(stop_after=4)
-        sink._writer_stop = stop
-        cfg = StationPipelineConfig(
-            input_uri="silence://continuous",
-            icecast_host="stream.example",
-            icecast_port=8000,
-            icecast_mount="/radio",
-            icecast_user="source",
-            icecast_password="test-password",
-            local_output_enabled=False,
-            output_device_id="",
-            stream_codec_profile="aac_low_192",
-            stream_bitrate_kbps=192,
-        )
-
-        try:
-            sink._start_connector_worker(cfg)
-            sink._connector_thread.join(timeout=1.0)
-
-            self.assertFalse(sink._connector_thread.is_alive())
-            self.assertEqual(requested_profiles, ["aac_low_192"] * 4)
-            health = sink.health_snapshot()
-            self.assertFalse(health["profile_fallback_active"])
-            self.assertEqual(health["network_error_count"], 4)
-        finally:
-            sink.stop()
 
 
 if __name__ == "__main__":

@@ -801,8 +801,8 @@ def _simulate_ytdlp_import(job_id: str, request_payload: dict) -> dict:
     track_type = str(request_payload.get("track_type") or "music").strip().lower() or "music"
     station_id = int(request_payload.get("station_id") or 1)
     target_station_id = int(request_payload.get("target_station_id") or station_id)
-    audio_format = str(request_payload.get("audio_format") or "mp3").strip().lower() or "mp3"
-    audio_quality = str(request_payload.get("audio_quality") or "192").strip()
+    audio_format = str(request_payload.get("audio_format") or "best").strip().lower() or "best"
+    audio_quality = str(request_payload.get("audio_quality") or "0").strip()
     queue_mode = str(request_payload.get("queue_mode") or "library_only").strip().lower()
     url = str(request_payload.get("url") or "")
     download_playlist = bool(request_payload.get("download_playlist", False))
@@ -3494,7 +3494,7 @@ def legacy_queue_ytdlp_import(
     audio_format = str(payload.audio_format or "best").strip().lower()
     if audio_format not in {"best", "mp3", "m4a", "flac", "wav", "opus", "vorbis", "aac", "alac"}:
         raise HTTPException(status_code=400, detail="unsupported audio format")
-    queue_mode = str(payload.queue_mode or "replace_pending").strip().lower()
+    queue_mode = str(payload.queue_mode or "library_only").strip().lower()
     if queue_mode not in {"replace_pending", "append", "library_only"}:
         raise HTTPException(status_code=400, detail="unsupported playlist queue mode")
     audio_quality = str(payload.audio_quality or "0").strip().upper()

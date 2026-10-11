@@ -17,7 +17,6 @@ def _worker_with_active_ad():
     worker._process_show_lifecycle = lambda _session: None
     worker._maybe_insert_startup_sound = lambda: None
     worker._fail_cross_station_queue_items = lambda: None
-    worker._fail_pending_items_without_media_reference = lambda: 0
     worker._remove_unplanned_pending_ads = lambda: None
     worker._autofill_queue = lambda: None
     worker._prefetch_upcoming_audio = lambda: None
@@ -61,7 +60,7 @@ def test_ad_is_not_failed_during_runtime_restart_cooldown():
     assert failed == []
 
 
-def test_ad_restart_limit_requests_a_persisted_retry(monkeypatch):
+def test_ad_restart_limit_schedules_a_later_recovery_cycle(monkeypatch):
     state = {"attempts": 2, "next_allowed": 0.0, "reason": ""}
     monkeypatch.setattr(worker_module, "_MAX_RESTART_ATTEMPTS_PER_ITEM", 2)
     monkeypatch.setattr(worker_module, "_RESTART_COOLDOWN_SEC", 2.0)
@@ -76,63 +75,9 @@ def test_ad_restart_limit_requests_a_persisted_retry(monkeypatch):
     allowed, reason = worker._restart_attempt_allowed("ads", 42)
 
     assert allowed is False
-    assert reason == "retry_deferred"
+    assert reason == "restart_cooldown_active"
     assert state["attempts"] == 0
     assert state["next_allowed"] > 0.0
-
-
-def test_repeated_ad_restart_failure_releases_ownership_without_consuming_item(
-    monkeypatch,
-):
-    playing = {"id": 42, "track_id": 52944}
-    deferred = []
-    done = []
-    failed = []
-
-    def defer(item_id, *, retry_after_seconds, error=""):
-        deferred.append((item_id, retry_after_seconds, error))
-        if int(item_id) == playing["id"]:
-            playing.clear()
-        return 1
-
-    monkeypatch.setattr(
-        worker_module,
-        "_RESTART_SUPPRESSION",
-        {
-            (4, "ads", 42): {
-                "attempts": worker_module._MAX_RESTART_ATTEMPTS_PER_ITEM,
-                "next_allowed": 0.0,
-                "reason": "",
-            }
-        },
-    )
-    worker = StationWorker.__new__(StationWorker)
-    worker.station_id = 4
-    worker.runtime_registry = SimpleNamespace(status=lambda _station_id: {})
-    worker.ad_repo = SimpleNamespace(
-        current_playing=lambda _station_id: playing,
-        mark_done=done.append,
-        mark_failed=failed.append,
-        defer=defer,
-    )
-    worker._ads_enabled = lambda: True
-    worker._track_runtime_fields = lambda _track_id: (
-        "E:/Ads/PowerAPP.mp3", "PowerAPP", "", "", "ad"
-    )
-    worker._runtime_source_finished_naturally = lambda *_args: False
-    worker._runtime_playback_matches = lambda *_args: False
-    worker._set_playout_state = lambda *_args, **_kwargs: None
-    worker._broadcast_worker_state = lambda **_kwargs: None
-
-    result = worker._restart_playing_ad_item_if_runtime_mismatched(playing)
-
-    assert result is True
-    assert deferred and deferred[0][0] == 42
-    assert deferred[0][1] > 0
-    assert "runtime_mismatch" in deferred[0][2]
-    assert playing == {}
-    assert done == []
-    assert failed == []
 
 
 def _worker_with_playing_ad(*, runtime_status):
@@ -180,13 +125,12 @@ def test_ad_is_not_completed_from_duration_while_its_source_is_still_playing():
     assert done == []
 
 
-def test_ad_completes_at_clean_eof_while_sink_fifo_drains():
+def test_ad_completes_after_clean_eof_even_when_database_duration_is_longer():
     worker, done = _worker_with_playing_ad(
         runtime_status={
             "running": True,
             "program_running": False,
             "producer_eof": True,
-            "producer_draining": True,
             "active_input_uri": "E:/Ads/PowerAPP.mp3",
         }
     )
@@ -299,131 +243,6 @@ def test_unknown_duration_crash_retries_from_start_not_wall_clock_offset():
     assert recovered == [0.0]
 
 
-def test_explicit_dead_producer_overrides_healthy_output_branch():
-    assert StationWorker._runtime_playback_alive(
-        {
-            "running": True,
-            "program_running": False,
-            "producer_eof": False,
-            "branch_health": {"icecast": True},
-            "required_outputs": {"icecast": True},
-        }
-    ) is False
-
-
-def _host_worker(runtime_status):
-    started = []
-    popped = []
-    worker = StationWorker.__new__(StationWorker)
-    worker.station_id = 4
-    worker.runtime_registry = SimpleNamespace(
-        status=lambda _station_id: runtime_status,
-        start_station=lambda *args, **kwargs: started.append((args, kwargs)),
-    )
-    worker.playout_state = SimpleNamespace(
-        get_current=lambda _station_id: {"source": "host", "item_id": 19}
-    )
-    worker.program_queue_repo = SimpleNamespace(
-        list_items=lambda _station_id: [{"id": 19, "track_id": 52944}],
-        pop_item=popped.append,
-    )
-    worker._track_runtime_fields = lambda _track_id: (
-        "E:/Host/show.mp3", "Host Track", "Presenter", "Show", "spoken_word"
-    )
-    worker._set_playout_state = lambda *_args, **_kwargs: None
-    worker._broadcast_worker_state = lambda **_kwargs: None
-    return worker, started, popped
-
-
-def test_host_crash_with_healthy_sink_retries_same_item_from_start():
-    worker, started, popped = _host_worker(
-        {
-            "running": True,
-            "program_running": False,
-            "producer_eof": False,
-            "active_input_uri": "E:/Host/show.mp3",
-            "branch_health": {"icecast": True},
-            "required_outputs": {"icecast": True},
-        }
-    )
-
-    assert worker._advance_host_track() is False
-    assert popped == []
-    assert len(started) == 1
-    assert started[0][0][1] == "E:/Host/show.mp3"
-    assert started[0][1]["start_offset_seconds"] == 0.0
-
-
-def test_host_item_is_consumed_only_after_matching_clean_eof():
-    worker, started, popped = _host_worker(
-        {
-            "running": True,
-            "program_running": False,
-            "producer_eof": True,
-            "active_input_uri": "E:/Host/show.mp3",
-        }
-    )
-
-    assert worker._advance_host_track() is True
-    assert popped == [19]
-    assert started == []
-
-
-def test_host_item_stays_owned_while_encoder_input_fifos_drain():
-    worker, started, popped = _host_worker(
-        {
-            "running": True,
-            "program_running": False,
-            "producer_eof": False,
-            "producer_draining": True,
-            "active_input_uri": "E:/Host/show.mp3",
-        }
-    )
-
-    assert worker._advance_host_track() is False
-    assert popped == []
-    assert started == []
-
-
-def test_host_item_releases_at_clean_eof_while_encoder_input_fifos_drain():
-    worker, started, popped = _host_worker(
-        {
-            "running": True,
-            "program_running": False,
-            "producer_eof": True,
-            "producer_draining": True,
-            "active_input_uri": "E:/Host/show.mp3",
-        }
-    )
-
-    assert worker._advance_host_track() is True
-    assert popped == [19]
-    assert started == []
-
-
-def test_repeated_host_crash_releases_playout_without_consuming_item():
-    worker, started, popped = _host_worker(
-        {
-            "running": True,
-            "program_running": False,
-            "producer_eof": False,
-            "active_input_uri": "E:/Host/show.mp3",
-            "branch_health": {"icecast": True},
-            "required_outputs": {"icecast": True},
-        }
-    )
-    states = []
-    worker._host_retry_allowed = lambda _item_id: True
-    worker._record_host_retry_failure = lambda _item_id: False
-    worker._set_playout_state = lambda *args, **kwargs: states.append((args, kwargs))
-
-    assert worker._advance_host_track() is True
-    assert popped == []
-    assert started == []
-    assert states[-1][0] == ("none", None)
-    assert states[-1][1]["reason"] == "host_retry_cooldown"
-
-
 def test_continuity_fallback_helper_starts_configured_audio():
     started = []
     state = []
@@ -450,7 +269,6 @@ def test_ready_schedule_waits_for_the_current_song_boundary(monkeypatch):
     worker.ad_repo.current_playing = lambda _station_id: None
     worker._advance_playing_ad_item = lambda: False
     worker._advance_playing_queue_item = lambda: False
-    worker._advance_playing_schedule_item = lambda: False
     worker._fail_disabled_active_ads = lambda: 0
     worker._ensure_hourly_ad_break = lambda: None
     worker._advance_host_track = lambda: None

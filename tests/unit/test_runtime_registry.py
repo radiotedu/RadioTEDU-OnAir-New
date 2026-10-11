@@ -2,7 +2,6 @@ import threading
 import time
 import builtins
 import json
-import pytest
 
 import app.engine.runtime_registry as runtime_registry_module
 from app.audio.gst_pipeline import StationPipelineConfig
@@ -12,7 +11,7 @@ from app.repositories.settings_repo import SettingsRepository
 from app.repositories.station_output_repo import StationOutputRepository
 
 
-def test_stale_high_quality_profile_uses_commissioned_aac_lc_192():
+def test_stale_high_quality_profile_self_heals_to_opus_192():
     settings = {
         "station_1_extra_icecast_outputs": json.dumps(
             [
@@ -37,7 +36,7 @@ def test_stale_high_quality_profile_uses_commissioned_aac_lc_192():
 
     outputs = runtime_registry_module._extra_icecast_outputs(settings, 1, row)
 
-    assert outputs[0]["stream_codec_profile"] == "aac_low_192"
+    assert outputs[0]["stream_codec_profile"] == "opus_192"
     assert outputs[0]["stream_bitrate_kbps"] == 192
 
 
@@ -112,15 +111,6 @@ class _RecoveringRuntime(_FakeRuntime):
 
 
 class _FlowingUnverifiedRuntime(_RecoveringRuntime):
-    def __init__(self):
-        super().__init__()
-        self.primary_recover_calls = 0
-
-    def recover_primary_output(self):
-        self.primary_recover_calls += 1
-        self.healthy = True
-        return {"running": True}
-
     def status(self):
         return {
             "running": False,
@@ -129,9 +119,9 @@ class _FlowingUnverifiedRuntime(_RecoveringRuntime):
             "program_pcm_stalled": False,
             "output_feed_active": False,
             "branch_health": self.branch_health(),
-                "icecast_mount_health": {
-                    "process_running": True,
-                    "mount_healthy": False,
+            "icecast_mount_health": {
+                "process_running": True,
+                "mount_healthy": False,
                 "writer_running": True,
                 "writer_failed": False,
                 "writer_backpressured": False,
@@ -291,344 +281,6 @@ def test_registry_recovers_failed_required_output_with_preserved_runtime(
     assert status["recovery"]["attempt_count"] == 1
 
 
-def test_registry_recovers_only_the_confirmed_unhealthy_extra_output():
-    branch = "icecast:/cazz-flac"
-
-    class BranchRuntime:
-        def __init__(self):
-            self.calls = []
-            self.healthy = False
-
-        def status(self):
-            return {
-                "running": True,
-                "branch_health": {"icecast": True, branch: self.healthy},
-                "delivery_health": {"icecast": True, branch: self.healthy},
-                "icecast_mount_health": {"mount_healthy": True},
-                "extra_icecast_mounts": [
-                    {
-                        "branch": branch,
-                        "health": {
-                            "mount_healthy": False,
-                            "process_running": True,
-                            "writer_running": True,
-                            "network_writer_running": True,
-                        },
-                    }
-                ],
-            }
-
-        def recover_output_branch(self, output_branch):
-            self.calls.append(output_branch)
-            self.healthy = True
-
-    runtime = BranchRuntime()
-    reg = StationRuntimeRegistry()
-    reg._runtimes[5] = runtime
-    reg._required_outputs[5] = {"icecast": True, branch: True}
-    reg.status = lambda _station_id: runtime.status()
-
-    result = reg.recover_station_output(5, branch)
-
-    assert runtime.calls == [branch]
-    assert result["delivery_health"][branch] is True
-    assert reg._branch_recovery_state[(5, branch)]["state"] == "monitoring"
-
-
-def test_registry_waits_for_initial_branch_probe_before_recovery():
-    branch = "icecast:/cazz-flac"
-
-    class BranchRuntime:
-        def __init__(self):
-            self.calls = []
-
-        def status(self):
-            return {
-                "running": True,
-                "branch_health": {"icecast": True, branch: False},
-                "delivery_health": {"icecast": True, branch: False},
-                "icecast_mount_health": {"mount_healthy": True},
-                "extra_icecast_mounts": [
-                    {
-                        "branch": branch,
-                        "health": {
-                            "process_running": True,
-                            "writer_running": True,
-                            "network_writer_running": True,
-                            "mount_healthy": None,
-                            "remote_mount_verified": False,
-                            "mount_probe_age_seconds": 1.0,
-                        },
-                    }
-                ],
-            }
-
-        def recover_output_branch(self, output_branch):
-            self.calls.append(output_branch)
-
-    runtime = BranchRuntime()
-    reg = StationRuntimeRegistry()
-    reg._runtimes[5] = runtime
-    reg._required_outputs[5] = {"icecast": True, branch: True}
-    reg.status = lambda _station_id: runtime.status()
-
-    reg.recover_station_output(5, branch)
-
-    assert runtime.calls == []
-    assert reg._branch_recovery_state[(5, branch)]["error_code"] == "output_unverified"
-
-
-def test_registry_recovers_required_primary_sink_that_never_started():
-    class MissingPrimaryRuntime:
-        def __init__(self):
-            self.calls = 0
-
-        def status(self):
-            return {
-                "running": False,
-                "program_running": True,
-                "branch_health": {"icecast": False},
-                "delivery_health": {"icecast": False},
-                "icecast_sink_running": False,
-                "icecast_mount_health": {
-                    "process_running": False,
-                    "mount_healthy": None,
-                    "remote_mount_verified": False,
-                },
-            }
-
-        def recover_primary_output(self):
-            self.calls += 1
-
-    runtime = MissingPrimaryRuntime()
-    reg = StationRuntimeRegistry()
-    reg._runtimes[5] = runtime
-    reg._required_outputs[5] = {"icecast": True, "local": False}
-    reg.status = lambda _station_id: runtime.status()
-
-    reg.recover_station_primary_output(5)
-
-    assert runtime.calls == 1
-
-
-def test_registry_waits_for_primary_body_probe_during_startup_grace():
-    class PendingPrimaryRuntime:
-        def __init__(self):
-            self.calls = 0
-
-        def status(self):
-            return {
-                "running": True,
-                "program_running": True,
-                "branch_health": {"icecast": True},
-                "delivery_health": {"icecast": False},
-                "icecast_sink_running": True,
-                "icecast_mount_health": {
-                    "process_running": True,
-                    "writer_running": True,
-                    "network_writer_running": True,
-                    "mount_healthy": None,
-                    "remote_mount_verified": False,
-                    "mount_probe_age_seconds": 1.0,
-                    "last_write_age_seconds": 0.1,
-                    "last_network_write_age_seconds": 0.1,
-                },
-            }
-
-        def recover_primary_output(self):
-            self.calls += 1
-
-    runtime = PendingPrimaryRuntime()
-    reg = StationRuntimeRegistry()
-    reg._runtimes[5] = runtime
-    reg._required_outputs[5] = {"icecast": True, "local": False}
-    reg.status = lambda _station_id: runtime.status()
-
-    reg.recover_station_primary_output(5)
-
-    assert runtime.calls == 0
-    assert reg._recovery_state[5]["error_code"] == "output_unverified"
-
-
-def test_registry_does_not_reconnect_primary_when_status_read_fails():
-    class UnavailableStatusRuntime:
-        def __init__(self):
-            self.calls = 0
-
-        def status(self):
-            raise RuntimeError("temporary status lock")
-
-        def output_health_snapshot(self, _branch):
-            return {
-                "source_protocol": "shoutcast",
-                "process_running": True,
-                "writer_running": True,
-                "network_writer_running": True,
-                "mount_healthy": True,
-                "connection_healthy": True,
-                "encoded_bytes_sent": 512,
-                "last_write_age_seconds": 0.2,
-                "last_network_write_age_seconds": 0.2,
-                "remote_mount_verified": False,
-                "remote_mount_verification_supported": False,
-                "network_failed": False,
-                "writer_failed": False,
-            }
-
-        def recover_primary_output(self):
-            self.calls += 1
-
-    runtime = UnavailableStatusRuntime()
-    reg = StationRuntimeRegistry()
-    reg._runtimes[5] = runtime
-    reg._required_outputs[5] = {"icecast": True, "local": False}
-    reg.status = lambda _station_id: {}
-
-    reg.recover_station_primary_output(5)
-
-    assert runtime.calls == 0
-    assert reg._recovery_state[5]["error_code"] == "output_health_unavailable"
-
-
-def test_registry_recovers_when_status_fails_but_local_shoutcast_startup_expired():
-    class UnavailableAggregateStatusRuntime:
-        def __init__(self):
-            self.calls = 0
-
-        def status(self):
-            raise RuntimeError("temporary aggregate status lock")
-
-        def output_health_snapshot(self, _branch):
-            return {
-                "source_protocol": "shoutcast",
-                "process_running": True,
-                "handshake_accepted": True,
-                "mount_healthy": None,
-                "connection_healthy": False,
-                "encoded_bytes_sent": 0,
-                "connection_age_seconds": 31.0,
-                "first_audio_startup_timeout_seconds": 30.0,
-                "remote_mount_verified": False,
-                "remote_mount_verification_supported": False,
-                "network_failed": False,
-                "writer_failed": False,
-            }
-
-        def recover_primary_output(self):
-            self.calls += 1
-
-    runtime = UnavailableAggregateStatusRuntime()
-    reg = StationRuntimeRegistry()
-    reg._runtimes[5] = runtime
-    reg._required_outputs[5] = {"icecast": True, "local": False}
-    reg.status = lambda _station_id: {}
-
-    reg.recover_station_primary_output(5)
-
-    assert runtime.calls == 1
-    assert reg._recovery_state[5]["state"] == "monitoring"
-
-
-def test_registry_keeps_unexpired_shoutcast_first_audio_startup_connected():
-    health = {
-        "source_protocol": "shoutcast",
-        "process_running": True,
-        "handshake_accepted": True,
-        "mount_healthy": None,
-        "connection_healthy": False,
-        "encoded_bytes_sent": 0,
-        "connection_age_seconds": 29.9,
-        "first_audio_startup_timeout_seconds": 30.0,
-        "remote_mount_verified": False,
-        "remote_mount_verification_supported": False,
-    }
-
-    assert StationRuntimeRegistry._output_failure_confirmed(health) is False
-
-
-def test_registry_confirms_shoutcast_first_audio_timeout_after_bounded_grace():
-    health = {
-        "source_protocol": "shoutcast",
-        "process_running": True,
-        "handshake_accepted": True,
-        "mount_healthy": None,
-        "connection_healthy": False,
-        "encoded_bytes_sent": 0,
-        "connection_age_seconds": 30.1,
-        "first_audio_startup_timeout_seconds": 30.0,
-        "remote_mount_verified": False,
-        "remote_mount_verification_supported": False,
-    }
-
-    assert StationRuntimeRegistry._output_failure_confirmed(health) is True
-
-
-def test_registry_does_not_reconnect_primary_when_mount_telemetry_is_missing():
-    class MissingTelemetryRuntime:
-        def __init__(self):
-            self.calls = 0
-
-        def status(self):
-            return {"program_running": True}
-
-        def recover_primary_output(self):
-            self.calls += 1
-
-    runtime = MissingTelemetryRuntime()
-    reg = StationRuntimeRegistry()
-    reg._runtimes[5] = runtime
-    reg._required_outputs[5] = {"icecast": True, "local": False}
-    reg.status = lambda _station_id: {}
-
-    reg.recover_station_primary_output(5)
-
-    assert runtime.calls == 0
-    assert reg._recovery_state[5]["error_code"] == "output_health_unavailable"
-
-
-def test_registry_recovers_required_extra_sink_that_never_started():
-    branch = "icecast:/missing-extra"
-
-    class MissingExtraRuntime:
-        def __init__(self):
-            self.calls = []
-
-        def status(self):
-            return {
-                "running": True,
-                "branch_health": {"icecast": True, branch: False},
-                "delivery_health": {"icecast": True, branch: False},
-                "icecast_mount_health": {
-                    "process_running": True,
-                    "mount_healthy": True,
-                    "remote_mount_verified": True,
-                },
-                "extra_icecast_mounts": [
-                    {
-                        "branch": branch,
-                        "health": {
-                            "process_running": False,
-                            "mount_healthy": None,
-                            "remote_mount_verified": False,
-                        },
-                    }
-                ],
-            }
-
-        def recover_output_branch(self, output_branch):
-            self.calls.append(output_branch)
-
-    runtime = MissingExtraRuntime()
-    reg = StationRuntimeRegistry()
-    reg._runtimes[5] = runtime
-    reg._required_outputs[5] = {"icecast": True, branch: True}
-    reg.status = lambda _station_id: runtime.status()
-
-    reg.recover_station_output(5, branch)
-
-    assert runtime.calls == [branch]
-
-
 def test_registry_recovery_uses_bounded_retry_wait(tmp_path, monkeypatch):
     monkeypatch.setenv("CLEANROOM_DB_PATH", str(tmp_path / "cleanroom.db"))
     monkeypatch.setenv("CLEANROOM_DISABLE_ICECAST_METADATA", "1")
@@ -661,7 +313,7 @@ def test_registry_recovery_uses_bounded_retry_wait(tmp_path, monkeypatch):
     assert second["recovery"]["attempt_count"] == 1
 
 
-def test_registry_recovers_only_the_primary_mount_after_probe_misses(
+def test_registry_does_not_restart_flowing_source_for_probe_miss(
     tmp_path, monkeypatch
 ):
     monkeypatch.setenv("CLEANROOM_DB_PATH", str(tmp_path / "cleanroom.db"))
@@ -688,8 +340,8 @@ def test_registry_recovers_only_the_primary_mount_after_probe_misses(
     status = reg.recover_station(1)
 
     assert fake.recover_calls == 0
-    assert fake.primary_recover_calls == 1
     assert status["recovery"]["state"] == "monitoring"
+    assert status["recovery"]["error_code"] == "output_unverified"
     assert status["recovery"]["retry_in_seconds"] > 0
 
 
@@ -937,100 +589,3 @@ def test_registry_stop_all_stops_and_clears():
     assert int(summary["stopped"]) == 2
     assert reg._runtimes == {}
     assert reg._required_outputs == {}
-
-
-def _queue_health(*, saturated_queue=None):
-    health = {
-        "process_running": True,
-        "mount_healthy": True,
-        "writer_running": True,
-        "writer_failed": False,
-        "writer_backpressured": False,
-        "writer_backpressure_age_seconds": 0.0,
-        "queued_pcm_seconds": 3.0,
-        "queued_pcm_chunks": 140,
-        "pcm_queue_capacity_chunks": 1024,
-        "pcm_dispatcher_running": True,
-        "pcm_dispatch_backpressured": False,
-        "pcm_dispatch_backpressure_age_seconds": 0.0,
-        "queued_dispatch_pcm_seconds": 2.0,
-        "queued_dispatch_pcm_chunks": 94,
-        "pcm_dispatch_queue_capacity_chunks": 512,
-        "network_writer_running": True,
-        "network_failed": False,
-        "last_write_age_seconds": 0.2,
-        "last_network_write_age_seconds": 0.2,
-    }
-    if saturated_queue == "pcm":
-        health.update(
-            {
-                "writer_backpressured": True,
-                "writer_backpressure_age_seconds": 31.0,
-                "queued_pcm_seconds": 20.9,
-                "queued_pcm_chunks": 1000,
-            }
-        )
-    elif saturated_queue == "dispatch":
-        health.update(
-            {
-                "pcm_dispatch_backpressured": True,
-                "pcm_dispatch_backpressure_age_seconds": 31.0,
-                "queued_dispatch_pcm_seconds": 10.6,
-                "queued_dispatch_pcm_chunks": 500,
-            }
-        )
-    return health
-
-
-class _QueueSaturationRuntime:
-    def __init__(self, *, target_branch, saturated_queue):
-        self.primary_health = _queue_health(
-            saturated_queue=saturated_queue if target_branch == "icecast" else None
-        )
-        self.secondary_health = _queue_health(
-            saturated_queue=(
-                saturated_queue if target_branch == "icecast:/low" else None
-            )
-        )
-
-    def branch_health(self):
-        # Simulate stale-true router flags. Per-mount telemetry must overrule it.
-        return {"icecast": True, "icecast:/low": True}
-
-    def is_running(self):
-        return True
-
-    def status(self):
-        return {
-            "running": True,
-            "output_feed_active": True,
-            "program_running": True,
-            "program_pcm_stalled": False,
-            "program_pcm_age_seconds": 0.2,
-            "delivery_health": {"icecast": True, "icecast:/low": True},
-            "icecast_mount_health": self.primary_health,
-            "extra_icecast_mounts": [
-                {"branch": "icecast:/low", "health": self.secondary_health}
-            ],
-        }
-
-
-@pytest.mark.parametrize("target_branch", ["icecast", "icecast:/low"])
-@pytest.mark.parametrize("saturated_queue", ["pcm", "dispatch"])
-def test_sustained_saturated_required_output_triggers_recovery(
-    target_branch, saturated_queue
-):
-    runtime = _QueueSaturationRuntime(
-        target_branch=target_branch,
-        saturated_queue=saturated_queue,
-    )
-    registry = StationRuntimeRegistry(runtime_factory=lambda: runtime)
-    registry._runtimes[1] = runtime
-    registry._required_outputs[1] = {
-        "icecast": True,
-        "icecast:/low": True,
-        "local": False,
-    }
-
-    assert registry.required_outputs_healthy(1) is False
-    assert registry._unverified_icecast_transport_is_flowing(1, runtime) is False

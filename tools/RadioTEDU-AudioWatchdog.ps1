@@ -927,8 +927,8 @@ try {
         exit 0
     }
     $repairableFailed = @($secondFailed | Sort-Object -Unique)
-    if ($repairableFailed.Count -gt 0 -and (Test-RepairCooldown)) {
-        Send-Report "cooldown" "Confirmed local source failure; the 15-minute successful-repair cooldown prevented a loop." $repairableFailed ([bool]$secondProfilesHealthy)
+    if (Test-RepairCooldown) {
+        Send-Report "cooldown" "Confirmed local source failure; the 15-minute successful-repair cooldown prevented a loop." $repairableFailed (-not $profileRepair)
         Write-WatchdogLog "Confirmed local source failure suppressed by the successful-repair cooldown."
         exit 21
     }
@@ -990,7 +990,7 @@ try {
             -not [bool](Get-LocalTransportState ([int]$_)).healthy
         }
     )
-    if ($finalFailed.Count -gt 0) {
+    if ($finalFailed.Count -gt 0 -or $finalProfilesHealthy -eq $false) {
         Mark-PublicRepairFailed $finalFailed
         $message = "Repair completed but local source verification still failed for station ids=" + ($finalFailed -join ",")
         Send-Report "failed" $message $finalFailed ([bool]$finalProfilesHealthy)
@@ -998,12 +998,6 @@ try {
             "Repair final local verification failed stations=" + ($finalFailed -join ",")
         )
         exit 22
-    }
-    if ($finalProfilesHealthy -eq $false) {
-        $message = "Local source writers are healthy; managed profile or folder reconciliation remains incomplete."
-        Send-Report "warning" $message @() $false
-        Write-WatchdogLog $message
-        exit 0
     }
     # Only successful repairs enter cooldown. A failed final verification stays
     # eligible for a later attempt, while healthy streams remain untouched.
