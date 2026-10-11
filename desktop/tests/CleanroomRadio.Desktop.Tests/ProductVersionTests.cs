@@ -9,11 +9,17 @@ public sealed class ProductVersionTests
     public void DesktopAssembliesConsumeRepositoryProductVersion()
     {
         var assembly = Assembly.GetExecutingAssembly();
-        Assert.Equal(new Version(1, 0, 2, 0), assembly.GetName().Version);
+        var root = new DirectoryInfo(AppContext.BaseDirectory);
+        while (root is not null && !File.Exists(Path.Combine(root.FullName, "VERSION")))
+            root = root.Parent;
+        Assert.NotNull(root);
+        var sourceVersion = File.ReadAllText(Path.Combine(root!.FullName, "VERSION")).Trim();
+        var expected = Version.Parse(sourceVersion);
+        Assert.Equal(new Version(expected.Major, expected.Minor, expected.Build, 0), assembly.GetName().Version);
 
         var informational = assembly
             .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?
             .InformationalVersion;
-        Assert.StartsWith("1.0.2", informational, StringComparison.Ordinal);
+        Assert.StartsWith(sourceVersion, informational, StringComparison.Ordinal);
     }
 }

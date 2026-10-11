@@ -9,7 +9,8 @@ from tools import rolling_reload_station_workers as reload
 def heartbeat(pid, generation, encoded, low_silence=0):
     health = {"mount_healthy": True, "process_running": True, "writer_running": True,
               "writer_failed": False, "network_failed": False, "last_write_age_seconds": 0.1,
-              "last_network_write_age_seconds": 0.1, "encoded_bytes_sent": encoded}
+              "last_network_write_age_seconds": 0.1, "encoded_bytes_sent": encoded,
+              "source_response_confirmed": True}
     return {"updated_epoch": time.time(), "pid": pid, "generation": generation, "running": True,
             "runtime_status": {"running": True, "program_running": True, "output_feed_active": True,
                                "program_pcm_age_seconds": 0.1, "program_pcm_stalled": False,

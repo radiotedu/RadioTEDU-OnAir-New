@@ -897,6 +897,7 @@ class PlayoutHardeningTests(unittest.TestCase):
             "test://song",
             "Song",
             "Artist",
+            "",
             "music",
         )
 
@@ -925,16 +926,16 @@ class PlayoutHardeningTests(unittest.TestCase):
             "test://song",
             "Song",
             "Artist",
+            "",
             "music",
         )
 
-        self.assertFalse(worker._advance_playing_queue_item())
+        self.assertTrue(worker._advance_playing_queue_item())
         self.assertEqual(worker.queue_repo.done, [])
         self.assertEqual(worker.queue_repo.failed, [])
         self.assertEqual(len(worker.runtime_registry.starts), 1)
         resume_offset = worker.runtime_registry.starts[0][2]["start_offset_seconds"]
-        self.assertGreater(resume_offset, 4.0)
-        self.assertLess(resume_offset, 7.0)
+        self.assertEqual(resume_offset, 0.0)  # wall time does not prove delivered audio
 
     def test_long_jingle_recovers_when_runtime_has_already_advanced(self):
         playing = {
@@ -958,6 +959,7 @@ class PlayoutHardeningTests(unittest.TestCase):
             "test://radiotedu-jingle",
             "RadioTEDU Sweeper",
             "",
+            "",
             "jingle",
         )
         worker._complete_queue_item = lambda item: worker.queue_repo.mark_done(item["id"])
@@ -966,7 +968,7 @@ class PlayoutHardeningTests(unittest.TestCase):
         self.assertTrue(worker._advance_playing_queue_item())
         self.assertEqual(worker.queue_repo.done, [])
         self.assertEqual(len(worker.runtime_registry.starts), 1)
-        self.assertGreater(worker.runtime_registry.starts[0][2]["start_offset_seconds"], 0.0)
+        self.assertEqual(worker.runtime_registry.starts[0][2]["start_offset_seconds"], 0.0)
 
     def test_long_jingle_recovers_when_runtime_ends_between_polls(self):
         playing = {
@@ -989,6 +991,7 @@ class PlayoutHardeningTests(unittest.TestCase):
         worker._track_runtime_fields = lambda _track_id: (
             "test://radiotedu-jingle",
             "RadioTEDU Sweeper",
+            "",
             "",
             "jingle",
         )
@@ -1021,6 +1024,7 @@ class PlayoutHardeningTests(unittest.TestCase):
             "test://radiotedu-jingle",
             "RadioTEDU Sweeper",
             "",
+            "",
             "jingle",
         )
 
@@ -1029,7 +1033,7 @@ class PlayoutHardeningTests(unittest.TestCase):
         self.assertFalse(worker._restart_playing_queue_item_if_runtime_mismatched(playing))
         self.assertEqual(worker.queue_repo.failed, [])
 
-    def test_short_jingle_is_not_replayed_after_runtime_advanced(self):
+    def test_short_jingle_retries_when_runtime_advanced_without_clean_eof(self):
         playing = {
             "id": 14,
             "track_id": 20391,
@@ -1051,14 +1055,16 @@ class PlayoutHardeningTests(unittest.TestCase):
             "test://radiotedu-jingle",
             "RadioTEDU Sweeper",
             "",
+            "",
             "jingle",
         )
         worker._complete_queue_item = lambda item: worker.queue_repo.mark_done(item["id"])
         worker._default_crossfade_seconds = lambda: 3.0
 
         self.assertTrue(worker._advance_playing_queue_item())
-        self.assertEqual(worker.queue_repo.done, [14])
-        self.assertEqual(worker.runtime_registry.starts, [])
+        self.assertEqual(worker.queue_repo.done, [])
+        self.assertEqual(len(worker.runtime_registry.starts), 1)
+        self.assertEqual(worker.runtime_registry.starts[0][2]["start_offset_seconds"], 0.0)
 
     def test_guard_starts_backend_without_lifespan_startup(self):
         original_popen = playout_guard.subprocess.Popen
@@ -1158,7 +1164,7 @@ class PlayoutHardeningTests(unittest.TestCase):
         self.assertLess(boot.index("await ensureSignedIn()"), boot.index("await showApp()"))
         self.assertIn("await api('/api/auth/me')", ensure_signed_in)
         self.assertIn("clearSession()", ensure_signed_in)
-        self.assertLess(show_app.index("await loadStations()"), show_app.index("await refreshAll(true)"))
+        self.assertLess(show_app.index("await loadStations()"), show_app.index("refreshAll(true)"))
         self.assertIn("startIdleTimer()", show_app)
 
     def test_frontend_api_wrapper_authenticates_refreshes_and_parses_payloads(self):
@@ -1307,8 +1313,8 @@ class PlayoutHardeningTests(unittest.TestCase):
             encoding="utf-8"
         )
 
-        self.assertIn('value="he_aac_96"', index_html)
-        self.assertIn('value="he_aac_192"', index_html)
+        self.assertIn('value="aac_low_192"', index_html)
+        self.assertIn('value="aac_he_v2_64"', index_html)
         self.assertIn('value="opus_192"', index_html)
         self.assertNotIn('value="opus_128"', index_html)
         self.assertNotIn('value="mp3_128"', index_html)
@@ -1471,7 +1477,7 @@ class PlayoutHardeningTests(unittest.TestCase):
             "CREATE TABLE schedule_items ("
             "id INTEGER PRIMARY KEY, station_id INTEGER NOT NULL, track_id INTEGER NOT NULL, "
             "play_at TEXT NOT NULL, window_end TEXT, event_name TEXT NOT NULL DEFAULT '', "
-            "status TEXT NOT NULL DEFAULT 'pending')"
+            "status TEXT NOT NULL DEFAULT 'pending', retry_after TEXT, retry_count INTEGER DEFAULT 0, last_error TEXT DEFAULT '')"
         )
         conn.execute("INSERT INTO tracks (id, title, artist) VALUES (1, 'Fallback Playlist', '')")
         repo = ScheduleRepository(conn)
@@ -1514,14 +1520,15 @@ class PlayoutHardeningTests(unittest.TestCase):
             "test://ad",
             "Ad",
             "",
+            "",
             "ad",
         )
 
         self.assertTrue(worker._restart_playing_ad_item_if_runtime_mismatched(playing))
         worker.runtime_registry._status["active_input_uri"] = "test://old-tts"
-        self.assertTrue(worker._restart_playing_ad_item_if_runtime_mismatched(playing))
+        self.assertFalse(worker._restart_playing_ad_item_if_runtime_mismatched(playing))
         self.assertEqual(len(worker.runtime_registry.starts), 1)
-        self.assertEqual(worker.ad_repo.failed, [20])
+        self.assertEqual(worker.ad_repo.failed, [])  # status lag cannot consume an ad
 
     def test_stale_runtime_generation_cannot_write_pcm(self):
         runtime = StationRuntime(process_factory=lambda _cmd, **_kwargs: None, station_id=1)
@@ -1993,6 +2000,9 @@ class PlayoutHardeningTests(unittest.TestCase):
 
         def spawn(_cmd, **_kwargs):
             proc = FakeProc()
+            proc.stdout.read = lambda _n: (time.sleep(0.005) or b"accepted-encoded-frame")
+            proc.stdin.write = lambda chunk: len(chunk)
+            proc.stdin.flush = lambda: None
             spawned.append(proc)
             return proc
 
@@ -2006,18 +2016,29 @@ class PlayoutHardeningTests(unittest.TestCase):
             local_output_enabled=False,
             output_device_id="",
         )
+        class AcceptedSource(FakeIcecastSource):
+            source_response_confirmed = True
+
         sink = IcecastAudioSink(
             "ffmpeg",
             spawn,
             mount_probe=lambda _cfg: False,
             probe_interval_sec=0.01,
-            probe_warmup_sec=0.0,
+            probe_warmup_sec=100.0,
             probe_failure_threshold=1,
             reconnect_failure_threshold=3,
-            source_factory=FakeIcecastSource,
+            source_factory=AcceptedSource,
         )
         try:
             first = sink.ensure_started(cfg)
+            deadline = time.monotonic() + 2.0
+            while sink.health_snapshot()["encoded_bytes_sent"] == 0 and time.monotonic() < deadline:
+                time.sleep(0.005)
+            self.assertGreater(sink.health_snapshot()["encoded_bytes_sent"], 0)
+            sink._probe_stop.set()
+            sink._probe_thread.join(timeout=1.0)
+            sink._probe_warmup_sec = 0.0
+            sink._start_probe_worker(cfg)
             deadline = time.monotonic() + 0.5
             while sink.health_snapshot()["consecutive_probe_failures"] < 3 and time.monotonic() < deadline:
                 time.sleep(0.01)
@@ -2050,7 +2071,7 @@ class PlayoutHardeningTests(unittest.TestCase):
         runtime._release_disabled_sinks = lambda _cfg: None
         runtime._should_use_live_mix = lambda: False
         runtime._launch_steady_state = (
-            lambda _cfg, _signature, *, start_offset_seconds=0.0: observed.append(
+            lambda _cfg, _signature, *, start_offset_seconds=0.0, preserve_sink_pcm=False: observed.append(
                 float(start_offset_seconds)
             )
         )

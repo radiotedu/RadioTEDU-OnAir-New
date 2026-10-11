@@ -279,6 +279,7 @@ RadioTEDU OnAir uses layered RBAC with legacy-role compatibility during the migr
 - The panel confirms PCM reception before displaying **CANLI**; device loss or transport failure returns the programme to music.
 - Program settings are backed by `PUT /api/audio/live/settings`.
 - Legacy studio/guest clients retain their WebRTC, WebSocket and MediaRecorder transports. `/ws?token=<access-token>&station_id=<station-id>` remains the authenticated event/legacy audio endpoint; the native microphone panel does not silently switch to a lower-quality capture transport.
+- Legacy program clients retain their `push-to-talk` and `always-on` controls.
 - Configure TURN via `WEBRTC_TURN_URL`, `WEBRTC_TURN_USERNAME`, and `WEBRTC_TURN_CREDENTIAL` for WAN deployments.
 
 ## Phase 4A Deployment

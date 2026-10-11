@@ -19,7 +19,14 @@ def _make_app(tmp_path, monkeypatch):
     StationRepository(conn).create("Test FM")
     UserRepository(conn).create_user("dj1", "DJ One", "x", "dj")
     UserRepository(conn).create_user("prod1", "Producer One", "x", "producer")
+    from app.repositories.rbac_repo import RbacRepository
+    from app.api.users import _legacy_role_template_ids
+    rbac = RbacRepository(conn)
+    for username, role in (('dj1','dj'), ('prod1','producer')):
+        user = UserRepository(conn).get_user_by_username(username)
+        rbac.replace_user_roles(int(user['id']), _legacy_role_template_ids(rbac, role))
     conn.close()
+    init_db()  # backfill the freshly created operator users before issuing JWTs
     return app
 
 
@@ -49,6 +56,11 @@ def _create_show_and_assign(app, station_id=1, dj_username="dj1"):
         show_id = repo.create(station_id, "Test Show")
         user = UserRepository(conn).get_user_by_username(dj_username)
         repo.assign(show_id, int(user["id"]), role="dj")
+        from app.repositories.rbac_repo import RbacRepository
+        from app.db import _LEGACY_SHOW_ROLE_PERMISSIONS
+        RbacRepository(conn).replace_show_permissions(
+            show_id, int(user["id"]), _LEGACY_SHOW_ROLE_PERMISSIONS['dj']
+        )
         return show_id
     finally:
         conn.close()
@@ -57,6 +69,9 @@ def _create_show_and_assign(app, station_id=1, dj_username="dj1"):
 def _ensure_track(station_id=1):
     """Ensure at least one track exists in the DB for queue items."""
     from app.db import get_connection
+    from app.config import get_db_path
+    from tests.media_fixtures import seed_track
+    seed_track(get_db_path().parent, station_id, 1)
     conn = get_connection()
     try:
         cur = conn.cursor()

@@ -103,6 +103,7 @@ def test_build_backend_onefile_fails_when_pyinstaller_reports_success_without_ex
 
     tools_dir = script_root / "tools"
     tools_dir.mkdir()
+    shutil.copy2(root / 'tools' / 'radiotedu_mini_monitor.py', tools_dir / 'radiotedu_mini_monitor.py')
     for tool_name in ("ffmpeg", "ffplay", "ffprobe"):
         (tools_dir / f"{tool_name}.cmd").write_text("@echo off\nexit /b 0\n", encoding="utf-8")
 

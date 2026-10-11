@@ -1191,6 +1191,20 @@ class IcecastAudioSink:
         )
         self._connector_thread.start()
 
+    def _accepted_source_is_flowing(self) -> bool:
+        # A failed listener probe must not disconnect an accepted, flowing
+        # source. Stale or rejected sources still retain branch-local recovery.
+        with self._writer_lock:
+            process = self._process
+            last_write = self._last_network_write_monotonic
+            return bool(
+                process is not None and process.poll() is None
+                and getattr(self._source, 'source_response_confirmed', False)
+                and not self._network_failed and self._encoded_bytes_sent > 0
+                and last_write is not None
+                and time.monotonic() - last_write <= max(30.0, self._probe_interval_sec * 3)
+            )
+
     def _start_probe_worker(
         self,
         cfg: StationPipelineConfig,
@@ -1220,6 +1234,8 @@ class IcecastAudioSink:
                     healthy = bool(self._mount_probe(cfg))
                 except Exception:
                     healthy = False
+                # Match health snapshots' writer/probe lock order.
+                source_flowing = self._accepted_source_is_flowing()
                 with self._probe_lock:
                     if healthy:
                         self._probe_failures = 0
@@ -1230,14 +1246,16 @@ class IcecastAudioSink:
                         self._probe_failures += 1
                         if self._probe_failures >= self._probe_failure_threshold:
                             self._mount_healthy = False
-                        if self._probe_failures >= self._reconnect_failure_threshold:
+                        if source_flowing:
+                            self._mount_reconnect_requested.clear()
+                        elif self._probe_failures >= self._reconnect_failure_threshold:
                             now = time.monotonic()
                             last_request = self._last_mount_probe_reconnect_monotonic
                             if last_request is None or now - last_request >= 300.0:
                                 self._last_mount_probe_reconnect_monotonic = now
                                 self._mount_reconnect_requested.set()
                 # A single listener-probe failure is diagnostic only. Sustained
-                # absence requests a rate-limited reconnect of this mount alone;
+                # absence without accepted byte flow requests a reconnect of this mount alone;
                 # it never tears down the station programme or sibling outputs.
                 if self._probe_stop.wait(self._probe_interval_sec):
                     return

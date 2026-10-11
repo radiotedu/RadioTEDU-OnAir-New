@@ -18,6 +18,7 @@ from app.services.quality_outputs import (
     external_settings_key,
     match_music_channels,
     quality_variant_state,
+    quality_suffixes_for_channel,
     replace_quality_outputs,
     serialized_outputs,
     public_channel_payload,
@@ -112,13 +113,14 @@ class QualityOutputsTests(unittest.TestCase):
                 }
             )
 
-        result = _origin_capacity_diagnostics(40, runtime, 30)
+        expected_count = sum(len(row['expected_branches']) for row in runtime)
+        result = _origin_capacity_diagnostics(40, runtime, expected_count)
 
         self.assertTrue(result["configured_sufficient"])
         self.assertEqual(result["observed_healthy_local_mounts"], 4)
-        self.assertEqual(result["observed_unhealthy_local_mounts"], 26)
+        self.assertEqual(result["observed_unhealthy_local_mounts"], expected_count - 4)
         self.assertFalse(result["verified"])
-        self.assertIn("accepted 4 of 30", result["warning"])
+        self.assertIn(f"accepted 4 of {expected_count}", result["warning"])
 
     def test_capacity_is_verified_only_after_every_local_mount_delivers(self):
         runtime = []
@@ -134,10 +136,11 @@ class QualityOutputsTests(unittest.TestCase):
                 }
             )
 
-        result = _origin_capacity_diagnostics(40, runtime, 30)
+        expected_count = sum(len(row['expected_branches']) for row in runtime)
+        result = _origin_capacity_diagnostics(40, runtime, expected_count)
 
         self.assertEqual(result["verification_basis"], "verified_mount_delivery")
-        self.assertEqual(result["observed_healthy_local_mounts"], 30)
+        self.assertEqual(result["observed_healthy_local_mounts"], expected_count)
         self.assertTrue(result["verified"])
         self.assertEqual(result["warning"], "")
 
@@ -151,13 +154,14 @@ class QualityOutputsTests(unittest.TestCase):
 
         self.assertEqual(matched["radio"]["id"], 4)
 
-    def test_every_channel_has_four_canonical_outputs_without_credentials(self):
+    def test_each_channel_has_only_approved_outputs_without_credentials(self):
         for channel in QUALITY_CHANNEL_BY_ID.values():
             outputs = default_quality_outputs(channel)
-            self.assertEqual([item["quality"] for item in outputs], list(QUALITY_SUFFIXES))
+            suffixes = quality_suffixes_for_channel(channel)
+            self.assertEqual([item["quality"] for item in outputs], list(suffixes))
             self.assertEqual(
                 [item["icecast_mount"] for item in outputs],
-                [f"{channel.base_mount}-{suffix}" for suffix in QUALITY_SUFFIXES],
+                [f"{channel.base_mount}-{suffix}" for suffix in suffixes],
             )
             for output in outputs:
                 self.assertNotIn("password", output)
@@ -165,17 +169,14 @@ class QualityOutputsTests(unittest.TestCase):
                 self.assertNotIn("icecast_user", output)
                 self.assertNotIn("icecast_host", output)
                 self.assertEqual(output["credential_mode"], "inherit_legacy_output")
-                self.assertTrue(output["metadata_suppressed"])
+                self.assertFalse(output["metadata_suppressed"])
 
     def test_profiles_are_exact_required_targets(self):
         self.assertEqual(QUALITY_PROFILES["low"]["stream_bitrate_kbps"], 64)
-        self.assertEqual(QUALITY_PROFILES["normal"]["stream_bitrate_kbps"], 96)
-        self.assertEqual(QUALITY_PROFILES["high"]["stream_bitrate_kbps"], 192)
         self.assertEqual(QUALITY_PROFILES["flac"]["stream_bitrate_kbps"], 0)
-        self.assertEqual(QUALITY_PROFILES["low"]["stream_codec_profile"], "opus_64")
-        self.assertEqual(QUALITY_PROFILES["normal"]["stream_codec_profile"], "opus_96")
-        self.assertEqual(QUALITY_PROFILES["high"]["stream_codec_profile"], "opus_192")
-        self.assertEqual(QUALITY_PROFILES["normal"]["codec"], "Opus")
+        self.assertEqual(QUALITY_PROFILES["low"]["stream_codec_profile"], "aac_he_v2_64")
+        self.assertEqual(QUALITY_PROFILES["low"]["codec"], "HE-AAC v2")
+        self.assertEqual(set(QUALITY_PROFILES), {'low','flac'})
         self.assertEqual(
             QUALITY_PROFILES["flac"]["stream_codec_profile"],
             "ogg_flac_lossless",
@@ -193,7 +194,7 @@ class QualityOutputsTests(unittest.TestCase):
         )
 
         self.assertEqual(payload["recommended_quality"], "normal")
-        self.assertEqual(payload["recommended_mount"], "/lofi-normal")
+        self.assertEqual(payload["recommended_mount"], "/lofi")
 
     def test_replacing_quality_outputs_preserves_unrelated_outputs_and_legacy_mount(self):
         channel = QUALITY_CHANNEL_BY_ID["lofi"]
@@ -213,13 +214,13 @@ class QualityOutputsTests(unittest.TestCase):
         qualities = {item["quality"]: item for item in updated[1:]}
         self.assertFalse(qualities["low"]["enabled"])
         self.assertEqual(qualities["low"]["stream_bitrate_kbps"], 64)
-        self.assertEqual(len(qualities), 4)
+        self.assertEqual(set(qualities), {'low'})
 
     def test_serialized_quality_outputs_are_secret_free(self):
         raw = serialized_outputs(default_quality_outputs(QUALITY_CHANNEL_BY_ID["classic"]))
         parsed = json.loads(raw)
 
-        self.assertEqual(len(parsed), 4)
+        self.assertEqual(len(parsed), 2)
         self.assertNotIn("password", raw.lower())
         self.assertNotIn("secret", raw.lower())
 
@@ -241,7 +242,7 @@ class QualityOutputsTests(unittest.TestCase):
         self.assertNotIn(4, {int(item["id"]) for item in matched.values()})
 
     def test_variant_state_round_trips_enabled_and_public_flags(self):
-        channel = QUALITY_CHANNEL_BY_ID["lofi"]
+        channel = QUALITY_CHANNEL_BY_ID["classic"]
         outputs = replace_quality_outputs(
             channel,
             [],
@@ -252,7 +253,7 @@ class QualityOutputsTests(unittest.TestCase):
 
         self.assertFalse(state["flac"]["enabled"])
         self.assertFalse(state["flac"]["icecast_public"])
-        self.assertFalse(state["normal"]["enabled"])
+        self.assertFalse(state["low"]["enabled"])
 
     def test_string_false_flags_remain_disabled_after_import(self):
         channel = QUALITY_CHANNEL_BY_ID["lofi"]

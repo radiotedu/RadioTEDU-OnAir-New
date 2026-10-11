@@ -439,16 +439,16 @@ def test_setup_configure_resolves_invalid_station_to_active_station(client, monk
     assert payload["station_id"] == 1
     assert payload["station"]["name"] == "Upgrade Safe Station"
     assert payload["config"]["icecast_mount"] == "/live"
-    assert payload["config"]["stream_codec_profile"] == "opus_96"
+    assert payload["config"]["stream_codec_profile"] == "aac_low_192"
 
 
-def test_setup_exposes_only_the_approved_opus_quality_presets():
+def test_setup_preserves_the_commissioned_aac_quality_presets():
     assert [
         (item["id"], item["bitrate_kbps"])
         for item in CODEC_PRESETS
-    ] == [("opus_64", 64), ("opus_96", 96), ("opus_192", 192)]
-    assert _normalize_stream_profile("opus_128", 128) == ("opus_96", 96)
-    assert _normalize_stream_profile("mp3_128", 128) == ("opus_96", 96)
+    ] == [("aac_low_192", 192), ("aac_he_v2_64", 64)]
+    assert _normalize_stream_profile("opus_128", 128) == ("aac_low_192", 192)
+    assert _normalize_stream_profile("mp3_128", 128) == ("aac_low_192", 192)
 
 
 def test_setup_complete_issues_deployment_certificate(client, monkeypatch):
