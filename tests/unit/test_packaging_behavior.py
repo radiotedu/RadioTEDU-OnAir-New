@@ -186,7 +186,8 @@ def test_build_backend_onefile_includes_passlib_bcrypt_hidden_import():
     assert "passlib.handlers.bcrypt" in backend_script
     assert "python-multipart==" in dependency_lock
     assert "--onedir" in backend_script
-    assert "--onefile" not in backend_script
+    # The backend is onedir; the separate mini monitor may use onefile.
+    assert backend_script.index('--onedir') < backend_script.index('--onefile')
     assert "--console" in backend_script
     assert "--noconsole" not in backend_script
     assert 'Remove-PathWithRetry -Path ".\\\\build"' not in backend_script

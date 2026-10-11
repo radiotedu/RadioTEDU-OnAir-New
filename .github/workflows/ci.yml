@@ -38,8 +38,9 @@ jobs:
       - name: Verify Python dependency graph
         run: python -m pip check
       - name: Complete Python regression suite
-        run: python -m pytest -q --disable-warnings
+        run: python -m pytest -q --disable-warnings --junitxml=.test-output/pytest.xml
       - name: JavaScript tests
+        if: always()
         shell: powershell
         run: |
           Get-ChildItem tests/js/*.test.cjs | ForEach-Object {
@@ -47,6 +48,7 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "JavaScript test failed: $($_.FullName)" }
           }
       - name: Browser JavaScript syntax
+        if: always()
         shell: powershell
         run: |
           Get-ChildItem app/static -Recurse -Filter *.js | ForEach-Object {
@@ -54,4 +56,12 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "JavaScript syntax check failed: $($_.FullName)" }
           }
       - name: Desktop lifecycle tests
+        if: always()
         run: dotnet test desktop/CleanroomRadio.Desktop.sln --configuration Release --verbosity minimal
+      - name: Retain full regression results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-regression-junit
+          path: .test-output/pytest.xml
+          if-no-files-found: warn

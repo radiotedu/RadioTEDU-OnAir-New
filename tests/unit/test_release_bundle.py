@@ -2,13 +2,13 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from scripts.release_bundle import build_release_manifest
+from scripts.release_bundle import build_release_manifest, get_release_version
 
 
 def test_release_manifest_contains_backend_and_desktop_artifacts():
-    manifest = build_release_manifest("1.0.2")
+    manifest = build_release_manifest(get_release_version())
 
-    assert manifest["version"] == "1.0.2"
+    assert manifest["version"] == get_release_version()
 
     artifacts = {item["name"]: item["path"] for item in manifest["artifacts"]}
 
@@ -18,7 +18,7 @@ def test_release_manifest_contains_backend_and_desktop_artifacts():
 
 
 def test_release_manifest_points_shell_artifact_at_shell_subdir():
-    manifest = build_release_manifest("1.0.2")
+    manifest = build_release_manifest(get_release_version())
     artifacts = {item["name"]: item["path"] for item in manifest["artifacts"]}
 
     assert artifacts["RadioTEDU-OnAir.exe"] == "dist/desktop/shell/RadioTEDU-OnAir.exe"

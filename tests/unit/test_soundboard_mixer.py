@@ -44,17 +44,23 @@ def test_effect_pcm_clamps_at_boundaries():
 
 def test_effect_pcm_works_with_duck_mode():
     mixer = LiveAudioMixer()
-    music = _stereo_frame(10000, 10000)
-    mic = _mono_sample(5000)
-    effect = _mono_sample(2000)
+    music = _stereo_frame(10000, 10000) * 4800
+    mic = _mono_sample(5000) * 4800
+    effect = _mono_sample(2000) * 4800
     result = mixer.mix_pcm_chunk(
         music, mic, effect_pcm=effect,
         program_music_mode="duck", mic_gain=1.0, duck_level=0.5,
     )
-    left, right = struct.unpack("<2h", result)
-    # duck: music*0.5 + mic*1.0 + effect = 5000 + 5000 + 2000 = 12000
-    assert left == 12000
-    assert right == 12000
+    first_left, first_right = struct.unpack('<2h', result[:4])
+    assert first_left == first_right
+    assert 12000 < first_left < 17000  # duck attack starts smoothly
+    settled = mixer.mix_pcm_chunk(
+        music, mic, effect_pcm=effect,
+        program_music_mode='duck', mic_gain=1.0, duck_level=0.5,
+    )
+    left, right = struct.unpack('<2h', settled[-4:])
+    # The bed settles over the next packet; mic/effect gain is unchanged.
+    assert left == right == 12000
 
 
 def test_effect_pcm_shorter_than_music_pads_silence():

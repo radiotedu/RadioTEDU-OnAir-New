@@ -273,11 +273,12 @@ RadioTEDU OnAir uses layered RBAC with legacy-role compatibility during the migr
 - Studios are station-scoped. A station can have multiple studios, but only one studio per station may be on air at a time.
 - Mic access follows the active DJ of the on-air studio. Producers may join and chat, but they cannot take the mic.
 - The browser must grant microphone permission before capture starts.
-- Browser capture uses `getUserMedia()` plus `MediaRecorder` and sends authenticated mic chunks over `/ws?token=<access-token>&station_id=<station-id>`.
-- The server decodes those chunks with FFmpeg, mixes them into the current station runtime, and writes the result to Icecast and local outputs.
-- The program panel supports `push-to-talk` and `always-on` transmission modes.
+- Click **Mikrofonları algıla**, select the exact device, then use the same live microphone button to start or stop capture.
+- The On Air panel uses `getUserMedia()` and an AudioWorklet to send authenticated mono 48 kHz s16le PCM in bounded 100 ms packets. Browser gain, noise suppression and echo cancellation are disabled.
+- Native PCM reaches the station bridge without a microphone decoder. The existing encoder connection remains active while stereo music ducking, bed or microphone-only mixing changes.
+- The panel confirms PCM reception before displaying **CANLI**; device loss or transport failure returns the programme to music.
 - Program settings are backed by `PUT /api/audio/live/settings`.
-- When `aiortc` is installed and `WEBRTC_ENABLED=true`, the browser attempts WebRTC for lower-latency audio transport. If WebRTC negotiation fails, the browser falls back to the WebSocket and MediaRecorder path automatically.
+- Legacy studio/guest clients retain their WebRTC, WebSocket and MediaRecorder transports. `/ws?token=<access-token>&station_id=<station-id>` remains the authenticated event/legacy audio endpoint; the native microphone panel does not silently switch to a lower-quality capture transport.
 - Configure TURN via `WEBRTC_TURN_URL`, `WEBRTC_TURN_USERNAME`, and `WEBRTC_TURN_CREDENTIAL` for WAN deployments.
 
 ## Phase 4A Deployment
