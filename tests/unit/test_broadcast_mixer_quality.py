@@ -3,6 +3,23 @@ import struct
 from app.audio.live_audio_mixer import LiveAudioMixer
 
 
+def test_linked_limiting_is_independent_of_transport_packet_boundaries():
+    import random
+    rng = random.Random(24)
+    music = struct.pack('<10000h', *[rng.randrange(-32000, 32000) for _ in range(10000)])
+    voice = struct.pack('<5000h', *[rng.randrange(-32000, 32000) for _ in range(5000)])
+    continuous = LiveAudioMixer().mix_pcm_chunk(music, voice, program_music_mode='duck', mic_gain=2)
+    mixer = LiveAudioMixer()
+    split = b''
+    offset = 0
+    for frames in (128, 512, 1024, 3336):
+        split += mixer.mix_pcm_chunk(music[offset*4:(offset+frames)*4], voice[offset*2:(offset+frames)*2], program_music_mode='duck', mic_gain=2)
+        offset += frames
+    a = struct.unpack('<10000h', continuous)
+    b = struct.unpack('<10000h', split)
+    assert max(abs(left - right) for left, right in zip(a, b)) <= 1
+
+
 def pcm(values):
     return struct.pack('<' + 'h' * len(values), *values)
 

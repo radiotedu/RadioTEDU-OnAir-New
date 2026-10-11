@@ -1396,6 +1396,7 @@ class StationRuntime:
                     guest_on_air = False
                 if not live.get("receiving") and not guest_on_air:
                     mix_settings["program_music_mode"] = "normal"
+                    mix_settings["music_gain"] = 1.0
                 mixed = self._live_audio_mixer.mix_pcm_chunk(
                     chunk,
                     mic_pcm,

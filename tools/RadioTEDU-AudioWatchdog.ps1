@@ -220,7 +220,7 @@ function Get-WatchdogStatusSnapshot {
     }
     catch {
         Write-WatchdogLog (
-            "Watchdog status API unavailable; continuing local source checks: " +
+            "Watchdog status API unavailable; continuing with local source checks: " +
             $_.Exception.Message
         )
         return $null
@@ -867,6 +867,21 @@ function Send-Report(
     }
 }
 
+$watchdogRunLock = $null
+try {
+    New-Item -ItemType Directory -Force -Path $stateRoot | Out-Null
+    $watchdogRunLock = [System.IO.File]::Open(
+        (Join-Path $stateRoot "execution.lock"),
+        [System.IO.FileMode]::OpenOrCreate,
+        [System.IO.FileAccess]::ReadWrite,
+        [System.IO.FileShare]::None
+    )
+}
+catch [System.IO.IOException] {
+    Write-WatchdogLog "duplicate launch refused; another watchdog owns the execution lock."
+    exit 0
+}
+
 try {
     Invoke-PendingBackendSourceReload
     Start-BackendIfNeeded
@@ -1034,4 +1049,9 @@ catch {
         $errorLine, $watchdogError.Exception.Message, $errorTrace
     )
     exit 23
+}
+finally {
+    if ($null -ne $watchdogRunLock) {
+        $watchdogRunLock.Dispose()
+    }
 }

@@ -333,6 +333,7 @@ class LibraryFolderSyncPayload(BaseModel):
     incremental: bool = False
     guard_configured_folder: bool = False
     allow_empty: bool = False
+    enqueue_new_music: bool = False
 
 
 class FolderPickerPayload(BaseModel):
@@ -4449,6 +4450,8 @@ def _sync_station_library_folder_with_connection(
     metadata_fallbacks = 0
     duplicate_rows_deactivated = 0
     target_track_ids: list[int] = []
+    introduced_track_ids: list[int] = []
+    pending_added = 0
     default_genre = str(payload.default_genre or "").strip()
     default_language = str(payload.default_language or "").strip()
     prefix = "library" if kind == "music" else f"{kind}_library"
@@ -4551,6 +4554,7 @@ def _sync_station_library_folder_with_connection(
                 track_id = int(primary["id"])
                 if not bool(primary["is_active"]):
                     reactivated += 1
+                    introduced_track_ids.append(track_id)
                 else:
                     retained += 1
                 conn.execute(
@@ -4616,6 +4620,7 @@ def _sync_station_library_folder_with_connection(
                 ),
             )
             target_track_ids.append(int(cursor.lastrowid))
+            introduced_track_ids.append(int(cursor.lastrowid))
             added += 1
 
         deactivated_ids: list[int] = []
@@ -4663,6 +4668,25 @@ def _sync_station_library_folder_with_connection(
                     )
                     schedules_removed = int(cursor.rowcount or 0)
                     _reindex_pending_queue(conn, sid)
+
+        if payload.enqueue_new_music and kind == 'music' and introduced_track_ids:
+            # Only fresh/reactivated files are appended. Existing operator rows
+            # and the playing item retain ownership; inventory + queue commit
+            # atomically, so a failed import cannot leave ghost queue entries.
+            active_queue_ids = {int(row['track_id']) for row in conn.execute(
+                "SELECT track_id FROM queue_items WHERE station_id=? AND status IN ('playing', 'pending')", (sid,)
+            )}
+            position = int(conn.execute(
+                "SELECT COALESCE(MAX(position), 0) FROM queue_items WHERE station_id=? AND status IN ('playing', 'pending')", (sid,)
+            ).fetchone()[0])
+            for track_id in introduced_track_ids:
+                if track_id in active_queue_ids:
+                    continue
+                position += 1
+                conn.execute("INSERT INTO queue_items (station_id, track_id, position, status) VALUES (?, ?, ?, 'pending')",
+                             (sid, track_id, position))
+                active_queue_ids.add(track_id)
+                pending_added += 1
 
         for key, value in profile_values.items():
             conn.execute(
@@ -4742,6 +4766,7 @@ def _sync_station_library_folder_with_connection(
         "invalid_files_skipped": len(unplayable),
         "invalid_files": unplayable[:50],
         "pending_queue_items_removed": pending_removed,
+        "pending_queue_items_added": pending_added,
         "program_queue_items_removed": program_items_removed,
         "pending_schedules_removed": schedules_removed,
     }

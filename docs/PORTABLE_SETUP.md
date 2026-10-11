@@ -41,6 +41,8 @@ their actual runners before being described as verified release packages.
   service configuration continues to use its explicit ProgramData paths.
 - Linux portable state: `$XDG_DATA_HOME/radiotedu/onair`, normally
   `~/.local/share/radiotedu/onair`.
+- POSIX product media defaults to the instance data directory's `media` folder;
+  set `RADIOTEDU_MEDIA_ROOT` to an absolute operator-selected media directory.
 - macOS portable state: `~/Library/Application Support/RadioTEDU/OnAir`.
 - `CLEANROOM_DATA_ROOT`, `CLEANROOM_DB_PATH` and `CLEANROOM_USER_CONFIG_ROOT`
   remain explicit overrides. Back up the database using SQLite online backup.
@@ -67,8 +69,8 @@ An interrupted native microphone stops owning the live input after three
 seconds. Music returns when signal reception stops. Other live/emergency
 sources must be stopped before microphone capture can begin.
 
-Live music folders in **replace** mode are authoritative. Stable files enter
-rotation; removed files leave future queue entries, while the currently playing
+Live music folders in **replace** mode are authoritative. New stable files are
+appended once to the pending queue and enter rotation; removed files leave future queue entries, while the currently playing
 item finishes. Incomplete/unreadable scans retain the last verified inventory.
 Retired files under `.radiotedu-trash` are not imported again.
 

@@ -155,6 +155,7 @@ def _default_sync_callback(profile: ManagedLibraryProfile) -> dict:
             incremental=True,
             guard_configured_folder=True,
             allow_empty=True,
+            enqueue_new_music=profile.track_type == 'music',
         )
     )
     if bool(result.get("no_op")):

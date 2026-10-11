@@ -9,7 +9,7 @@ from app.repositories.station_repo import StationRepository
 def _capture_worker_loop_start(monkeypatch):
     started = []
 
-    def _fake_start(*, station_id, fallback_uri="", interval_sec=1.0):
+    def _fake_start(*, station_id, fallback_uri="", interval_sec=1.0, readiness_timeout_seconds=45.0):
         started.append(
             {
                 "station_id": int(station_id),

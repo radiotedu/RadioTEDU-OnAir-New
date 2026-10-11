@@ -11,6 +11,8 @@ The existing station encoder remains connected during microphone use. The mixer
 preserves the stereo music image, smooths music gain, holds ducking between words
 and uses linked sample-peak limiting. This is sample-peak protection, not a claim
 of true-peak or EBU compliance. The existing encoder/loudness chain is retained.
+Elementwise DSP runs in NumPy's native array code; bounded envelope blocks avoid
+long Python sample loops and preserve limiter state across network packets.
 Microphone-only mode returns to music when input reception stalls; expired native
 sessions release ownership after three seconds. Closing or switching stations
 stops capture and restores the original persisted mix, with read-back checks.
@@ -26,6 +28,8 @@ Managed-folder scans now reject incomplete inventories and exclude
 `.radiotedu-trash`. Existing replace-mode reconciliation removes deleted songs
 from future queue entries while allowing the current item to finish; new stable
 files enter rotation. An unavailable drive cannot empty the managed inventory.
+Watcher imports append fresh or reactivated music files once, after existing
+operator queue entries, in the same transaction as the inventory update.
 POSIX inventory keys preserve filename case so Linux `Track.mp3` and `track.mp3`
 remain independent media entries.
 

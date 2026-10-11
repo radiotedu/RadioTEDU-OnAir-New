@@ -46,6 +46,12 @@ test('selected USB device uses raw 48 kHz without browser gain/noise processing'
   assert.equal(r.calls.filter(c => c[0].includes('/render/')).length, 0);
 });
 
+test('repeated preparation clicks open only one physical capture', async () => {
+  const r = rig();
+  await Promise.all([r.mic.prepare(), r.mic.prepare()]);
+  assert.equal(r.calls.filter(c => c[0] === 'capture').length, 1);
+});
+
 test('release during a permission prompt cannot put the microphone on air later', async () => {
   const r = rig();
   let grant;

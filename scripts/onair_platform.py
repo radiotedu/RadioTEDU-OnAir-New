@@ -26,6 +26,7 @@ def configure_environment(data_root=None):
         os.environ['CLEANROOM_CREDENTIAL_STORE_FILE'] = str(root / 'config/secrets/station-credentials.json')
         os.environ['CLEANROOM_CREDENTIAL_KEY_FILE'] = str(root / 'config/secrets/credential-encryption.key')
         os.environ['CLEANROOM_JWT_SECRET_FILE'] = str(root / 'config/secrets/jwt-secret.key')
+        os.environ['RADIOTEDU_MEDIA_ROOT'] = str(root / 'media')
     os.environ.setdefault('CLEANROOM_DATA_ROOT', str(root))
     os.environ.setdefault('CLEANROOM_DB_PATH', str(root / 'cleanroom.db'))
     os.environ.setdefault('CLEANROOM_USER_CONFIG_ROOT', str(root / 'config'))

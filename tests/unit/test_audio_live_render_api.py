@@ -80,7 +80,7 @@ def test_live_render_api_start_chunk_stop(client, admin_token_headers):
     live_mic_registry._render_session_factory = original_factory
 
 
-def test_native_microphone_api_accepts_aligned_pcm_and_rejects_bad_packets(client, admin_token_headers):
+def test_native_microphone_api_accepts_aligned_pcm_and_rejects_bad_packets(client, admin_token_headers, monkeypatch):
     from app.audio.native_pcm_session import NativePcmSession
     live_mic_registry.reset()
     try:
@@ -88,7 +88,9 @@ def test_native_microphone_api_accepts_aligned_pcm_and_rejects_bad_packets(clien
         started = client.post('/api/audio/live/render/start', headers=admin_token_headers,
                               json={'station_id': 1, 'sample_rate': 48000, 'input_format': 's16le', 'channels': 1})
         assert started.status_code == 200
-        assert isinstance(live_mic_registry._state_for(1)['render_session'], NativePcmSession)
+        session = live_mic_registry._state_for(1)['render_session']
+        assert isinstance(session, NativePcmSession)
+        monkeypatch.setattr(session, '_clock', lambda: session._started_at + 0.1)
         for packet in (b'\x01', b'\x00' * 9602):
             rejected = client.post('/api/audio/live/render/chunk?station_id=1', headers=admin_token_headers, content=packet)
             assert rejected.status_code == 400

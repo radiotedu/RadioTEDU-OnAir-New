@@ -24,9 +24,10 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from app.file_security import audio_upload_extensions
+from app.runtime_paths import get_data_dir
 
 
-DEFAULT_MEDIA_ROOT = Path("E:/RadioTEDU Media")
+DEFAULT_MEDIA_ROOT = Path("E:/RadioTEDU Media") if os.name == 'nt' else get_data_dir() / 'media'
 PRODUCT_DIRECTORIES = {
     "broadcast": "Broadcast",
     "juke": "Juke/Non-Turkish",
@@ -91,7 +92,7 @@ class ProductMediaCatalogService:
         max_retries: int = 4,
     ):
         configured = str(root or os.getenv("RADIOTEDU_MEDIA_ROOT", "")).strip()
-        configured_root = Path(configured) if configured else DEFAULT_MEDIA_ROOT
+        configured_root = (Path(configured) if configured else DEFAULT_MEDIA_ROOT).expanduser()
         if not configured_root.is_absolute():
             raise ProductCatalogError("media_root_must_be_absolute")
         configured_root = configured_root.expanduser()

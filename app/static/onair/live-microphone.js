@@ -16,6 +16,7 @@
       this.original = null;
       this.stopPromise = null;
       this.startPromise = null;
+      this.preparePromise = null;
       this.deviceId = '';
       this.captureEnabled = false;
       this.confirmChunk = null;
@@ -34,7 +35,12 @@
       return inputs;
     }
     changed(message = '') { this.options.status?.(this.phase, message, this); }
-    async prepare() {
+    prepare() {
+      if (this.preparePromise) return this.preparePromise;
+      this.preparePromise = this.prepareTransaction().finally(() => { this.preparePromise = null; });
+      return this.preparePromise;
+    }
+    async prepareTransaction() {
       if (this.stream && this.stream.getAudioTracks().every((t) => t.readyState !== 'ended')) return;
       if (!navigator.mediaDevices?.getUserMedia) throw new Error('Open this panel on localhost or HTTPS to allow microphone access');
       const generation = this.generation;

@@ -28,7 +28,7 @@ jobs:
       - name: Install locked dependencies and packaging tools
         run: python -m pip install -r requirements.lock pyinstaller==6.16.0
       - name: Verify core audio and portable credential contracts
-        run: python -m pytest -q tests/unit/test_native_pcm_session.py tests/unit/test_broadcast_mixer_quality.py tests/unit/test_managed_folder_scan_safety.py tests/unit/test_portable_credentials.py tests/unit/test_portable_launcher.py tests/unit/test_runtime_paths.py tests/unit/test_audio_transitions_api.py tests/unit/test_audio_live_render_api.py tests/unit/test_device_discovery.py tests/unit/test_gst_pipeline_builder.py
+        run: python -m pytest -q tests/unit/test_native_pcm_session.py tests/unit/test_broadcast_mixer_quality.py tests/unit/test_managed_folder_scan_safety.py tests/unit/test_live_folder_queue_updates.py tests/unit/test_portable_credentials.py tests/unit/test_portable_launcher.py tests/unit/test_runtime_paths.py tests/unit/test_audio_transitions_api.py tests/unit/test_audio_live_render_api.py tests/unit/test_device_discovery.py tests/unit/test_gst_pipeline_builder.py
       - name: Verify browser state transitions
         shell: bash
         run: node --test --test-concurrency=1 tests/js/*.test.cjs

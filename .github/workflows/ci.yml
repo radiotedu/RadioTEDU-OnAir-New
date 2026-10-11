@@ -26,7 +26,9 @@ jobs:
       - name: Install FFmpeg tools
         run: choco install ffmpeg --yes --no-progress
       - name: Install Python dependencies
-        run: python -m pip install --upgrade pip && python -m pip install --only-binary=:all: -r requirements.lock
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --only-binary=:all: -r requirements.lock
       - name: Verify Python dependency graph
         run: python -m pip check
       - name: Complete Python regression suite

@@ -44,6 +44,8 @@ build/
 dist/
 release/
 .venv/
+.feature-deps/
+.test-output/
 .venv-omnivoice/
 .hf-cache/
 models/
