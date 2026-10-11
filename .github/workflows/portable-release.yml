@@ -49,6 +49,26 @@ jobs:
             executable=dist/RadioTEDU-OnAir/RadioTEDU-OnAir
           fi
           "$executable" --help
+      - name: Install FFmpeg for isolated package startup
+        shell: bash
+        run: |
+          if ! command -v ffmpeg >/dev/null || ! command -v ffprobe >/dev/null; then
+            case "${{ runner.os }}" in
+              Windows) choco install ffmpeg --yes --no-progress ;;
+              Linux) sudo apt-get update -qq && sudo apt-get install -y ffmpeg ;;
+              macOS) brew install ffmpeg ;;
+            esac
+          fi
+      - name: Verify compiled HTTP app and microphone assets
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            executable=dist/RadioTEDU-OnAir/RadioTEDU-OnAir.exe
+            export PATH="/c/ProgramData/chocolatey/bin:$PATH"
+          else
+            executable=dist/RadioTEDU-OnAir/RadioTEDU-OnAir
+          fi
+          python installer/verify_portable_startup.py "$executable"
       - name: Upload portable setup artifact
         run: python installer/package_portable.py dist/RadioTEDU-OnAir --output release --platform ${{ runner.os }} --arch ${{ runner.arch }}
       - name: Upload portable archive
