@@ -4,6 +4,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $BackendExeName = "RadioTEDU-OnAir-Backend"
+$MiniMonitorExeName = "RadioTEDU-OnAir-MiniMonitor"
 $BackendEntrypoint = "run_cleanroom.py"
 $SupervisorExeName = "RadioTEDU-OnAir-Supervisor.exe"
 $RuntimePort = 8100
@@ -220,6 +221,7 @@ function Get-BackendSourceManifest {
         (Get-Item -LiteralPath (Join-Path $root $BackendEntrypoint))
         (Get-Item -LiteralPath (Join-Path $root "requirements.lock"))
         (Get-Item -LiteralPath (Join-Path $root "VERSION"))
+        (Get-Item -LiteralPath (Join-Path $root "tools\radiotedu_mini_monitor.py"))
         (Get-Item -LiteralPath (Join-Path $root "build_backend_onefile.ps1"))
     )
     foreach ($file in @($files | Sort-Object FullName)) {
@@ -585,9 +587,10 @@ if (-not (Remove-PathWithRetry -Path $distDir)) {
 
 $pyInstallerDistRoot = ".\build\$BackendBuildSlug-backend-publish"
 $pyInstallerWorkRoot = ".\build\$BackendBuildSlug-pyinstaller-work"
+$miniMonitorWorkRoot = ".\build\$BackendBuildSlug-mini-monitor-pyinstaller-work"
 $staticStageRoot = ".\build\radiotedu-static-stage"
 
-$buildPaths = @($pyInstallerDistRoot, $pyInstallerWorkRoot, $staticStageRoot)
+$buildPaths = @($pyInstallerDistRoot, $pyInstallerWorkRoot, $miniMonitorWorkRoot, $staticStageRoot)
 foreach ($buildPath in $buildPaths) {
     if (-not (Remove-PathWithRetry -Path $buildPath)) {
         throw "Could not clean build path (locked by another process): $buildPath"
@@ -659,6 +662,27 @@ if ($pyInstallerExitCode -ne 0) {
     throw "PyInstaller failed with exit code $pyInstallerExitCode."
 }
 
+# Build the operator's compact health window beside the backend artifact. The
+# installer already packages the complete backend directory recursively.
+$priorErrorActionPreference = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+& $pythonCommand @pythonPrefixArgs -m PyInstaller `
+    --noconfirm `
+    --clean `
+    --onefile `
+    --windowed `
+    --distpath $pyInstallerDistRoot `
+    --workpath $miniMonitorWorkRoot `
+    --name $MiniMonitorExeName `
+    --collect-all tzdata `
+    ".\tools\radiotedu_mini_monitor.py" 2>&1 | Out-Host
+$miniMonitorPyInstallerExitCode = $LASTEXITCODE
+$ErrorActionPreference = $priorErrorActionPreference
+
+if ($miniMonitorPyInstallerExitCode -ne 0) {
+    throw "Mini monitor PyInstaller failed with exit code $miniMonitorPyInstallerExitCode."
+}
+
 $sourceManifestAfter = @(Get-BackendSourceManifest)
 $sourceFingerprintAfter = Get-BackendSourceFingerprint -Manifest $sourceManifestAfter
 if ($sourceFingerprintAfter -ne $sourceFingerprintBefore) {
@@ -683,6 +707,11 @@ if (-not (Test-Path $stagedOut -PathType Container) -or
     -not (Test-Path (Join-Path $stagedOut "$BackendExeName.exe") -PathType Leaf)) {
     throw "Expected staged backend bundle was not produced at $stagedOut."
 }
+$miniMonitorArtifact = Join-Path $pyInstallerDistRoot "$MiniMonitorExeName.exe"
+if (-not (Test-Path -LiteralPath $miniMonitorArtifact -PathType Leaf)) {
+    throw "Expected mini monitor executable was not produced at $miniMonitorArtifact."
+}
+Copy-Item -LiteralPath $miniMonitorArtifact -Destination (Join-Path $stagedOut "$MiniMonitorExeName.exe") -Force
 
 # PyInstaller places runtime binaries under _internal for an onedir bundle. Keep
 # explicit managed-tool copies as well: the installer/bootstrap contract uses
@@ -718,6 +747,7 @@ $provenance = [ordered]@{
     ffmpeg_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $ffmpeg.Source).Hash
     ffplay_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $ffplay.Source).Hash
     ffprobe_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $ffprobe.Source).Hash
+    mini_monitor_executable_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $stagedOut "$MiniMonitorExeName.exe")).Hash
 }
 $provenance | ConvertTo-Json | Set-Content `
     -LiteralPath (Join-Path $stagedOut "build-provenance.json") `

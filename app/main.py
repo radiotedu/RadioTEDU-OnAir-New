@@ -412,7 +412,7 @@ async def lifespan(_app: FastAPI):
 
     shutdown_broadcast_planner = BroadcastPlannerScheduler()
     shutdown_broadcast_planner.start()
-    if not rtai_edition:
+    if not rtai_edition and _env_truthy('CLEANROOM_ENABLE_LEGACY_CODEC_MIGRATION'):
         try:
             from app.services.codec_migration import migrate_ogg_outputs_to_he_aac
 

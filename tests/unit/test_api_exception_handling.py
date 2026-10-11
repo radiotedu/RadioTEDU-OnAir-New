@@ -11,8 +11,11 @@ def test_unhandled_api_exception_returns_json_payload():
         raise RuntimeError("boom")
 
     try:
-        client = TestClient(app, raise_server_exceptions=False)
-        res = client.get(path)
+        # Entering TestClient's context runs the application lifespan and
+        # initializes the isolated test database before the auth fixture logs
+        # in on this legacy direct-client test.
+        with TestClient(app, raise_server_exceptions=False) as client:
+            res = client.get(path)
         assert res.status_code == 500
         assert str(res.headers.get("content-type", "")).startswith("application/json")
         assert res.headers.get("cache-control") == "no-store"

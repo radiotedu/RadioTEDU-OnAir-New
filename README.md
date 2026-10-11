@@ -5,14 +5,16 @@
 <h1 align="center">RadioTEDU OnAir</h1>
 
 <p align="center">
-  Deterministic, operator-controlled radio automation for Windows.
+  Deterministic, operator-controlled radio automation for Windows, Linux and macOS.
 </p>
 
 <p align="center">
   <img src="docs/assets/radiotedu-logo-card.png" width="260" alt="RadioTEDU">
 </p>
 
-RadioTEDU OnAir is the standalone product path for deterministic Windows radio automation. It is the single supported product path in this repository. It combines the FastAPI playout engine, RadioTEDU operator wall, embedded desktop shell, tray agent, Icecast/local output, queue, jingles, optional AI host, emergency browser-audio takeover, and real-time forecast in one installable product. It replaces the older RadioTEDU Broadcast Wall while preserving compatible data through an explicit, reviewable migration. The separate rtAI application is not built, packaged, or installed from this checkout.
+RadioTEDU OnAir combines the FastAPI playout engine, operator wall, independent station workers, Icecast/local output, queue, jingles, optional AI host and emergency audio. The Windows desktop shell and service installer remain available; Linux and macOS use the browser panel and portable launcher. See [cross-platform setup](docs/PORTABLE_SETUP.md) for source installation, versioned launchers and GitHub package builds.
+
+Version 1.1.0 adds selected-device live microphone capture at 48 kHz, verified PCM delivery, smooth music ducking, stereo limiting and per-station crossfade controls. Managed folders retain their inventory on incomplete scans and exclude retired media. See [release and rollout notes](docs/RELEASE_1_1_0.md). Upgrading never implicitly changes a saved station's codec, bitrate, output roster or live folder.
 
 The product is radio- and genre-agnostic. Every station has an independent identity, Icecast mount, managed library, jingle policy, queue, output profile, and persistent start/stop policy. A live source connection is verified only after encoder/output health and listener bytes are observed; other stations remain stopped unless an operator explicitly starts them.
 

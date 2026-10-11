@@ -1,5 +1,6 @@
-import time
+from dataclasses import replace
 import threading
+import time
 
 import pytest
 
@@ -34,6 +35,7 @@ class _FakePipe:
     def __init__(self):
         self.closed = False
         self.writes = []
+        self.peek_data = bytes(4096)
 
     def close(self):
         self.closed = True
@@ -45,6 +47,9 @@ class _FakePipe:
 
     def read(self, _size=-1):
         return b""
+
+    def peek(self, size=-1):
+        return self.peek_data if size < 0 else self.peek_data[:size]
 
     def flush(self):
         return None
@@ -246,6 +251,92 @@ def test_runtime_tracks_decode_progress_when_remote_sink_is_unhealthy():
     assert status["delivery_health"]["icecast"] is False
 
 
+def _mount_telemetry(*, saturation=None):
+    health = {
+        "process_running": True,
+        "mount_healthy": True,
+        "writer_running": True,
+        "writer_failed": False,
+        "writer_backpressured": False,
+        "writer_backpressure_age_seconds": 0.0,
+        "queued_pcm_seconds": 3.0,
+        "queued_pcm_chunks": 140,
+        "pcm_queue_capacity_chunks": 1024,
+        "pcm_dispatcher_running": True,
+        "pcm_dispatch_backpressured": False,
+        "pcm_dispatch_backpressure_age_seconds": 0.0,
+        "queued_dispatch_pcm_seconds": 2.0,
+        "queued_dispatch_pcm_chunks": 94,
+        "pcm_dispatch_queue_capacity_chunks": 512,
+        "network_writer_running": True,
+        "network_failed": False,
+        "last_write_age_seconds": 0.2,
+        "last_network_write_age_seconds": 0.2,
+    }
+    if saturation == "pcm":
+        health.update(
+            {
+                "writer_backpressured": True,
+                "writer_backpressure_age_seconds": 31.0,
+                "queued_pcm_seconds": 20.9,
+                "queued_pcm_chunks": 1000,
+            }
+        )
+    elif saturation == "dispatch":
+        health.update(
+            {
+                "pcm_dispatch_backpressured": True,
+                "pcm_dispatch_backpressure_age_seconds": 31.0,
+                "queued_dispatch_pcm_seconds": 10.6,
+                "queued_dispatch_pcm_chunks": 500,
+            }
+        )
+    return health
+
+
+class _QueueTelemetrySink:
+    def __init__(self, *, saturation=None):
+        self._health = _mount_telemetry(saturation=saturation)
+
+    def is_running(self):
+        return True
+
+    def health_snapshot(self):
+        return dict(self._health)
+
+
+@pytest.mark.parametrize("branch", ["icecast", "icecast:/station-low"])
+@pytest.mark.parametrize("saturation", ["pcm", "dispatch"])
+def test_delivery_health_rejects_sustained_saturated_mount_with_fresh_writes(
+    branch, saturation
+):
+    runtime = StationRuntime(process_factory=lambda _cmd: _FakeProcess())
+    runtime._backend = "ffmpeg"
+    runtime._process = _FakeProcess()
+    runtime._last_program_pcm_monotonic = time.monotonic()
+    runtime._router.set_branch_health("icecast", True)
+    runtime._icecast_sink = _QueueTelemetrySink(
+        saturation=saturation if branch == "icecast" else None
+    )
+
+    if branch == "icecast:/station-low":
+        low_cfg = replace(
+            _make_cfg(),
+            icecast_mount="/station-low",
+            stream_codec_profile="aac_low_96",
+            stream_bitrate_kbps=96,
+        )
+        runtime._extra_icecast_configs[branch] = low_cfg
+        runtime._extra_icecast_sinks[branch] = _QueueTelemetrySink(
+            saturation=saturation
+        )
+        runtime._router.set_branch_health(branch, True)
+
+    status = runtime.status()
+
+    assert status["delivery_health"][branch] is False
+
+
 def test_recover_outputs_reconnects_sinks_without_restarting_programme(monkeypatch):
     runtime = StationRuntime(process_factory=lambda _cmd: _FakeProcess())
     cfg = _make_cfg(local_output_enabled=False)
@@ -254,13 +345,33 @@ def test_recover_outputs_reconnects_sinks_without_restarting_programme(monkeypat
     calls = []
 
     class Sink:
+        def __init__(self):
+            self.accepted = []
+
         def stop(self, **_kwargs):
             calls.append("stop-primary")
 
-    runtime._icecast_sink = Sink()
+        def write_pcm(self, chunk):
+            self.accepted.append(chunk)
+            return True
+
+        def is_running(self):
+            return True
+
+    primary = Sink()
+    runtime._icecast_sink = primary
+
+    def during_release(seconds):
+        calls.append(("release", seconds))
+        targets = runtime._icecast_output_targets()
+        assert targets == [("icecast", primary)]
+        assert runtime._write_pcm_chunk_to_targets(
+            b"pcm-during-reconnect", targets, program_data=False
+        ) is True
+
     monkeypatch.setattr(
         "app.audio.station_runtime.time.sleep",
-        lambda seconds: calls.append(("release", seconds)),
+        during_release,
     )
     monkeypatch.setattr(
         runtime,
@@ -281,6 +392,57 @@ def test_recover_outputs_reconnects_sinks_without_restarting_programme(monkeypat
         "start-primary",
         "release-disabled",
     ]
+    assert primary.accepted == [b"pcm-during-reconnect"]
+
+
+def test_recover_outputs_keeps_each_mount_in_fanout_during_release(monkeypatch):
+    runtime = StationRuntime(process_factory=lambda _cmd: _FakeProcess())
+    cfg = replace(
+        _make_cfg(local_output_enabled=False),
+        extra_icecast_outputs=(
+            {"enabled": True, "icecast_mount": "/backup"},
+        ),
+    )
+    runtime._active_cfg = cfg
+    calls = []
+
+    class Sink:
+        def stop(self, **_kwargs):
+            calls.append("stop")
+
+        def ensure_started(self, _cfg, **_kwargs):
+            calls.append("start-extra")
+
+        def is_running(self):
+            return True
+
+        def write_pcm(self, _chunk):
+            return True
+
+    primary = Sink()
+    backup = Sink()
+    runtime._icecast_sink = primary
+    runtime._extra_icecast_sinks = {"icecast:/backup": backup}
+
+    def during_release(seconds):
+        calls.append(("release", seconds))
+        assert runtime._icecast_output_targets() == [
+            ("icecast", primary),
+            ("icecast:/backup", backup),
+        ]
+
+    monkeypatch.setattr("app.audio.station_runtime.time.sleep", during_release)
+    monkeypatch.setattr(runtime, "_ensure_icecast_sink", lambda *_a, **_kw: True)
+    monkeypatch.setattr(runtime, "_release_disabled_sinks", lambda _cfg: None)
+    monkeypatch.setattr(runtime, "status", lambda: {"running": True})
+
+    assert runtime.recover_outputs() == {"running": True}
+    assert runtime._icecast_output_targets() == [
+        ("icecast", primary),
+        ("icecast:/backup", backup),
+    ]
+    assert calls.count(("release", 3.0)) == 2
+    assert calls.count("start-extra") == 1
 
 
 def test_recover_primary_output_uses_long_release_without_stopping_programme(monkeypatch):
@@ -307,6 +469,66 @@ def test_recover_primary_output_uses_long_release_without_stopping_programme(mon
 
     assert runtime.recover_primary_output() == {"running": True}
     assert calls == ["stop-primary", ("release", 12.0), "start-primary"]
+
+
+def test_recover_output_branch_reconnects_only_the_named_extra_mount(monkeypatch):
+    cfg = replace(
+        _make_cfg(local_output_enabled=False),
+        extra_icecast_outputs=(
+            {"enabled": True, "icecast_mount": "/backup"},
+            {"enabled": True, "icecast_mount": "/other"},
+        ),
+    )
+    runtime = StationRuntime(process_factory=lambda *_args, **_kwargs: None)
+    runtime._active_cfg = cfg
+    calls = []
+
+    class Sink:
+        def __init__(self, name):
+            self.name = name
+
+        def stop(self, **kwargs):
+            calls.append(("stop", self.name, kwargs.get("preserve_pcm")))
+
+        def ensure_started(self, output_cfg, **kwargs):
+            calls.append(
+                (
+                    "start",
+                    self.name,
+                    output_cfg.icecast_mount,
+                    kwargs.get("preserve_pcm"),
+                )
+            )
+
+        def is_running(self):
+            return True
+
+        def write_pcm(self, _chunk):
+            return True
+
+    primary = Sink("primary")
+    backup = Sink("backup")
+    other = Sink("other")
+    runtime._icecast_sink = primary
+    runtime._extra_icecast_sinks = {
+        "icecast:/backup": backup,
+        "icecast:/other": other,
+    }
+    monkeypatch.setattr(
+        "app.audio.station_runtime.time.sleep",
+        lambda seconds: calls.append(("release", seconds)),
+    )
+    monkeypatch.setattr(runtime, "status", lambda: {"running": True})
+
+    assert runtime.recover_output_branch("icecast:/backup") == {"running": True}
+
+    assert calls == [
+        ("stop", "backup", True),
+        ("release", runtime_module._ORIGIN_SOURCE_RELEASE_SECONDS),
+        ("start", "backup", "/backup", True),
+    ]
+    assert runtime._icecast_sink is primary
+    assert runtime._extra_icecast_sinks["icecast:/other"] is other
 
 
 def test_runtime_falls_back_to_ffmpeg_when_gst_missing():
@@ -377,6 +599,210 @@ def test_runtime_does_not_restart_for_identical_config():
 
     assert runtime.is_running() is True
     assert len(launched) == 1
+
+
+def test_forced_restart_replaces_same_source_producer_and_preserves_sink_pcm(monkeypatch):
+    processes = []
+    ensured = []
+    sink = _HealthySink()
+
+    def spawn(cfg, *, start_offset_seconds=0.0):
+        process = _FakeProcess()
+        processes.append(process)
+        return process
+
+    runtime = StationRuntime(process_factory=lambda *_args, **_kwargs: None)
+    runtime.ffmpeg_bin = "ffmpeg.exe"
+    runtime._icecast_sink = sink
+    monkeypatch.setattr(
+        runtime,
+        "_ensure_icecast_sink",
+        lambda _cfg, *, preserve_pcm=False: ensured.append(bool(preserve_pcm)) or True,
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_ensure_extra_icecast_sinks",
+        lambda _cfg, *, preserve_pcm=False: {},
+    )
+    monkeypatch.setattr(runtime, "_spawn_icecast_pcm_producer", spawn)
+    monkeypatch.setattr(runtime, "_start_icecast_pipe_worker", lambda *_args: None)
+    monkeypatch.setattr(runtime, "_start_silence_floor_worker", lambda: None)
+    monkeypatch.setattr(runtime, "_release_disabled_sinks", lambda _cfg: None)
+
+    cfg = replace(
+        _make_cfg(
+            input_uri="C:/music/same-song.flac",
+            local_output_enabled=False,
+        ),
+        stream_title="Same Song",
+        stream_artist="Same Artist",
+    )
+    runtime.start(cfg)
+    original_generation = runtime._playout_generation
+    original_process = runtime._process
+    original_signature = runtime._active_signature
+
+    runtime._program_fanout_inflight = 1
+    with pytest.raises(RuntimeError, match="forced producer restart precondition"):
+        runtime.start(
+            cfg,
+            force_restart=True,
+            expected_active_input_uri=cfg.input_uri,
+        )
+    assert runtime._process is original_process
+    runtime._program_fanout_inflight = 0
+    runtime._program_fanout_started_monotonic = None
+
+    runtime.start(
+        cfg,
+        force_restart=True,
+        expected_active_input_uri=cfg.input_uri,
+    )
+
+    assert original_process is processes[0]
+    assert original_process.terminated is True
+    assert runtime._process is processes[1]
+    assert runtime._playout_generation > original_generation
+    assert runtime._active_signature == original_signature
+    assert runtime.status()["active_input_uri"] == cfg.input_uri
+    assert runtime._icecast_sink is sink
+    assert ensured == [False, True]
+
+
+def test_producer_eof_waits_for_each_configured_output_fifo_to_drain():
+    class WatermarkSink:
+        def __init__(self, *, accepted=100, drained=100):
+            self.accepted = accepted
+            self.drained = drained
+
+        def pcm_drain_watermark(self):
+            return {
+                "epoch": 2,
+                "accepted_bytes": self.accepted,
+                "drained_bytes": self.drained,
+            }
+
+    class ExitedProducer:
+        returncode = 0
+
+        def poll(self):
+            return self.returncode
+
+    cfg = replace(
+        _make_cfg(local_output_enabled=False),
+        extra_icecast_outputs=({"enabled": True, "icecast_mount": "/backup"},),
+    )
+    runtime = StationRuntime(process_factory=lambda *_args, **_kwargs: None)
+    runtime._active_cfg = cfg
+    runtime._playout_generation = 4
+    runtime._icecast_sink = WatermarkSink()
+    backup = WatermarkSink(drained=0)
+    runtime._extra_icecast_sinks["icecast:/backup"] = backup
+
+    assert runtime._required_icecast_branches() == {
+        "icecast",
+        "icecast:/backup",
+    }
+    runtime._record_producer_exit(ExitedProducer(), 4, pcm_accepted=True)
+
+    assert runtime._producer_exit_drain_state(current=True) == (False, True)
+    backup.drained = backup.accepted
+    assert runtime._producer_exit_drain_state(current=True) == (True, False)
+
+
+def test_missing_configured_primary_prevents_backup_only_eof():
+    class WatermarkSink:
+        def pcm_drain_watermark(self):
+            return {"epoch": 1, "accepted_bytes": 12, "drained_bytes": 12}
+
+    class ExitedProducer:
+        returncode = 0
+
+        def poll(self):
+            return self.returncode
+
+    cfg = replace(
+        _make_cfg(local_output_enabled=False),
+        extra_icecast_outputs=({"enabled": True, "icecast_mount": "/backup"},),
+    )
+    runtime = StationRuntime(process_factory=lambda *_args, **_kwargs: None)
+    runtime._active_cfg = cfg
+    runtime._playout_generation = 9
+    runtime._icecast_sink = None
+    runtime._extra_icecast_sinks["icecast:/backup"] = WatermarkSink()
+
+    runtime._record_producer_exit(ExitedProducer(), 9, pcm_accepted=False)
+
+    assert "icecast" in runtime._required_icecast_branches()
+    assert runtime._producer_exit_pcm_accepted is False
+    assert runtime._producer_exit_drain_state(current=True) == (False, False)
+
+
+def test_reconnecting_sink_admission_counts_even_when_sink_process_is_down():
+    class ReconnectingSink:
+        def __init__(self):
+            self.accepted = 0
+            self.drained = 0
+
+        def write_pcm(self, chunk):
+            self.accepted += len(chunk)
+            return True
+
+        def is_running(self):
+            return False
+
+        def pcm_drain_watermark(self):
+            return {
+                "epoch": 3,
+                "accepted_bytes": self.accepted,
+                "drained_bytes": self.drained,
+            }
+
+    class ExitedProducer:
+        returncode = 0
+
+        def poll(self):
+            return self.returncode
+
+    runtime = StationRuntime(process_factory=lambda *_args, **_kwargs: None)
+    runtime._active_cfg = _make_cfg(local_output_enabled=False)
+    runtime._playout_generation = 6
+    sink = ReconnectingSink()
+    runtime._icecast_sink = sink
+
+    accepted = runtime._write_pcm_chunk_to_targets(
+        b"frame-held-for-reconnect",
+        [("icecast", sink)],
+        program_data=False,
+        generation=6,
+        required_branches={"icecast"},
+    )
+
+    assert accepted is True
+    assert runtime._router.is_output_active("icecast") is False
+    runtime._record_producer_exit(ExitedProducer(), 6, pcm_accepted=accepted)
+    assert runtime._producer_exit_pcm_accepted is True
+    assert runtime._producer_exit_drain_state(current=True) == (False, True)
+
+    sink.drained = sink.accepted
+    assert runtime._producer_exit_drain_state(current=True) == (True, False)
+
+
+def test_fanout_backpressure_is_reported_and_not_misclassified_as_decoder_stall():
+    runtime = StationRuntime(process_factory=lambda *_args, **_kwargs: None)
+    runtime._backend = "ffmpeg"
+    runtime._process = _FakeProcess()
+    runtime._icecast_sink = _HealthySink()
+    runtime._router.set_branch_health("icecast", True)
+    runtime._last_program_pcm_monotonic = time.monotonic() - 30.0
+    runtime._program_fanout_inflight = 1
+    runtime._program_fanout_started_monotonic = time.monotonic() - 1.0
+
+    status = runtime.status()
+
+    assert status["program_pcm_stalled"] is False
+    assert status["program_fanout_inflight"] is True
+    assert status["program_fanout_blocked"] is True
 
 
 def test_runtime_restarts_when_input_changes():
@@ -571,6 +997,9 @@ def test_runtime_uses_ffmpeg_transition_for_music_to_music_when_supported(monkey
         )
     )
     clock["value"] = 105.0
+    # Connector retries use the same fake clock in background threads. Pin
+    # this command-builder input instead of depending on their scheduling.
+    monkeypatch.setattr(runtime, "_current_offset_seconds", lambda: 5.0)
     runtime.start(
         _make_cfg(
             input_uri="C:/music/b.mp3",
@@ -594,6 +1023,17 @@ def test_runtime_uses_ffmpeg_transition_for_music_to_music_when_supported(monkey
     assert procs[1].terminated is False
     assert runtime.is_running() is True
     assert runtime._last_transition_mode == "crossfade"
+
+
+def test_current_program_offset_uses_monotonic_time_and_never_goes_negative(monkeypatch):
+    runtime = StationRuntime(process_factory=lambda *_args, **_kwargs: _FakeProcess())
+    clock = {"value": 105.0}
+    monkeypatch.setattr(runtime_module.time, "monotonic", lambda: clock["value"])
+    assert runtime._current_offset_seconds() == 0.0
+    runtime._active_started_monotonic = 100.0
+    assert runtime._current_offset_seconds() == 5.0
+    clock["value"] = 99.0
+    assert runtime._current_offset_seconds() == 0.0
 
 
 def test_runtime_defers_failed_transition_without_killing_current_source(monkeypatch):
@@ -638,6 +1078,39 @@ def test_runtime_defers_failed_transition_without_killing_current_source(monkeyp
     assert "-filter_complex" in launched[1]
     assert procs[0].terminated is False
     assert runtime.is_running() is True
+    assert runtime._last_transition_mode == "deferred"
+
+
+def test_runtime_defers_crossfade_until_decoder_has_buffered_pcm(monkeypatch):
+    _allow_fake_transition_paths(monkeypatch)
+    monkeypatch.setattr(runtime_module, "_CROSSFADE_PREWARM_SECONDS", 0.03)
+    procs = [_FakeProcess(), _FakeProcess()]
+    procs[1].stdout.peek_data = bytes(runtime_module._LIVE_MIX_CHUNK_BYTES - 1)
+
+    runtime = StationRuntime(process_factory=lambda *_args, **_kwargs: procs.pop(0))
+    runtime.ffmpeg_bin = "ffmpeg.exe"
+    runtime.start(
+        _make_cfg(
+            input_uri="C:/music/a.mp3",
+            track_type="music",
+            crossfade_seconds=3.0,
+            local_output_enabled=False,
+        )
+    )
+    current_process = runtime._process
+
+    with pytest.raises(RuntimeError, match="crossfade deferred"):
+        runtime.start(
+            _make_cfg(
+                input_uri="C:/music/b.mp3",
+                track_type="music",
+                crossfade_seconds=3.0,
+                local_output_enabled=False,
+            )
+        )
+
+    assert current_process is not None
+    assert current_process.terminated is False
     assert runtime._last_transition_mode == "deferred"
 
 
@@ -1081,7 +1554,7 @@ def test_stop_reaps_owned_process_when_active_reference_was_lost():
     assert runtime._owned_processes == []
 
 
-def test_primary_source_does_not_start_recurring_listener_probes(monkeypatch):
+def test_primary_source_keeps_listener_verification_outside_reconnect_loop(monkeypatch):
     captured = {}
 
     class Sink:
@@ -1097,4 +1570,33 @@ def test_primary_source_does_not_start_recurring_listener_probes(monkeypatch):
     cfg = _make_cfg(local_output_enabled=False)
     assert runtime._ensure_icecast_sink(cfg)
     assert captured["mount_probe"] is None
+    assert captured["decouple_input_backpressure"] is True
+    assert captured["probe_failure_threshold"] == 2
     assert captured["cfg"] is cfg
+
+
+def test_extra_source_keeps_listener_verification_outside_reconnect_loop(monkeypatch):
+    captured = {}
+
+    class Sink:
+        def __init__(self, *_args, **kwargs):
+            captured.update(kwargs)
+
+        def ensure_started(self, _cfg, **_kwargs):
+            pass
+
+        def is_running(self):
+            return True
+
+    monkeypatch.setattr(runtime_module, "IcecastAudioSink", Sink)
+    runtime = StationRuntime(process_factory=lambda *_args, **_kwargs: None)
+    runtime.ffmpeg_bin = "ffmpeg.exe"
+    cfg = replace(
+        _make_cfg(local_output_enabled=False),
+        extra_icecast_outputs=({"enabled": True, "icecast_mount": "/backup"},),
+    )
+
+    assert runtime._ensure_extra_icecast_sinks(cfg) == {"icecast:/backup": True}
+    assert captured["mount_probe"] is None
+    assert captured["decouple_input_backpressure"] is True
+    assert captured["probe_failure_threshold"] == 2

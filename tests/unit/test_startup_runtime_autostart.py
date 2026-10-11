@@ -32,6 +32,16 @@ def _capture_worker_loop_start(monkeypatch):
     return started
 
 
+def test_normal_startup_does_not_apply_a_legacy_codec_migration(monkeypatch):
+    calls = []
+    _capture_worker_loop_start(monkeypatch)
+    monkeypatch.delenv('CLEANROOM_ENABLE_LEGACY_CODEC_MIGRATION', raising=False)
+    monkeypatch.setattr('app.services.codec_migration.migrate_ogg_outputs_to_he_aac', lambda *a, **k: calls.append(True) or {})
+    with TestClient(app) as client:
+        assert client.get('/api/health').status_code == 200
+    assert calls == []
+
+
 def test_lifespan_keeps_default_station_stopped_until_operator_enables_autostart(
     tmp_path, monkeypatch
 ):

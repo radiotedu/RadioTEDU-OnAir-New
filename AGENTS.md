@@ -9,7 +9,7 @@ Required safeguards:
 - Prefer durable UI controls with persisted read-back for routine operator tasks.
 - Never create or restore a `/radiotedu` mount.
 - Never source `/en` or `/fr` from this OnAir instance.
-- Current protected production mode sources exactly six unsuffixed mounts from this PC: `/classic`, `/lofi`, `/radio`, `/cazz`, `/rock`, and `/energize`, all Opus 192 kbps. Keep every `-low`, `-normal`, `-high`, and `-flac` quality output persisted disabled until the operator explicitly requests re-enabling them. Origin listener health is evidence only and must never auto-disable a source.
+- Read the actual persisted station/output roster before an upgrade. Preserve enabled mounts, codecs, bitrates, quality branches and live-folder roots exactly; historical commissioning lists must not disable or synthesize outputs. Current commissioned station workers include IDs 1, 2, 4, 5, 8, 9, 10 and 11. Origin listener health is evidence only and must never auto-disable a source.
 - Do not expose protected `.env`, vault, token, password, or signing-secret values.
 - Do not call a mount live from TCP connectivity alone; require decoded audio bytes.
 - Run focused Python tests and all JavaScript tests before restarting `RadioTEDU.OnAir.Supervisor`.

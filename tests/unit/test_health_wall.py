@@ -4,6 +4,23 @@ from app.api import health_wall
 from app.main import app
 
 
+class _ClientAddressApp:
+    """Override the synthetic client address across Starlette versions."""
+
+    def __init__(self, inner, host: str):
+        self.inner = inner
+        self.host = host
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") == "http":
+            scope = {**scope, "client": (self.host, 50000)}
+        await self.inner(scope, receive, send)
+
+
+def _client_for_host(host: str) -> TestClient:
+    return TestClient(_ClientAddressApp(app, host))
+
+
 def _reset_cache(monkeypatch):
     monkeypatch.setattr(health_wall, "_fast_cache", None)
     monkeypatch.setattr(health_wall, "_slow_cache", None)
@@ -22,12 +39,12 @@ def test_passwordless_snapshot_is_loopback_only(monkeypatch):
         lambda: {"library": {}, "integrations": {}, "services": {"items": []}},
     )
 
-    with TestClient(app, client=("127.0.0.1", 50000)) as client:
+    with _client_for_host("127.0.0.1") as client:
         response = client.get("/api/monitor/snapshot")
     assert response.status_code == 200
     assert response.json()["stations"][0]["name"] == "RadioTEDU EN"
 
-    with TestClient(app, client=("203.0.113.10", 50000)) as client:
+    with _client_for_host("203.0.113.10") as client:
         response = client.get("/api/monitor/snapshot")
     assert response.status_code == 403
     assert response.json()["detail"] == "health_wall_loopback_only"
@@ -50,7 +67,7 @@ def test_snapshot_uses_fast_and_slow_cache_tiers(monkeypatch):
     monkeypatch.setattr(health_wall, "_FAST_CACHE_TTL_SECONDS", 60.0)
     monkeypatch.setattr(health_wall, "_SLOW_CACHE_TTL_SECONDS", 60.0)
 
-    with TestClient(app, client=("::1", 50000)) as client:
+    with _client_for_host("::1") as client:
         first = client.get("/api/monitor/snapshot")
         second = client.get("/api/monitor/snapshot")
 

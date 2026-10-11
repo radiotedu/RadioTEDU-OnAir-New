@@ -7,6 +7,7 @@ import pytest
 
 from app import db as database
 from app.services.music_usage import HASH_PAYLOAD_COLUMNS, MusicUsageService
+from app.db_commit_batch import commit_batch
 
 
 def _db():
@@ -80,6 +81,29 @@ def test_completed_play_is_hash_chained_and_idempotent():
     assert conn.execute("SELECT COUNT(*) FROM music_usage_log").fetchone()[0] == 1
     with pytest.raises(sqlite3.DatabaseError):
         conn.execute("UPDATE music_usage_log SET work_title='tampered' WHERE id=1")
+
+
+def test_usage_notification_waits_for_enclosing_commit(monkeypatch):
+    conn = _db()
+    notified = []
+    monkeypatch.setattr("app.services.music_usage.request_music_usage_export", lambda: notified.append(not conn.in_transaction))
+    with commit_batch(conn) as grouped:
+        record = MusicUsageService(grouped).record_completed_play(station_id=2, track_id=1, queue_item_id=56)
+        assert record["log_id"] == "queue:56"
+        assert notified == []
+    assert notified == [True]
+
+
+def test_usage_notification_is_not_sent_for_aborted_group(monkeypatch):
+    conn = _db()
+    notified = []
+    monkeypatch.setattr("app.services.music_usage.request_music_usage_export", lambda: notified.append(True))
+    with pytest.raises(RuntimeError, match="abort group"):
+        with commit_batch(conn) as grouped:
+            MusicUsageService(grouped).record_completed_play(station_id=2, track_id=1, queue_item_id=57)
+            raise RuntimeError("abort group")
+    assert notified == []
+    assert conn.execute("SELECT COUNT(*) FROM music_usage_log").fetchone()[0] == 0
 
 
 def test_csv_export_and_month_close_are_deterministic(tmp_path: Path):
@@ -228,7 +252,7 @@ def test_schema_v20_creates_reporting_and_campaign_tables(tmp_path, monkeypatch)
             "genre_voting_rounds",
             "genre_votes",
         } <= tables
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 20
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == database._SCHEMA_VERSION
 
 
 def test_schema_v20_repairs_missing_delivered_variants_without_rewriting_usage(

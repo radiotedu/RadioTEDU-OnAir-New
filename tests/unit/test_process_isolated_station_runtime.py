@@ -452,7 +452,6 @@ def test_worker_process_owns_local_runtime_and_writes_final_heartbeat(
         "app.engine.process_worker_child._configure_logging",
         lambda *_args: logging.getLogger("test-station-worker"),
     )
-    monkeypatch.setattr("app.engine.process_worker_child.init_db", lambda: None)
     monkeypatch.setattr(
         "app.engine.process_worker_child.RemoteRuntimeRegistry",
         lambda **_kwargs: (_ for _ in ()).throw(OSError("backend unavailable")),
@@ -480,9 +479,16 @@ def test_worker_liveness_requires_current_program_audio():
         "program_pcm_stalled": False,
         "required_outputs": {"icecast": True, "local": False},
         "icecast_mount_health": {
+            "mount_healthy": True,
+            "remote_mount_verified": True,
             "last_write_age_seconds": 0.1,
+            "last_network_write_age_seconds": 0.1,
             "process_running": True,
+            "network_failed": False,
             "writer_backpressured": False,
+            "writer_backpressure_age_seconds": 0.0,
+            "queued_pcm_seconds": 5.0,
+            "pcm_queue_capacity_chunks": 1024,
             "writer_failed": False,
             "writer_running": True,
         },
@@ -496,6 +502,27 @@ def test_worker_liveness_requires_current_program_audio():
             "icecast_mount_health": {
                 **healthy["icecast_mount_health"],
                 "writer_backpressured": True,
+                "writer_backpressure_age_seconds": 60.0,
+            },
+        }
+    ) is True
+    assert _transport_is_healthy(
+        {
+            **healthy,
+            "icecast_mount_health": {
+                **healthy["icecast_mount_health"],
+                "writer_backpressured": True,
+                "writer_backpressure_age_seconds": 60.0,
+                "queued_pcm_seconds": 21.0,
+            },
+        }
+    ) is False
+    assert _transport_is_healthy(
+        {
+            **healthy,
+            "icecast_mount_health": {
+                **healthy["icecast_mount_health"],
+                "last_network_write_age_seconds": 8.0,
             },
         }
     ) is False

@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from math import pow
+import sys
 
 from app.audio.virtual_sources import is_silence_input_uri
 
@@ -247,7 +248,11 @@ def build_gst_pipeline(cfg: StationPipelineConfig) -> str:
             "t. ! queue ! audioconvert ! audioresample "
             f"! volume volume={_db_to_linear(cfg.output_gain_db):.6f} "
         )
-        if cfg.output_device_id:
+        if sys.platform != 'win32':
+            if cfg.output_device_id not in {'', 'default'}:
+                raise ValueError('Use the system default local output on Linux/macOS')
+            local += '! autoaudiosink'
+        elif cfg.output_device_id:
             local += f'! wasapisink device="{_q(cfg.output_device_id)}"'
         else:
             local += "! wasapisink"

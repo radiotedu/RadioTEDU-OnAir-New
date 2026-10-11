@@ -13,11 +13,11 @@ PCM_CHUNK_BYTES = 4096
 
 
 class MicSession:
-    def __init__(self, station_id: int, max_buffer_bytes: int = 96000) -> None:
+    def __init__(self, station_id: int, max_buffer_bytes: int = 96000, *, require_decoder: bool = True) -> None:
         self.station_id = int(station_id)
         self.max_buffer_bytes = max(PCM_CHUNK_BYTES, int(max_buffer_bytes))
         self.ffmpeg_bin = resolve_binary("ffmpeg.exe") or resolve_binary("ffmpeg")
-        if not self.ffmpeg_bin:
+        if require_decoder and not self.ffmpeg_bin:
             raise FileNotFoundError("ffmpeg")
         self._process = None
         self._reader_thread = None

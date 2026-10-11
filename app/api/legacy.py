@@ -7,6 +7,7 @@ import shutil
 import sqlite3
 import struct
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -4025,7 +4026,9 @@ def _canonical_library_path(value: str | Path) -> str:
         resolved = path.resolve(strict=False)
     except (OSError, RuntimeError):
         resolved = path.absolute()
-    return str(resolved).replace("/", "\\").casefold()
+    if sys.platform == 'win32':
+        return str(resolved).replace("/", "\\").casefold()
+    return str(resolved)
 
 
 def _windows_process_session_id() -> int | None:
@@ -4292,15 +4295,20 @@ def _sync_station_library_folder_with_connection(
             return guard_result
 
     extensions = audio_upload_extensions()
-    iterator = base.rglob("*") if bool(payload.recursive) else base.iterdir()
+    from app.services.managed_media_scan import scan_managed_media
+    try:
+        inventory = scan_managed_media(base, recursive=bool(payload.recursive), extensions=extensions)
+    except OSError as exc:
+        raise HTTPException(status_code=409, detail='managed_folder_scan_incomplete') from exc
+    iterator = (path for path, _ in inventory)
     candidates_by_path: dict[str, Path] = {}
     for path in iterator:
         try:
-            if not path.is_file() or path.suffix.lower() not in extensions:
-                continue
+            if not path.is_file():
+                raise OSError('Managed media disappeared during inventory validation')
             resolved = path.resolve(strict=True)
-        except OSError:
-            continue
+        except OSError as exc:
+            raise HTTPException(status_code=409, detail='managed_folder_scan_incomplete') from exc
         candidates_by_path.setdefault(_canonical_library_path(resolved), resolved)
 
     candidates = [candidates_by_path[key] for key in sorted(candidates_by_path)]

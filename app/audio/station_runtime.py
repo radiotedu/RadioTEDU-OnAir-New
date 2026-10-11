@@ -1386,11 +1386,21 @@ class StationRuntime:
                 except Exception:
                     pass
                 effect_pcm = self._sound_effect_player.read_pcm(len(chunk) // 2)
+                mix_settings = self._live_audio_settings()
+                live = self._live_snapshot()
+                # A disconnected/stalled microphone must never leave a music
+                # bed permanently ducked or muted. Music remains the fallback.
+                try:
+                    guest_on_air = self._guest_audio_provider().has_on_air(int(self._live_station_id() or 0))
+                except Exception:
+                    guest_on_air = False
+                if not live.get("receiving") and not guest_on_air:
+                    mix_settings["program_music_mode"] = "normal"
                 mixed = self._live_audio_mixer.mix_pcm_chunk(
                     chunk,
                     mic_pcm,
                     effect_pcm=effect_pcm,
-                    **self._live_audio_settings(),
+                    **mix_settings,
                 )
                 self._write_live_mix_chunk(mixed, generation)
                 if self._should_use_live_mix():

@@ -58,7 +58,7 @@ The operator panel exposes enable/public controls and immutable canonical mount/
 
 ## Phased live acceptance
 
-1. Restart TinyIce at `10.98.98.75` and require two responsive root/status checks with zero source churn.
+1. Restart TinyIce at `<tinyice-lan-host>` and require two responsive root/status checks with zero source churn.
 2. Start all eight legacy sources and record continuous decode/audibility plus baseline codec/metadata evidence.
 3. Verify at least 32 source slots (40 recommended); store evidence rather than a desired number.
 4. Canary Lo-Fi low/normal. Verify exact AAC-LC rate, metadata suppression, synchronization, stable queues, listener bytes, CPU, memory, and uplink.

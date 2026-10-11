@@ -4,6 +4,11 @@ This is the canonical change map for RadioTEDU OnAir. It is written so an operat
 
 ## Non-negotiable production invariants
 
+For the 1.1.0 microphone/portable release, use the persisted roster on the target
+PC as the authority. The mount and codec lists below describe an earlier
+commissioning plan; an upgrade must not impose them on a different saved plan.
+See [the release rollout contract](RELEASE_1_1_0.md).
+
 - The operator commissioned eight primary mounts: `/classic`, `/lofi`, `/radio`, `/cazz`, `/rock`, `/energize`, `/situation`, and `/maincharacter`, using AAC LC 192 kbps. Preserve all eight stations.
 - Preserve the eight enabled quality variants: six HE-AACv2 64 kbps `-low` outputs and `/classic-flac` plus `/cazz-flac` Ogg FLAC. The current local plan is 16 outputs. Never disable a commissioned output or lower its quality to resolve load or delivery problems.
 - `/radiotedu` is not a real mount and must remain absent.

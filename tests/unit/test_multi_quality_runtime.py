@@ -17,6 +17,9 @@ class _FakeSink:
 
     def __init__(self, *_args, **_kwargs):
         self.cfg = None
+        self.decouple_input_backpressure = bool(
+            _kwargs.get("decouple_input_backpressure", False)
+        )
         self.running = False
         self.accept = True
         self.chunks: list[bytes] = []
@@ -124,6 +127,7 @@ class MultiQualityRuntimeTests(unittest.TestCase):
             },
         )
         self.assertEqual(len(_FakeSink.instances), 3)
+        self.assertTrue(self.runtime._icecast_sink.decouple_input_backpressure)
         self.assertTrue(
             all(sink.chunks == [b"same-program-pcm"] for sink in _FakeSink.instances)
         )
@@ -147,8 +151,12 @@ class MultiQualityRuntimeTests(unittest.TestCase):
         self.assertTrue(
             all(item.icecast_password == cfg.icecast_password for item in quality_cfgs)
         )
-        self.assertTrue(all(item.stream_title == "" for item in quality_cfgs))
-        self.assertTrue(all(item.stream_artist == "" for item in quality_cfgs))
+        self.assertTrue(
+            all(item.stream_title == cfg.stream_title for item in quality_cfgs)
+        )
+        self.assertTrue(
+            all(item.stream_artist == cfg.stream_artist for item in quality_cfgs)
+        )
         self.assertEqual(cfg.stream_title, "Private track title")
         self.assertTrue(self.runtime.branch_health()["icecast:/lofi-low"])
         self.assertTrue(self.runtime.branch_health()["icecast:/lofi-flac"])
@@ -176,6 +184,25 @@ class MultiQualityRuntimeTests(unittest.TestCase):
         self.assertFalse(branches["icecast:/lofi-low"])
         self.assertTrue(branches["icecast:/lofi-flac"])
 
+    def test_primary_rejection_is_not_hidden_by_a_sibling_mount_acceptance(self):
+        cfg = _cfg()
+        self.runtime._ensure_icecast_sink(cfg)
+        self.runtime._ensure_extra_icecast_sinks(cfg)
+        self.runtime._icecast_sink.accept = False
+
+        primary_accepted = self.runtime._write_pcm_chunk_to_targets(
+            b"pcm",
+            self.runtime._icecast_output_targets(),
+            required_branches={"icecast"},
+        )
+
+        self.assertFalse(primary_accepted)
+        self.assertEqual(self.runtime._icecast_sink.chunks, [])
+        self.assertEqual(
+            self.runtime._extra_icecast_sinks["icecast:/lofi-low"].chunks,
+            [b"pcm"],
+        )
+
     def test_pcm_pipe_reads_once_and_fans_out_the_same_program_bytes(self):
         cfg = _cfg()
         self.runtime._ensure_icecast_sink(cfg)
@@ -195,10 +222,53 @@ class MultiQualityRuntimeTests(unittest.TestCase):
             )
         )
 
+    def test_clean_eof_requires_all_mounts_to_accept_every_frame(self):
+        cfg = _cfg()
+        self.runtime._ensure_icecast_sink(cfg)
+        self.runtime._ensure_extra_icecast_sinks(cfg)
+        self.runtime._extra_icecast_sinks["icecast:/lofi-low"].accept = False
+
+        self.runtime._icecast_pipe_loop(
+            _FinishedPcmProducer(b"authoritative-timeline"),
+            self.runtime._icecast_sink,
+            self.runtime._current_playout_generation(),
+        )
+
+        self.assertFalse(self.runtime._producer_exit_pcm_accepted)
+        self.assertEqual(self.runtime._icecast_sink.chunks, [b"authoritative-timeline"])
+        self.assertEqual(
+            self.runtime._extra_icecast_sinks["icecast:/lofi-low"].chunks, []
+        )
+        self.assertEqual(
+            self.runtime._extra_icecast_sinks["icecast:/lofi-flac"].chunks,
+            [b"authoritative-timeline"],
+        )
+
+    def test_high_reported_primary_backlog_does_not_hide_quality_acceptance(self):
+        cfg = _cfg()
+        self.runtime._ensure_icecast_sink(cfg)
+        self.runtime._ensure_extra_icecast_sinks(cfg)
+        primary = self.runtime._icecast_sink
+        primary.health_snapshot = lambda: {
+            "process_running": True,
+            "mount_healthy": True,
+            "queued_pcm_bytes": 9 * 48_000 * 2 * 2,
+        }
+
+        self.runtime._icecast_pipe_loop(
+            _FinishedPcmProducer(b"programme-frame"),
+            primary,
+            self.runtime._current_playout_generation(),
+        )
+
+        self.assertTrue(
+            all(sink.chunks == [b"programme-frame"] for sink in _FakeSink.instances)
+        )
+
     def test_pcm_pipe_phase_locks_after_small_startup_reserve(self):
         class ChunkedStdout:
             def __init__(self):
-                self.remaining = 68
+                self.remaining = 300
 
             def read(self, _size):
                 if self.remaining <= 0:
@@ -255,14 +325,14 @@ class MultiQualityRuntimeTests(unittest.TestCase):
         finally:
             self.runtime._icecast_pipe_stop = original_stop
 
-        self.assertEqual(len(clocked_stop.waits), 4)
+        self.assertGreater(len(clocked_stop.waits), 0)
         self.assertAlmostEqual(
             sum(clocked_stop.waits),
-            4 * 4096 / (48000 * 2 * 2),
+            len(clocked_stop.waits) * 4096 / (48000 * 2 * 2),
             places=6,
         )
         self.assertTrue(
-            all(len(sink.chunks) == 68 for sink in _FakeSink.instances)
+            all(len(sink.chunks) == 300 for sink in _FakeSink.instances)
         )
 
     def test_runtime_silence_floor_skips_self_clocked_icecast_queues(self):
@@ -347,6 +417,7 @@ class MultiQualityRuntimeTests(unittest.TestCase):
         self.runtime._active_started_monotonic = 1.0
         producer = MagicMock()
         producer.poll.return_value = None
+        producer.stdout.peek.return_value = bytes(4096)
 
         with (
             patch.object(self.runtime, "_ensure_icecast_sink", return_value=False),

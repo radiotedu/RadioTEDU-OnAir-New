@@ -1,6 +1,8 @@
 import os
+import json
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 from app.audio import ffmpeg_pipeline
 
@@ -163,3 +165,45 @@ def test_recreated_cache_entry_gets_fresh_lru_timestamp(tmp_path: Path, monkeypa
     Path(cached_uri).unlink()
     assert ffmpeg_pipeline._resolve_fast_cached_uri(str(source)) == cached_uri
     assert Path(cached_uri).stat().st_mtime > old_time + 3000
+
+
+def test_site_cache_policy_persists_larger_budget_and_free_space_reserve(tmp_path, monkeypatch):
+    monkeypatch.setattr(ffmpeg_pipeline, "FAST_AUDIO_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setattr(ffmpeg_pipeline, "_FAST_AUDIO_CACHE_POLICY_CACHE", None)
+    monkeypatch.delenv("CLEANROOM_FAST_AUDIO_CACHE_MAX_BYTES", raising=False)
+    policy = {"max_bytes": 64 * 1024**3, "minimum_free_bytes": 32 * 1024**3}
+    (tmp_path / "fast-audio-cache-policy.json").write_text(json.dumps(policy), encoding="utf-8")
+    assert ffmpeg_pipeline._fast_cache_max_bytes() == policy["max_bytes"]
+    assert ffmpeg_pipeline._fast_cache_policy()["minimum_free_bytes"] == policy["minimum_free_bytes"]
+    monkeypatch.setenv("CLEANROOM_FAST_AUDIO_CACHE_MAX_BYTES", str(8 * 1024**3))
+    assert ffmpeg_pipeline._fast_cache_max_bytes() == 8 * 1024**3
+
+
+def test_low_free_space_keeps_library_path_and_does_not_copy(tmp_path, monkeypatch):
+    source = tmp_path / "source.mp3"
+    source.write_bytes(b"audio")
+    monkeypatch.setattr(ffmpeg_pipeline, "FAST_AUDIO_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setattr(ffmpeg_pipeline.os.path, "splitdrive", lambda p: ("H:", str(p)))
+    monkeypatch.setattr(ffmpeg_pipeline, "request_fast_audio_cache_prune", lambda: None)
+    monkeypatch.setattr(ffmpeg_pipeline.shutil, "disk_usage", lambda p: SimpleNamespace(free=10))
+    monkeypatch.setattr(ffmpeg_pipeline, "_fast_cache_policy", lambda: {"max_bytes": 64 * 1024**3, "minimum_free_bytes": 100})
+    def unexpected_copy(*args, **kwargs):
+        raise AssertionError("Cache copy must respect the free-space reserve")
+    monkeypatch.setattr(ffmpeg_pipeline.shutil, "copy2", unexpected_copy)
+    assert ffmpeg_pipeline._resolve_fast_cached_uri(str(source)) == str(source)
+    assert source.read_bytes() == b"audio"
+
+
+def test_pruning_accounts_for_existing_cache_when_free_space_is_low(tmp_path, monkeypatch):
+    monkeypatch.setattr(ffmpeg_pipeline, "FAST_AUDIO_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(ffmpeg_pipeline, "_fast_cache_policy", lambda: {"max_bytes": 10000, "minimum_free_bytes": 4096})
+    monkeypatch.setattr(ffmpeg_pipeline.shutil, "disk_usage", lambda p: SimpleNamespace(free=2048))
+    for i in range(4):
+        entry = tmp_path / f"old-{i}.mp3"
+        entry.write_bytes(b"x" * 1024)
+        old_time = time.time() - 3600
+        os.utime(entry, (old_time, old_time))
+    result = ffmpeg_pipeline.prune_fast_audio_cache(max_bytes=10000, min_age_seconds=0)
+    assert result["target_bytes"] == 2048
+    assert result["after_bytes"] == 2048
+    assert result["deleted_files"] == 2

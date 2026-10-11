@@ -78,3 +78,23 @@ def test_live_render_api_start_chunk_stop(client, admin_token_headers):
     assert stop_response.json()["transmitting"] is False
     live_mic_registry.reset()
     live_mic_registry._render_session_factory = original_factory
+
+
+def test_native_microphone_api_accepts_aligned_pcm_and_rejects_bad_packets(client, admin_token_headers):
+    from app.audio.native_pcm_session import NativePcmSession
+    live_mic_registry.reset()
+    try:
+        assert client.post('/api/studios/1/join', headers=admin_token_headers).status_code == 200
+        started = client.post('/api/audio/live/render/start', headers=admin_token_headers,
+                              json={'station_id': 1, 'sample_rate': 48000, 'input_format': 's16le', 'channels': 1})
+        assert started.status_code == 200
+        assert isinstance(live_mic_registry._state_for(1)['render_session'], NativePcmSession)
+        for packet in (b'\x01', b'\x00' * 9602):
+            rejected = client.post('/api/audio/live/render/chunk?station_id=1', headers=admin_token_headers, content=packet)
+            assert rejected.status_code == 400
+        accepted = client.post('/api/audio/live/render/chunk?station_id=1', headers=admin_token_headers, content=b'\x01\x00' * 4800)
+        assert accepted.status_code == 200
+        assert accepted.json()['receiving']
+        assert accepted.json()['buffer_bytes'] <= 38400
+    finally:
+        live_mic_registry.reset()

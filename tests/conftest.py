@@ -69,6 +69,8 @@ def login_and_get_headers(client: TestClient, username: str, password: str) -> d
 def _ensure_user(username: str, display_name: str, password: str, role: str) -> None:
     from app.auth.password import hash_password
     from app.db import get_connection, init_db
+    from app.api.users import _legacy_role_template_ids
+    from app.repositories.rbac_repo import RbacRepository
     from app.repositories.user_repo import UserRepository
 
     init_db()
@@ -78,13 +80,20 @@ def _ensure_user(username: str, display_name: str, password: str, role: str) -> 
         existing = repo.get_user_by_username(username)
         if existing is None:
             repo.create_user(username, display_name, hash_password(password), role)
-            return
-        repo.update_user(
+            existing = repo.get_user_by_username(username)
+        else:
+            repo.update_user(
+                int(existing["id"]),
+                display_name=display_name,
+                password_hash=hash_password(password),
+                role=role,
+                is_active=1,
+            )
+            existing = repo.get_user_by_username(username)
+        rbac = RbacRepository(conn)
+        rbac.replace_user_roles(
             int(existing["id"]),
-            display_name=display_name,
-            password_hash=hash_password(password),
-            role=role,
-            is_active=1,
+            _legacy_role_template_ids(rbac, role),
         )
     finally:
         conn.close()
@@ -114,6 +123,12 @@ def _auto_auth_testclient(monkeypatch, tmp_path):
         if not skip_auto_auth and _should_auto_auth(path) and not has_auth:
             token = str(getattr(self, "_cleanroom_test_admin_token", "") or "")
             if not token:
+                # Legacy direct TestClient instances do not enter their
+                # lifespan context, so initialize the isolated schema before
+                # the fixture's login request reaches session cleanup.
+                from app.db import init_db
+
+                init_db()
                 login_response = original_request(
                     self,
                     "POST",

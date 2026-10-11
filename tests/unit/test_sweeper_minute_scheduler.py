@@ -112,7 +112,7 @@ def test_minute_scheduler_does_not_insert_before_completed_song_duration_crosses
     assert int(count) == 0
 
 
-def test_due_jingle_is_followed_by_global_ad_and_never_borrowed_from_another_station(
+def test_due_jingle_does_not_insert_unplanned_ads_from_catalog_or_another_station(
     tmp_path, monkeypatch
 ):
     monkeypatch.setenv("CLEANROOM_DB_PATH", str(tmp_path / "cleanroom.db"))
@@ -155,6 +155,5 @@ def test_due_jingle_is_followed_by_global_ad_and_never_borrowed_from_another_sta
     ).fetchall()
     assert [(int(row["track_id"]), row["track_type"]) for row in pending] == [
         (jingle, "jingle"),
-        (ad, "ad"),
         (upcoming, "music"),
     ]
