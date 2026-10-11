@@ -50,8 +50,12 @@ jobs:
           fi
           "$executable" --help
       - name: Upload portable setup artifact
+        run: python installer/package_portable.py dist/RadioTEDU-OnAir --output release --platform ${{ runner.os }} --arch ${{ runner.arch }}
+      - name: Upload portable archive
         uses: actions/upload-artifact@v4
         with:
           name: RadioTEDU-OnAir-${{ runner.os }}-${{ runner.arch }}
-          path: dist/RadioTEDU-OnAir/
+          path: |
+            release/*.zip
+            release/*.tar.gz
           if-no-files-found: error

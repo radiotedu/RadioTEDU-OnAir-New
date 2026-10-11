@@ -5,7 +5,7 @@ from app.services.managed_library_watcher import ManagedLibraryProfile, _default
 
 
 def test_live_folder_appends_new_music_once_and_removes_only_future_retired_music(client, tmp_path, monkeypatch):
-    monkeypatch.setattr('app.api.legacy._get_audio_metadata', lambda p: {'title': Path(p).stem, 'duration': 120, 'artist': '', 'album': ''})
+    monkeypatch.setattr('app.api.legacy._get_audio_metadata', lambda p, **kwargs: {'title': Path(p).stem, 'duration': 120, 'artist': '', 'album': ''})
     folder = tmp_path / 'music'
     folder.mkdir()
     current = folder / 'Current.mp3'
