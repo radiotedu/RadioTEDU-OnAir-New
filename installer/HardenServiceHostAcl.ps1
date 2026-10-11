@@ -12,6 +12,9 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+# Use this host's ACL cmdlets even when a different PowerShell version supplied
+# PSModulePath. This retains the same ACL policy and verification.
+Import-Module (Join-Path $PSHOME 'Modules/Microsoft.PowerShell.Security') -ErrorAction Stop
 
 $systemSid = [System.Security.Principal.SecurityIdentifier]::new("S-1-5-18")
 $administratorsSid = [System.Security.Principal.SecurityIdentifier]::new("S-1-5-32-544")

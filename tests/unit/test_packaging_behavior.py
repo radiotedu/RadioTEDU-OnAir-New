@@ -156,7 +156,6 @@ if ($Args.Count -ge 2 -and $Args[0] -eq '-m' -and $Args[1] -eq 'PyInstaller') {
     )
 
     env = dict(os.environ)
-    env["PSModulePath"] = str(Path(os.environ.get("WINDIR", r"C:\Windows")) / "System32" / "WindowsPowerShell" / "v1.0" / "Modules")
     env["PATH"] = str(tools_dir) + os.pathsep + env.get("PATH", "")
 
     result = subprocess.run(

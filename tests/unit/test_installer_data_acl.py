@@ -60,7 +60,6 @@ def test_data_acl_helper_removes_builtin_users_access_recursively(tmp_path):
         check=False,
         capture_output=True,
         text=True,
-        env=powershell_env,
     )
 
     assert hardened.returncode == 0, hardened.stdout + hardened.stderr

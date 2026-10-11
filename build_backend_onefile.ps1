@@ -3,6 +3,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+# A PowerShell 7 caller can pass a module path without Windows PowerShell's
+# built-in Utility module. Load the current host's trusted module explicitly.
+Import-Module (Join-Path $PSHOME 'Modules/Microsoft.PowerShell.Utility') -ErrorAction Stop
 $BackendExeName = "RadioTEDU-OnAir-Backend"
 $MiniMonitorExeName = "RadioTEDU-OnAir-MiniMonitor"
 $BackendEntrypoint = "run_cleanroom.py"
