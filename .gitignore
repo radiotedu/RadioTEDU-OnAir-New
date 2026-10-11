@@ -44,6 +44,7 @@ build/
 dist/
 release/
 .venv/
+.ci-venv/
 .feature-deps/
 .test-output/
 .venv-omnivoice/

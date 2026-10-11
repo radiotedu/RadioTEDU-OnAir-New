@@ -4,7 +4,7 @@ from app.api.legacy import LibraryFolderSyncPayload, sync_station_library_folder
 from app.services.managed_library_watcher import ManagedLibraryProfile, _default_sync_callback
 
 
-def test_live_folder_appends_new_music_once_and_removes_only_future_retired_music(client, tmp_path, monkeypatch):
+def test_live_folder_appends_new_music_once_and_removes_only_future_retired_music(tmp_path, monkeypatch):
     monkeypatch.setattr('app.api.legacy._get_audio_metadata', lambda p, **kwargs: {'title': Path(p).stem, 'duration': 120, 'artist': '', 'album': ''})
     folder = tmp_path / 'music'
     folder.mkdir()
@@ -14,6 +14,9 @@ def test_live_folder_appends_new_music_once_and_removes_only_future_retired_musi
     retired.write_bytes(b'retired')
     sync_station_library_folder(LibraryFolderSyncPayload(station_id=1, folder=str(folder), mode='replace'))
     conn = get_connection()
+    # The initial import may replenish an empty station queue. Define the
+    # playing/pending state explicitly before exercising the folder watcher.
+    conn.execute('DELETE FROM queue_items WHERE station_id=1')
     ids = {row['title']: row['id'] for row in conn.execute('SELECT id, title FROM tracks WHERE station_id=1')}
     conn.execute("INSERT INTO queue_items (station_id, track_id, position, status) VALUES (1, ?, 1, 'playing')", (ids['Current'],))
     conn.execute("INSERT INTO queue_items (station_id, track_id, position, status) VALUES (1, ?, 2, 'pending')", (ids['Retired'],))
