@@ -9,7 +9,7 @@ from app.repositories.station_repo import StationRepository
 def _capture_worker_loop_start(monkeypatch):
     started = []
 
-    def _fake_start(*, station_id, fallback_uri="", interval_sec=1.0):
+    def _fake_start(*, station_id, fallback_uri="", interval_sec=1.0, readiness_timeout_seconds=45.0):
         started.append(
             {
                 "station_id": int(station_id),
@@ -30,6 +30,16 @@ def _capture_worker_loop_start(monkeypatch):
     monkeypatch.setattr("app.main.bootstrap_dependencies", lambda: {})
     monkeypatch.setattr("app.api.runtime.worker_loop_manager.start", _fake_start)
     return started
+
+
+def test_normal_startup_does_not_apply_a_legacy_codec_migration(monkeypatch):
+    calls = []
+    _capture_worker_loop_start(monkeypatch)
+    monkeypatch.delenv('CLEANROOM_ENABLE_LEGACY_CODEC_MIGRATION', raising=False)
+    monkeypatch.setattr('app.services.codec_migration.migrate_ogg_outputs_to_he_aac', lambda *a, **k: calls.append(True) or {})
+    with TestClient(app) as client:
+        assert client.get('/api/health').status_code == 200
+    assert calls == []
 
 
 def test_lifespan_keeps_default_station_stopped_until_operator_enables_autostart(

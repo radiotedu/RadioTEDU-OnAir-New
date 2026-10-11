@@ -5,14 +5,16 @@
 <h1 align="center">RadioTEDU OnAir</h1>
 
 <p align="center">
-  Deterministic, operator-controlled radio automation for Windows.
+  Deterministic, operator-controlled radio automation for Windows, Linux and macOS.
 </p>
 
 <p align="center">
   <img src="docs/assets/radiotedu-logo-card.png" width="260" alt="RadioTEDU">
 </p>
 
-RadioTEDU OnAir is the standalone product path for deterministic Windows radio automation. It is the single supported product path in this repository. It combines the FastAPI playout engine, RadioTEDU operator wall, embedded desktop shell, tray agent, Icecast/local output, queue, jingles, optional AI host, emergency browser-audio takeover, and real-time forecast in one installable product. It replaces the older RadioTEDU Broadcast Wall while preserving compatible data through an explicit, reviewable migration. The separate rtAI application is not built, packaged, or installed from this checkout.
+RadioTEDU OnAir combines the FastAPI playout engine, operator wall, independent station workers, Icecast/local output, queue, jingles, optional AI host and emergency audio. The Windows desktop shell and service installer remain available; Linux and macOS use the browser panel and portable launcher. See [cross-platform setup](docs/PORTABLE_SETUP.md) for source installation, versioned launchers and GitHub package builds.
+
+Version 1.1.0 adds selected-device live microphone capture at 48 kHz, verified PCM delivery, smooth music ducking, stereo limiting and per-station crossfade controls. Managed folders retain their inventory on incomplete scans and exclude retired media. See [release and rollout notes](docs/RELEASE_1_1_0.md). Upgrading never implicitly changes a saved station's codec, bitrate, output roster or live folder.
 
 The product is radio- and genre-agnostic. Every station has an independent identity, Icecast mount, managed library, jingle policy, queue, output profile, and persistent start/stop policy. A live source connection is verified only after encoder/output health and listener bytes are observed; other stations remain stopped unless an operator explicitly starts them.
 
@@ -271,11 +273,13 @@ RadioTEDU OnAir uses layered RBAC with legacy-role compatibility during the migr
 - Studios are station-scoped. A station can have multiple studios, but only one studio per station may be on air at a time.
 - Mic access follows the active DJ of the on-air studio. Producers may join and chat, but they cannot take the mic.
 - The browser must grant microphone permission before capture starts.
-- Browser capture uses `getUserMedia()` plus `MediaRecorder` and sends authenticated mic chunks over `/ws?token=<access-token>&station_id=<station-id>`.
-- The server decodes those chunks with FFmpeg, mixes them into the current station runtime, and writes the result to Icecast and local outputs.
-- The program panel supports `push-to-talk` and `always-on` transmission modes.
+- Click **Mikrofonları algıla**, select the exact device, then use the same live microphone button to start or stop capture.
+- The On Air panel uses `getUserMedia()` and an AudioWorklet to send authenticated mono 48 kHz s16le PCM in bounded 100 ms packets. Browser gain, noise suppression and echo cancellation are disabled.
+- Native PCM reaches the station bridge without a microphone decoder. The existing encoder connection remains active while stereo music ducking, bed or microphone-only mixing changes.
+- The panel confirms PCM reception before displaying **CANLI**; device loss or transport failure returns the programme to music.
 - Program settings are backed by `PUT /api/audio/live/settings`.
-- When `aiortc` is installed and `WEBRTC_ENABLED=true`, the browser attempts WebRTC for lower-latency audio transport. If WebRTC negotiation fails, the browser falls back to the WebSocket and MediaRecorder path automatically.
+- Legacy studio/guest clients retain their WebRTC, WebSocket and MediaRecorder transports. `/ws?token=<access-token>&station_id=<station-id>` remains the authenticated event/legacy audio endpoint; the native microphone panel does not silently switch to a lower-quality capture transport.
+- Legacy program clients retain their `push-to-talk` and `always-on` controls.
 - Configure TURN via `WEBRTC_TURN_URL`, `WEBRTC_TURN_USERNAME`, and `WEBRTC_TURN_CREDENTIAL` for WAN deployments.
 
 ## Phase 4A Deployment

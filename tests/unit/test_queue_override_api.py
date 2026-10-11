@@ -4,6 +4,14 @@ from app.db import get_connection, init_db
 from app.main import app
 from app.repositories.ad_break_repo import AdBreakRepository
 from app.repositories.schedule_repo import ScheduleRepository
+import pytest
+from tests.media_fixtures import seed_track
+
+
+@pytest.fixture(autouse=True)
+def station_owned_media(tmp_path):
+    seed_track(tmp_path, 1, 77)
+    seed_track(tmp_path, 2, 88)
 
 
 def test_queue_push_and_state_show_manual_source():

@@ -1,136 +1,101 @@
+import math
+import os
+
+# Radio workers use elementwise DSP, not threaded BLAS. Keep each independent
+# worker from allocating a core-sized thread pool unless the operator opted in.
+os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
+os.environ.setdefault('OMP_NUM_THREADS', '1')
+import numpy as np
+
+
 class LiveAudioMixer:
-    # Voice activity threshold (~-24 dB in 16-bit PCM).
-    # Must be above typical mic noise floor to avoid permanent ducking.
+    """48 kHz stereo program + mono voice, with smooth gain and linked limiting."""
     _VOICE_THRESHOLD = 2000
-    # Per-chunk attack/release rates for smooth ducking.
-    _ATTACK_RATE = 0.35
-    _RELEASE_RATE = 0.06
-    # Hold ducked state for ~1 s after voice stops (47 chunks @ 4096-byte/48 kHz).
-    _HOLD_CHUNKS = 47
 
-    def __init__(self) -> None:
-        self.max_sample = 32767
-        self.min_sample = -32768
-        self._auto_duck_factor: float = 0.0
-        self._hold_remaining: int = 0
+    def __init__(self):
+        self._auto_duck_factor = 0.0
+        self._hold_seconds = 0.0
+        self._music_scale = 1.0
+        self._limiter_gain = 1.0
 
     @staticmethod
-    def _clamp_sample(value: float) -> int:
-        rounded = int(round(float(value)))
-        if rounded > 32767:
-            return 32767
-        if rounded < -32768:
-            return -32768
-        return rounded
+    def _samples(data):
+        return np.frombuffer(data[:len(data) // 2 * 2], dtype='<i2')
 
     @staticmethod
-    def _normalize_mode(program_music_mode: str) -> str:
-        token = str(program_music_mode or "").strip().lower()
-        if token in {"duck", "mute", "normal"}:
-            return token
-        return "normal"
+    def _clamp_sample(value):
+        return max(-32768, min(32767, round(value)))
 
     @staticmethod
-    def _int16_at(data: bytes, offset: int) -> int:
-        if offset + 2 > len(data):
-            return 0
-        return int.from_bytes(data[offset : offset + 2], byteorder="little", signed=True)
+    def _normalize_mode(mode):
+        return mode if mode in {"normal", "duck", "mute"} else "normal"
 
     @staticmethod
-    def _mic_peak(mic_pcm: bytes) -> int:
-        peak = 0
-        for i in range(0, len(mic_pcm) - 1, 2):
-            sample = int.from_bytes(mic_pcm[i : i + 2], byteorder="little", signed=True)
-            v = sample if sample >= 0 else -sample
-            if v > peak:
-                peak = v
-        return peak
+    def _gain(value, default):
+        try:
+            number = float(value)
+            return max(0.0, min(2.0, number)) if math.isfinite(number) else default
+        except (TypeError, ValueError):
+            return default
 
-    def mix_pcm_chunk(
-        self,
-        music_pcm: bytes,
-        mic_pcm: bytes,
-        *,
-        effect_pcm: bytes | None = None,
-        program_music_mode: str = "normal",
-        mic_gain: float = 1.0,
-        music_gain: float = 1.0,
-        duck_level: float = 0.15,
-    ) -> bytes:
+    def mix_pcm_chunk(self, music_pcm, mic_pcm, *, effect_pcm=None,
+                      program_music_mode="normal", mic_gain=1.0,
+                      music_gain=1.0, duck_level=0.15):
+        music = self._samples(music_pcm)
+        mic = self._samples(mic_pcm)
+        effect = self._samples(effect_pcm or b"")
+        frames = max(len(music) // 2, len(mic), len(effect))
+        if not frames:
+            return b""
         mode = self._normalize_mode(program_music_mode)
-        mic_scale = max(0.0, float(mic_gain or 0.0))
-        base_music_scale = max(0.0, float(music_gain or 0.0))
-        duck_scale = max(0.0, min(1.0, float(duck_level or 0.0)))
-
+        voice_gain = self._gain(mic_gain, 1.0)
+        base_gain = self._gain(music_gain, 1.0)
+        duck_gain = min(1.0, self._gain(duck_level, 0.15))
+        duration = frames / 48000.0
+        peak = float(np.abs(mic.astype(np.int32)).max(initial=0)) * voice_gain
         if mode == "normal":
-            # Auto-duck: music lowers when voice detected, restores when silent.
-            # Hold keeps music ducked for ~1 s after last voice to avoid pumping
-            # between words/syllables.
-            peak = self._mic_peak(mic_pcm)
             if peak > self._VOICE_THRESHOLD:
-                self._auto_duck_factor = min(
-                    1.0, self._auto_duck_factor + self._ATTACK_RATE
-                )
-                self._hold_remaining = self._HOLD_CHUNKS
-            elif self._hold_remaining > 0:
-                self._hold_remaining -= 1
+                self._hold_seconds = 1.0
+                self._auto_duck_factor += (1 - self._auto_duck_factor) * (1 - math.exp(-duration / 0.025))
             else:
-                self._auto_duck_factor = max(
-                    0.0, self._auto_duck_factor - self._RELEASE_RATE
-                )
-            df = self._auto_duck_factor
-            effective_music_scale = base_music_scale * (1.0 - df * (1.0 - duck_scale))
-            effective_mic_scale = mic_scale
+                release = max(0.0, duration - self._hold_seconds)
+                self._hold_seconds = max(0.0, self._hold_seconds - duration)
+                self._auto_duck_factor *= math.exp(-release / 0.3)
+                if self._auto_duck_factor < 0.000001:
+                    self._auto_duck_factor = 0.0
+            target = base_gain * (1 - self._auto_duck_factor * (1 - duck_gain))
         elif mode == "duck":
-            effective_music_scale = base_music_scale * duck_scale
-            effective_mic_scale = mic_scale
+            target = base_gain * duck_gain
         else:
-            effective_music_scale = 0.0
-            effective_mic_scale = mic_scale
+            target = 0.0
 
-        frame_count = max(len(music_pcm) // 4, len(mic_pcm) // 2)
-        output = bytearray(frame_count * 4)
+        # Preserve untouched music byte-for-byte, including its stereo image.
+        if (mode == "normal" and target == 1.0 and self._music_scale == 1.0
+                and self._limiter_gain == 1.0 and not np.any(mic) and not np.any(effect)
+                and frames == len(music) // 2):
+            return music_pcm
 
-        for frame_index in range(frame_count):
-            music_offset = frame_index * 4
-            mic_offset = frame_index * 2
-
-            music_left = self._int16_at(music_pcm, music_offset)
-            music_right = self._int16_at(music_pcm, music_offset + 2)
-            mic_sample = self._int16_at(mic_pcm, mic_offset)
-
-            mixed_left = self._clamp_sample(
-                (music_left * effective_music_scale) + (mic_sample * effective_mic_scale)
-            )
-            mixed_right = self._clamp_sample(
-                (music_right * effective_music_scale) + (mic_sample * effective_mic_scale)
-            )
-
-            output[music_offset : music_offset + 2] = int(mixed_left).to_bytes(
-                2, byteorder="little", signed=True
-            )
-            output[music_offset + 2 : music_offset + 4] = int(mixed_right).to_bytes(
-                2, byteorder="little", signed=True
-            )
-
-        if effect_pcm is not None:
-            for frame_index in range(frame_count):
-                music_offset = frame_index * 4
-                effect_offset = frame_index * 2
-                effect_sample = self._int16_at(effect_pcm, effect_offset)
-                if effect_sample == 0:
-                    continue
-                current_left = int.from_bytes(
-                    output[music_offset : music_offset + 2], byteorder="little", signed=True
-                )
-                current_right = int.from_bytes(
-                    output[music_offset + 2 : music_offset + 4], byteorder="little", signed=True
-                )
-                output[music_offset : music_offset + 2] = self._clamp_sample(
-                    current_left + effect_sample
-                ).to_bytes(2, byteorder="little", signed=True)
-                output[music_offset + 2 : music_offset + 4] = self._clamp_sample(
-                    current_right + effect_sample
-                ).to_bytes(2, byteorder="little", signed=True)
-
-        return bytes(output)
+        smoothing = math.exp(-1 / (48000 * (0.02 if target < self._music_scale else 0.3)))
+        gains = target + (self._music_scale - target) * np.power(smoothing, np.arange(1, frames + 1))
+        gains[np.abs(gains - target) < 0.000001] = target
+        self._music_scale = float(gains[-1])
+        output = np.zeros((frames, 2), dtype=np.float64)
+        music_frames = len(music) // 2
+        output[:music_frames] = music[:music_frames * 2].reshape(-1, 2) * gains[:music_frames, None]
+        output[:len(mic)] += mic[:, None] * voice_gain
+        output[:len(effect)] += effect[:, None]
+        overload = np.maximum(1, np.maximum(output.max(axis=1) / 32767, -output.min(axis=1) / 32768))
+        allowed = 1 / overload
+        # d[n] = max(1-allowed[n], release*d[n-1]), where d=1-gain.
+        # A cumulative maximum computes the exact linked attack/release envelope
+        # in native array code. Bound blocks so exponential scaling stays finite.
+        release = math.exp(-1 / (48000 * 0.08))
+        for start in range(0, frames, 4800):
+            end = min(frames, start + 4800)
+            decay = np.power(release, np.arange(1, end - start + 1))
+            deficits = decay * np.maximum.accumulate(np.maximum((1 - allowed[start:end]) / decay, 1 - self._limiter_gain))
+            limiter = 1 - deficits
+            limiter[limiter > 0.999999] = 1
+            self._limiter_gain = float(limiter[-1])
+            output[start:end] *= limiter[:, None]
+        return np.clip(np.rint(output), -32768, 32767).astype('<i2').tobytes()

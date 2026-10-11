@@ -26,3 +26,21 @@ def test_parse_ffmpeg_dshow_input_devices_only_returns_audio_input_labels():
 """
 
     assert parse_ffmpeg_dshow_input_devices(sample) == ["Studio Microphone (USB Audio)"]
+
+
+def test_modern_dshow_type_annotations_find_only_audio_inputs():
+    sample = '\n'.join([
+        '[dshow @ 0001] "Webcam" (video)',
+        '[dshow @ 0001] "USB Broadcast Mic" (audio)',
+        '[dshow @ 0001]   Alternative name "@device_hidden"',
+        '[dshow @ 0001] "USB Broadcast Mic" (audio)',
+    ])
+    assert parse_ffmpeg_dshow_input_devices(sample) == ['USB Broadcast Mic']
+
+
+def test_posix_discovery_never_invokes_directshow(monkeypatch):
+    from app.audio import device_discovery
+    monkeypatch.setattr(device_discovery.sys, 'platform', 'linux')
+    monkeypatch.setattr(device_discovery.subprocess, 'run', lambda *a, **k: (_ for _ in ()).throw(AssertionError('Windows probe invoked')))
+    assert device_discovery.list_output_devices() == ['default']
+    assert device_discovery.list_input_devices() == []

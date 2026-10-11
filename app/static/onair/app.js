@@ -765,6 +765,7 @@ async function loadCoreStatus() {
   renderDayparts();
   renderTimeline();
   renderEmergencyStatus(runtime);
+  refreshMicrophoneControls(sid);
   return true;
 }
 
@@ -3776,6 +3777,97 @@ async function ensureOperatorStudioOwnership(stationId) {
   return verified;
 }
 
+let liveMicrophone = null;
+let loadedMicrophoneStation = 0;
+
+function bindLiveMicrophone() {
+  if (typeof window.RadioLiveMicrophone !== 'function' || !$('liveMicToggle')) return;
+  liveMicrophone = new window.RadioLiveMicrophone({
+    station: () => state.stationId,
+    api,
+    studio: ensureOperatorStudioOwnership,
+    canStart: () => {
+      if (state.emergency.active || state.emergency.starting) throw new Error('Stop emergency audio before opening the microphone');
+    },
+    status: (phase, message) => {
+      const active = phase !== 'off';
+      $('liveMicToggle').textContent = active ? 'Mikrofonu kapat' : 'Canlı mikrofonu aç';
+      $('liveMicToggle').setAttribute('aria-pressed', phase === 'live' ? 'true' : 'false');
+      $('liveMicState').textContent = ({ off: 'Kapalı', starting: 'Hazırlanıyor', live: 'CANLI', stopping: 'Kapatılıyor', error: 'Kontrol gerekli' })[phase] || phase;
+      $('liveMicDevice').disabled = active;
+      $('prepareLiveMic').disabled = active;
+      if (message) setResult('liveMicResult', message, phase === 'error' ? 'error' : '');
+    },
+    devices: (devices, selected) => {
+      const select = $('liveMicDevice');
+      select.replaceChildren();
+      const system = document.createElement('option');
+      system.value = ''; system.textContent = 'Sistem mikrofonu'; select.appendChild(system);
+      devices.forEach((device, index) => {
+        const option = document.createElement('option');
+        option.value = device.deviceId; option.textContent = device.label || `Mikrofon ${index + 1}`;
+        select.appendChild(option);
+      });
+      select.value = selected;
+    },
+    levels: (snapshot) => {
+      const peak = Number(snapshot?.peak_db ?? -60);
+      $('liveMicMeter').value = Number.isFinite(peak) ? Math.max(-60, Math.min(0, peak)) : -60;
+      $('liveMicLevel').textContent = `${Number.isFinite(peak) ? peak.toFixed(1) : '-60'} dBFS${peak > -1 ? ' · Mikrofon kazancını azaltın' : ''}`;
+    },
+    settings: (settings) => {
+      $('liveMicMusicMode').value = settings.program_music_mode;
+      $('liveMicGain').value = settings.mic_gain;
+      $('liveMicMusicGain').value = settings.music_gain;
+      $('liveMicDuck').value = settings.duck_level;
+    },
+  });
+  const report = (error) => setResult('liveMicResult', errorMessage(error), 'error');
+  $('prepareLiveMic').addEventListener('click', () => liveMicrophone.prepare().catch(report));
+  $('liveMicDevice').addEventListener('change', () => liveMicrophone.selectDevice($('liveMicDevice').value).catch(report));
+  $('liveMicToggle').addEventListener('click', () => {
+    const operation = liveMicrophone.phase === 'off' ? liveMicrophone.start() : liveMicrophone.stop();
+    operation.catch(report);
+  });
+  $('liveMicMixForm').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    try {
+      const settings = { program_music_mode: $('liveMicMusicMode').value, mic_gain: Number($('liveMicGain').value), music_gain: Number($('liveMicMusicGain').value), duck_level: Number($('liveMicDuck').value) };
+      await liveMicrophone.saveSettings(settings);
+      liveMicrophone.settings = settings;
+      setResult('liveMicResult', 'Mikrofon miksi kaydedildi ve doğrulandı.', 'success');
+    } catch (error) { report(error); }
+  });
+  $('transitionForm').addEventListener('submit', saveStationTransition);
+  navigator.mediaDevices?.addEventListener('devicechange', () => liveMicrophone.devices().catch(report));
+  window.addEventListener('pagehide', () => {
+    liveMicrophone.stop('Panel closed').catch(() => {});
+    liveMicrophone.release();
+  });
+}
+
+function refreshMicrophoneControls(sid) {
+  if (!liveMicrophone || loadedMicrophoneStation === sid) return;
+  loadedMicrophoneStation = sid;
+  liveMicrophone.loadSettings().catch(() => { loadedMicrophoneStation = 0; });
+  api(`/api/audio/transitions/settings?station_id=${sid}`).then((saved) => {
+    if (sid === Number(state.stationId)) $('stationCrossfadeSeconds').value = saved.crossfade_seconds;
+  }).catch((error) => setResult('transitionResult', errorMessage(error), 'error'));
+}
+
+async function saveStationTransition(event) {
+  event.preventDefault();
+  const sid = Number(state.stationId);
+  const seconds = Number($('stationCrossfadeSeconds').value);
+  try {
+    if (!Number.isFinite(seconds) || seconds < 0 || seconds > 10) throw new Error('Crossfade must be between 0 and 10 seconds');
+    await api('/api/audio/transitions/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ station_id: sid, crossfade_seconds: seconds }) });
+    const saved = await api(`/api/audio/transitions/settings?station_id=${sid}`);
+    if (saved.crossfade_seconds !== seconds) throw new Error('Crossfade read-back did not match');
+    if (sid === Number(state.stationId)) setResult('transitionResult', `Crossfade ${seconds} saniye olarak kaydedildi; sonraki geçişte uygulanır.`, 'success');
+  } catch (error) { setResult('transitionResult', errorMessage(error), 'error'); }
+}
+
 function resampleToPcm16(input, inputRate, outputRate = 24000) {
   const sourceRate = Math.max(1, Number(inputRate || 48000));
   const ratio = sourceRate / outputRate;
@@ -6220,6 +6312,10 @@ function bindEvents() {
       'currentStationName', 'currentOutputGain', 'currentIcecastEnabled', 'currentIcecastHost', 'currentIcecastPort', 'currentIcecastMount', 'currentIcecastUser', 'currentIcecastPassword', 'currentIcecastProfile', 'currentSourceProtocol', 'currentIcecastTlsEnabled', 'currentLocalEnabled', 'currentOutputDevice',
       'aiConfigEnabled', 'aiLlmModel', 'aiTtsProvider', 'aiVoicePersona', 'aiTtsModelPath', 'aiMaxSeconds', 'aiStationInterval', 'aiIncludeHistory', 'aiEducational', 'aiPromptTemplate',
     ]);
+    if (liveMicrophone && liveMicrophone.phase !== 'off') {
+      try { await liveMicrophone.stop('Station changed'); }
+      catch (error) { $('stationSelect').value = String(state.stationId); setResult('liveMicResult', errorMessage(error), 'error'); return; }
+    }
     state.stationId = Number($('stationSelect').value);
     stationContextRevision += 1;
     connectionRefreshSequence += 1;
@@ -6272,6 +6368,7 @@ function bindEvents() {
     ]);
   });
   $('startBroadcastButton').addEventListener('click', startBroadcast);
+  bindLiveMicrophone();
   $('stopBroadcastButton').addEventListener('click', stopBroadcast);
   $('emergencyPresetButton').addEventListener('click', useEmergencyPreset);
   $('previewEmergencyButton').addEventListener('click', previewEmergencySource);

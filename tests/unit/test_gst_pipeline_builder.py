@@ -1,7 +1,18 @@
 from app.audio.gst_pipeline import StationPipelineConfig, build_gst_pipeline
 
 
-def test_pipeline_includes_icecast_and_local_branches():
+def test_posix_local_monitor_uses_the_platform_default(monkeypatch):
+    monkeypatch.setattr('app.audio.gst_pipeline.sys.platform', 'darwin')
+    cfg = StationPipelineConfig(input_uri='silence://continuous', icecast_host='', icecast_port=8000,
+                                icecast_mount='', icecast_user='', icecast_password='',
+                                local_output_enabled=True, output_device_id='default', icecast_enabled=False)
+    pipeline = build_gst_pipeline(cfg)
+    assert 'autoaudiosink' in pipeline
+    assert 'wasapisink' not in pipeline
+
+
+def test_pipeline_includes_icecast_and_local_branches(monkeypatch):
+    monkeypatch.setattr('app.audio.gst_pipeline.sys.platform', 'win32')
     cfg = StationPipelineConfig(
         input_uri="C:/music/fallback.mp3",
         icecast_host="127.0.0.1",
@@ -37,7 +48,8 @@ def test_pipeline_without_local_output_only_has_icecast_branch():
     assert "wasapisink" not in pipeline
 
 
-def test_pipeline_with_icecast_disabled_has_only_local_branch():
+def test_pipeline_with_icecast_disabled_has_only_local_branch(monkeypatch):
+    monkeypatch.setattr('app.audio.gst_pipeline.sys.platform', 'win32')
     cfg = StationPipelineConfig(
         input_uri="C:/music/fallback.mp3",
         icecast_host="127.0.0.1",

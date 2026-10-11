@@ -2,7 +2,16 @@ import asyncio
 import threading
 
 from app.audio.live_render_session import LiveRenderSession
+from app.audio.native_pcm_session import NativePcmSession
 from app.audio.mic_session import MicSession
+
+
+def _render_session(station_id, **kwargs):
+    if (kwargs.get("input_format") == "s16le"
+            and kwargs.get("input_sample_rate") == 48000
+            and kwargs.get("input_channels") == 1):
+        return NativePcmSession(station_id, max_buffer_bytes=kwargs.get("max_buffer_bytes", 38400))
+    return LiveRenderSession(station_id, **kwargs)
 
 _DEFAULT_STATUS = {
     "live_input_enabled": False,
@@ -19,10 +28,8 @@ _DEFAULT_STATUS = {
 class LiveMicRegistry:
     def __init__(self, session_factory=None, render_session_factory=None):
         self._session_factory = session_factory or (lambda station_id: MicSession(station_id))
-        self._render_session_factory = render_session_factory or (
-            lambda station_id, **kwargs: LiveRenderSession(station_id, **kwargs)
-        )
-        self._lock = threading.Lock()
+        self._render_session_factory = render_session_factory or _render_session
+        self._lock = threading.RLock()
         self._stations: dict[int, dict] = {}
         self._listeners: list = []
 
@@ -386,6 +393,10 @@ class LiveMicRegistry:
             session = state.get("session")
             render_session = state.get("render_session")
             rtc_session = state.get("rtc_session")
+            if isinstance(render_session, NativePcmSession) and render_session.snapshot().get("expired"):
+                render_session.stop()
+                state.update(render_session=None, transmitting=False, active_user=None, source_name="")
+                render_session = None
             render_active = render_session is not None and render_session.running
             rtc_active = rtc_session is not None and rtc_session.running
             if render_active:

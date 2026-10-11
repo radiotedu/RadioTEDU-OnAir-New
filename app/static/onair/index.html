@@ -128,6 +128,37 @@
           <p id="broadcastResult" class="action-result" aria-live="polite"></p>
         </article>
 
+        <article id="liveMicrophoneCard" class="status-card" data-operator-view="onair">
+          <div class="card-heading">
+            <div><div class="eyebrow">STUDIO MICROPHONE</div><h2>Mikrofonla canlı yayın</h2></div>
+            <span id="liveMicState" class="mini-state" role="status">Kapalı</span>
+          </div>
+          <p class="card-copy">Müzik ve yayın bağlantısı devam eder. Mikrofonu açın, konuşun; kapatınca normal müziğe dönün.</p>
+          <label>Mikrofon<select id="liveMicDevice"><option value="">Sistem mikrofonu</option></select></label>
+          <label>Mikrofon seviyesi<meter id="liveMicMeter" min="-60" max="0" value="-60" aria-label="Mikrofon tepe seviyesi, dBFS"></meter><span id="liveMicLevel">−60 dBFS</span></label>
+          <div class="button-row">
+            <button id="prepareLiveMic" class="button secondary" type="button">Mikrofonları algıla</button>
+            <button id="liveMicToggle" class="button success" type="button" aria-pressed="false">Canlı mikrofonu aç</button>
+          </div>
+          <form id="liveMicMixForm" class="operator-form">
+            <label>Mikrofon açıkken müzik<select id="liveMicMusicMode"><option value="normal">Konuşurken otomatik kıs</option><option value="duck">Sürekli arka plan müziği</option><option value="mute">Yalnızca mikrofon</option></select></label>
+            <div class="field-grid two">
+              <label>Mikrofon kazancı<input id="liveMicGain" type="number" min="0" max="2" step="0.05" value="1"></label>
+              <label>Müzik kazancı<input id="liveMicMusicGain" type="number" min="0" max="2" step="0.05" value="1"></label>
+            </div>
+            <label>Arka plan müzik seviyesi<input id="liveMicDuck" type="number" min="0" max="1" step="0.05" value="0.15"></label>
+            <button class="button secondary" type="submit">Mikrofon miksini kaydet</button>
+          </form>
+          <small>48 kHz PCM giriş · Otomatik ses işleme kapalı · Geri beslemeyi önlemek için kulaklık kullanın.</small>
+          <p id="liveMicResult" class="action-result" aria-live="polite"></p>
+          <form id="transitionForm" class="operator-form">
+            <label>Şarkı crossfade süresi (saniye)<input id="stationCrossfadeSeconds" type="number" min="0" max="10" step="0.25" value="0"></label>
+            <button class="button secondary" type="submit">Geçiş ayarını kaydet</button>
+            <small>Sonraki müzik geçişinde uygulanır. 0: kesintisiz doğrudan geçiş. Reklam ve program sahipliği korunur.</small>
+          </form>
+          <p id="transitionResult" class="action-result" aria-live="polite"></p>
+        </article>
+
         <article id="hlsHomeCard" class="status-card hls-card" data-operator-view="onair">
           <div class="card-heading">
             <div><div class="eyebrow">HLS DELIVERY</div><h2>HE-AAC canlı çıkış</h2></div>
@@ -181,7 +212,7 @@
               <label>Mount<input id="icecastMount" value="/new-station" pattern="/.*" required></label>
               <label>User<input id="icecastUser" value="source" required></label>
               <label>Password<input id="icecastPassword" type="password" autocomplete="new-password" required></label>
-              <label>Format<select id="icecastProfile"><option value="aac_low_192">AAC-LC Normal — 192 kbps (libfdk)</option><option value="aac_he_v2_64">HE-AAC v2 Low — 64 kbps (libfdk)</option></select></label>
+              <label>Format<select id="icecastProfile"><option value="aac_low_192">AAC-LC Normal — 192 kbps (libfdk)</option><option value="aac_he_v2_64">HE-AAC v2 Low — 64 kbps (libfdk)</option><option value="opus_192">Opus — 192 kbps (libopus)</option></select></label>
             </div>
             <label class="check-row"><input id="activateNewStation" type="checkbox"> Make it the active broadcast target</label>
             <button id="createStationButton" class="button primary" type="submit">Create and verify station</button>
@@ -312,7 +343,7 @@
             </section>
             <section class="stream-wizard-step">
               <div class="eyebrow">STEP 2 OF 4</div><h3>Choose listener quality</h3>
-                <label>Quality<select id="currentIcecastProfile"><option value="aac_low_192">AAC-LC Normal — 192 kbps (libfdk)</option><option value="aac_he_v2_64">HE-AAC v2 Low — 64 kbps (libfdk)</option></select></label>
+                <label>Quality<select id="currentIcecastProfile"><option value="aac_low_192">AAC-LC Normal — 192 kbps (libfdk)</option><option value="aac_he_v2_64">HE-AAC v2 Low — 64 kbps (libfdk)</option><option value="opus_192">Opus — 192 kbps (libopus)</option></select></label>
               <small>The suffix-free station mount uses AAC-LC at 192 kbps. Its low-bandwidth mount is managed separately as HE-AAC v2 at 64 kbps.</small>
             </section>
             <section class="stream-wizard-step">
@@ -1036,7 +1067,8 @@
 
   <div id="busyOverlay" class="busy-overlay" hidden><div class="busy-card"><span class="spinner"></span><b id="busyTitle">Working...</b><small id="busyDetail">Waiting for verified state</small></div></div>
   <div id="toastRegion" class="toast-region" aria-live="assertive"></div>
-  <script src="/static/onair/app.js?v=50" defer></script>
+  <script src="/static/onair/live-microphone.js?v=1" defer></script>
+  <script src="/static/onair/app.js?v=52" defer></script>
     <script src="/static/onair/guest-room.js?v=6" defer></script>
     <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js', { scope: '/' });</script>
 </body>

@@ -18,7 +18,7 @@ def test_data_acl_helper_removes_builtin_users_access_recursively(tmp_path):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"acl-test")
 
-    subprocess.run(
+    hardened = subprocess.run(
         [
             "icacls.exe",
             str(root),
@@ -27,10 +27,11 @@ def test_data_acl_helper_removes_builtin_users_access_recursively(tmp_path):
             "/T",
             "/C",
         ],
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
     )
+    assert hardened.returncode == 0, hardened.stdout + hardened.stderr
 
     repository_root = Path(__file__).resolve().parents[2]
     helper = repository_root / "installer" / "HardenServiceHostAcl.ps1"
@@ -41,7 +42,10 @@ def test_data_acl_helper_removes_builtin_users_access_recursively(tmp_path):
         / "v1.0"
         / "powershell.exe"
     )
-    subprocess.run(
+    # A PowerShell 7 parent exports its module path. The helper runs in 5.1
+    # and requires that interpreter's built-in Security module.
+    powershell_env = {**os.environ, "PSModulePath": str(powershell.parent / 'Modules')}
+    hardened = subprocess.run(
         [
             str(powershell),
             "-NoProfile",
@@ -53,10 +57,12 @@ def test_data_acl_helper_removes_builtin_users_access_recursively(tmp_path):
             "-OnAirRoot",
             str(root),
         ],
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
     )
+
+    assert hardened.returncode == 0, hardened.stdout + hardened.stderr
 
     verification = r"""
 $Root = $env:RADIOTEDU_ACL_TEST_ROOT
@@ -90,5 +96,5 @@ foreach ($target in $targets) {
         check=True,
         capture_output=True,
         text=True,
-        env={**os.environ, "RADIOTEDU_ACL_TEST_ROOT": str(root)},
+        env={**powershell_env, "RADIOTEDU_ACL_TEST_ROOT": str(root)},
     )

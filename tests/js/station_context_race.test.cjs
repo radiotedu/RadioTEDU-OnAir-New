@@ -83,6 +83,7 @@ function createCoreHarness() {
     renderDayparts() {},
     renderTimeline() {},
     renderEmergencyStatus() {},
+    refreshMicrophoneControls() {},
   };
   vm.createContext(context);
   vm.runInContext(

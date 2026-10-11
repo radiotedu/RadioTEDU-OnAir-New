@@ -96,7 +96,7 @@ def test_advertising_items_break_sets_and_campaigns_are_operator_accessible():
         assert f'id="{control}"' in HTML
     for endpoint in (
         "/api/ads/items",
-        "/api/ads/runtime",
+        "/api/ads/console",
         "/api/ad-break-sets",
         "/api/ad-campaigns",
     ):

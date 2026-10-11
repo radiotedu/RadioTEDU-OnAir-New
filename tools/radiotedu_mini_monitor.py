@@ -416,119 +416,8 @@ def _read_local_monitor_data() -> tuple[dict[int, dict], dict]:
                     target["next_artist"] = str(row["artist"] or "")
                     target["next_track_type"] = str(row["track_type"] or "music")
 
-            stage = "ad_playing"
-            playing_ad = conn.execute(
-                "SELECT a.id, a.status, a.due_at, COALESCE(t.title,'') AS title, "
-                "COALESCE(t.artist,'') AS artist, "
-                "CASE WHEN COALESCE(t.file_path,'')<>'' THEN 1 ELSE 0 END AS media_ready "
-                "FROM ad_break_items a LEFT JOIN tracks t ON t.id=a.track_id "
-                "WHERE a.station_id=4 AND a.status='playing' "
-                "ORDER BY a.started_at, a.id LIMIT 1"
-            ).fetchone()
-            if playing_ad:
-                ad = {"state": "playing_unverified", **dict(playing_ad)}
-            else:
-                stage = "ad_pending"
-                pending_ad = conn.execute(
-                    "SELECT a.id, a.status, a.due_at, COALESCE(t.title,'') AS title, "
-                    "COALESCE(t.artist,'') AS artist, "
-                    "CASE WHEN COALESCE(t.file_path,'')<>'' THEN 1 ELSE 0 END AS media_ready "
-                    "FROM ad_break_items a LEFT JOIN tracks t ON t.id=a.track_id "
-                    "WHERE a.station_id=4 AND a.status='pending' "
-                    "ORDER BY datetime(a.due_at), a.priority DESC, a.id LIMIT 1"
-                ).fetchone()
-                stage = "ad_plans"
-                plans = conn.execute(
-                    "SELECT p.id,p.name,p.enabled,p.starts_on,p.ends_on,p.weekdays_json, "
-                    "p.local_start,p.local_end,p.timezone,p.repeat_every_songs,p.priority, "
-                    "p.created_at,t.enabled AS target_enabled,COALESCE(tr.is_active,0) AS track_active, "
-                    "CASE WHEN COALESCE(tr.file_path,'')<>'' THEN 1 ELSE 0 END AS media_ready "
-                    "FROM broadcast_plans p "
-                    "LEFT JOIN broadcast_plan_targets t ON t.plan_id=p.id AND t.station_id=4 "
-                    "LEFT JOIN tracks tr ON tr.id=t.track_id "
-                    "WHERE p.plan_type='ad' AND p.cadence_mode='songs' "
-                    "AND EXISTS(SELECT 1 FROM broadcast_plan_targets x "
-                    "WHERE x.plan_id=p.id AND x.station_id=4) "
-                    "ORDER BY p.priority DESC,p.id DESC"
-                ).fetchall()
-                active = []
-                inactive_reason = ""
-                stage = "ad_plan_window"
-                for plan in plans:
-                    if not bool(plan["enabled"]):
-                        inactive_reason = "plan_disabled"
-                        continue
-                    if not bool(plan["target_enabled"]):
-                        inactive_reason = "target_disabled"
-                        continue
-                    try:
-                        if not _monitor_plan_window_active(plan):
-                            inactive_reason = "outside_schedule_window"
-                            continue
-                    except Exception:
-                        inactive_reason = "invalid_plan"
-                        continue
-                    if not bool(plan["track_active"]) or not bool(plan["media_ready"]):
-                        inactive_reason = "ad_track_inactive_or_missing"
-                        continue
-                    active.append(plan)
-
-                if pending_ad:
-                    ad = {key: value for key, value in dict(pending_ad).items() if key != "media_ready"}
-                    ad["state"] = "pending" if bool(pending_ad["media_ready"]) else "pending_media_missing"
-                elif not active:
-                    ad = (
-                        {"state": "inactive", "reason": inactive_reason or "no_eligible_target"}
-                        if plans else {"state": "no_plan"}
-                    )
-                else:
-                    plan = active[0]
-                    interval = max(1, int(plan["repeat_every_songs"] or 10))
-                    stage = "ad_music_count"
-                    count_row = conn.execute(
-                        "SELECT COUNT(*) AS amount FROM queue_items q JOIN tracks t ON t.id=q.track_id "
-                        "WHERE q.station_id=4 AND t.station_id=4 AND q.status='done' "
-                        "AND LOWER(COALESCE(t.track_type,'music'))='music' "
-                        "AND q.finished_at IS NOT NULL AND datetime(q.finished_at)>=datetime(?)",
-                        (str(plan["created_at"] or "1970-01-01 00:00:00"),),
-                    ).fetchone()
-                    music_count = int((count_row["amount"] if count_row else 0) or 0)
-                    completed_cycles = music_count // interval
-                    stage = "ad_cycle_status"
-                    statuses = conn.execute(
-                        "SELECT dedupe_key,status FROM ad_break_items WHERE station_id=4 "
-                        "AND dedupe_key LIKE ? ORDER BY id DESC",
-                        (f"broadcast-plan:{int(plan['id'])}:song:4:%",),
-                    ).fetchall()
-                    status_by_cycle: dict[int, str] = {}
-                    for row in statuses:
-                        try:
-                            cycle = int(str(row["dedupe_key"]).rsplit(":",1)[1])
-                        except (IndexError, TypeError, ValueError):
-                            continue
-                        status_by_cycle.setdefault(cycle, str(row["status"] or ""))
-                    due_cycle = next(
-                        (cycle for cycle in range(1, completed_cycles + 1)
-                         if status_by_cycle.get(cycle) != "done"),
-                        None,
-                    )
-                    if due_cycle is not None:
-                        ad = {
-                            "state": "unmaterialized",
-                            "reason": "due_without_pending_row",
-                            "name": str(plan["name"] or ""),
-                            "interval": interval,
-                            "remaining": 0,
-                            "cycle": due_cycle,
-                        }
-                    else:
-                        remainder = music_count % interval
-                        ad = {
-                            "state": "countdown",
-                            "name": str(plan["name"] or ""),
-                            "interval": interval,
-                            "remaining": interval - remainder if remainder else interval,
-                        }
+            stage = "ad_snapshot"
+            ad = _ad_plan_snapshot(conn, 4)
         except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
             detail = str(exc).replace(str(DATABASE), "[database]").splitlines()[0][:120]
             _LOCAL_DATA_ERROR = f"{stage}:{type(exc).__name__}:{detail}"
@@ -544,6 +433,128 @@ def _read_local_monitor_data() -> tuple[dict[int, dict], dict]:
             {key: dict(value) for key, value in playout.items()},
             dict(ad),
         )
+
+
+def _ad_plan_snapshot(conn, station_id: int) -> dict:
+    station_id = int(station_id)
+    def _execute(sql, parameters=()):
+        count = sql.count("station_id=4")
+        return conn.execute(sql.replace("station_id=4", "station_id=?"),
+                            (station_id,) * count + tuple(parameters))
+    stage = "ad_playing"
+    playing_ad = _execute(
+        "SELECT a.id, a.status, a.due_at, COALESCE(t.title,'') AS title, "
+        "COALESCE(t.artist,'') AS artist, "
+        "CASE WHEN COALESCE(t.file_path,'')<>'' THEN 1 ELSE 0 END AS media_ready "
+        "FROM ad_break_items a LEFT JOIN tracks t ON t.id=a.track_id "
+        "WHERE a.station_id=4 AND a.status='playing' "
+        "ORDER BY a.started_at, a.id LIMIT 1"
+    ).fetchone()
+    if playing_ad:
+        ad = {"state": "playing_unverified", **dict(playing_ad)}
+    else:
+        stage = "ad_pending"
+        pending_ad = _execute(
+            "SELECT a.id, a.status, a.due_at, COALESCE(t.title,'') AS title, "
+            "COALESCE(t.artist,'') AS artist, "
+            "CASE WHEN COALESCE(t.file_path,'')<>'' THEN 1 ELSE 0 END AS media_ready "
+            "FROM ad_break_items a LEFT JOIN tracks t ON t.id=a.track_id "
+            "WHERE a.station_id=4 AND a.status='pending' "
+            "ORDER BY datetime(a.due_at), a.priority DESC, a.id LIMIT 1"
+        ).fetchone()
+        stage = "ad_plans"
+        plans = _execute(
+            "SELECT p.id,p.name,p.enabled,p.starts_on,p.ends_on,p.weekdays_json, "
+            "p.local_start,p.local_end,p.timezone,p.repeat_every_songs,p.priority, "
+            "p.created_at,t.enabled AS target_enabled,COALESCE(tr.is_active,0) AS track_active, "
+            "CASE WHEN COALESCE(tr.file_path,'')<>'' THEN 1 ELSE 0 END AS media_ready "
+            "FROM broadcast_plans p "
+            "LEFT JOIN broadcast_plan_targets t ON t.plan_id=p.id AND t.station_id=4 "
+            "LEFT JOIN tracks tr ON tr.id=t.track_id "
+            "WHERE p.plan_type='ad' AND p.cadence_mode='songs' "
+            "AND EXISTS(SELECT 1 FROM broadcast_plan_targets x "
+            "WHERE x.plan_id=p.id AND x.station_id=4) "
+            "ORDER BY p.priority DESC,p.id DESC"
+        ).fetchall()
+        active = []
+        inactive_reason = ""
+        stage = "ad_plan_window"
+        for plan in plans:
+            if not bool(plan["enabled"]):
+                inactive_reason = "plan_disabled"
+                continue
+            if not bool(plan["target_enabled"]):
+                inactive_reason = "target_disabled"
+                continue
+            try:
+                if not _monitor_plan_window_active(plan):
+                    inactive_reason = "outside_schedule_window"
+                    continue
+            except Exception:
+                inactive_reason = "invalid_plan"
+                continue
+            if not bool(plan["track_active"]) or not bool(plan["media_ready"]):
+                inactive_reason = "ad_track_inactive_or_missing"
+                continue
+            active.append(plan)
+
+        if pending_ad:
+            ad = {key: value for key, value in dict(pending_ad).items() if key != "media_ready"}
+            ad["state"] = "pending" if bool(pending_ad["media_ready"]) else "pending_media_missing"
+        elif not active:
+            ad = (
+                {"state": "inactive", "reason": inactive_reason or "no_eligible_target"}
+                if plans else {"state": "no_plan"}
+            )
+        else:
+            plan = active[0]
+            interval = max(1, int(plan["repeat_every_songs"] or 10))
+            stage = "ad_music_count"
+            count_row = _execute(
+                "SELECT COUNT(*) AS amount FROM queue_items q JOIN tracks t ON t.id=q.track_id "
+                "WHERE q.station_id=4 AND t.station_id=4 AND q.status='done' "
+                "AND LOWER(COALESCE(t.track_type,'music'))='music' "
+                "AND q.finished_at IS NOT NULL AND datetime(q.finished_at)>=datetime(?)",
+                (str(plan["created_at"] or "1970-01-01 00:00:00"),),
+            ).fetchone()
+            music_count = int((count_row["amount"] if count_row else 0) or 0)
+            completed_cycles = music_count // interval
+            stage = "ad_cycle_status"
+            statuses = _execute(
+                "SELECT dedupe_key,status FROM ad_break_items WHERE station_id=4 "
+                "AND dedupe_key LIKE ? ORDER BY id DESC",
+                (f"broadcast-plan:{int(plan['id'])}:song:{station_id}:%",),
+            ).fetchall()
+            status_by_cycle: dict[int, str] = {}
+            for row in statuses:
+                try:
+                    cycle = int(str(row["dedupe_key"]).rsplit(":",1)[1])
+                except (IndexError, TypeError, ValueError):
+                    continue
+                status_by_cycle.setdefault(cycle, str(row["status"] or ""))
+            due_cycle = next(
+                (cycle for cycle in range(1, completed_cycles + 1)
+                 if status_by_cycle.get(cycle) != "done"),
+                None,
+            )
+            if due_cycle is not None:
+                ad = {
+                    "state": "unmaterialized",
+                    "reason": "due_without_pending_row",
+                    "name": str(plan["name"] or ""),
+                    "interval": interval,
+                    "remaining": 0,
+                    "cycle": due_cycle,
+                }
+            else:
+                remainder = music_count % interval
+                ad = {
+                    "state": "countdown",
+                    "name": str(plan["name"] or ""),
+                    "interval": interval,
+                    "remaining": interval - remainder if remainder else interval,
+                }
+    return ad
 
 
 def _classify(heartbeat: dict, prior: dict | None, listener: dict | None) -> tuple[str, str]:
@@ -563,8 +574,8 @@ def _classify(heartbeat: dict, prior: dict | None, listener: dict | None) -> tup
         return "PROGRAM KAYNAĞI BİTTİ", "bad"
     if not runtime.get("program_running"):
         if runtime.get("output_feed_active"):
-            return "PROGRAM İŞÇİSİ DURDU", "bad"
-        return "PROGRAM HAZIR DEĞİL", "bad"
+            return "SES KAYNAĞI DURDU", "warn"
+        return "ÜRETİCİ DURDU", "bad"
     if station_health == "unavailable":
         return "DİNLEYİCİ AKIŞI YOK", "bad"
     if runtime.get("output_feed_active") is False:

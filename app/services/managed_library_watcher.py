@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
+import stat
 import threading
 import time
 from dataclasses import dataclass, field
@@ -153,6 +155,7 @@ def _default_sync_callback(profile: ManagedLibraryProfile) -> dict:
             incremental=True,
             guard_configured_folder=True,
             allow_empty=True,
+            enqueue_new_music=profile.track_type == 'music',
         )
     )
     if bool(result.get("no_op")):
@@ -211,18 +214,34 @@ class ManagedLibraryWatcher:
         # Sidecar artwork participates in the fingerprint so replacing
         # cover/folder/front images refreshes metadata without touching audio.
         extensions = audio_upload_extensions() | {".jpg", ".jpeg", ".png", ".webp"}
-        iterator = root.rglob("*") if profile.recursive else root.iterdir()
+        def scan_error(error):
+            raise error
+
+        def candidates():
+            if profile.recursive:
+                for folder, directories, files in os.walk(root, onerror=scan_error, followlinks=False):
+                    directories[:] = [d for d in directories if d != '.radiotedu-trash']
+                    for filename in files:
+                        yield Path(folder) / filename
+            else:
+                yield from root.iterdir()
+
+        iterator = candidates()
         records: list[tuple[str, int, int]] = []
         for path in iterator:
             try:
-                if not path.is_file() or path.suffix.lower() not in extensions:
+                if path.suffix.lower() not in extensions or path.is_symlink():
                     continue
-                stat = path.stat()
-                relative = path.relative_to(root).as_posix().casefold()
-                records.append((relative, int(stat.st_size), int(stat.st_mtime_ns)))
-            except (OSError, RuntimeError, ValueError):
-                continue
-        records.sort()
+                metadata = path.stat()
+                if not stat.S_ISREG(metadata.st_mode):
+                    continue
+                relative = path.relative_to(root).as_posix()
+                records.append((relative, int(metadata.st_size), int(metadata.st_mtime_ns)))
+            except (OSError, RuntimeError, ValueError) as exc:
+                # An incomplete scan is not evidence of a deletion. Preserve
+                # the prior inventory until a complete stable scan succeeds.
+                raise OSError(f'Managed folder scan incomplete: {path}') from exc
+        records.sort(key=lambda item: (item[0].casefold(), item[0]))
         digest = hashlib.sha256()
         for relative, size, modified_ns in records:
             digest.update(relative.encode("utf-8", errors="surrogatepass"))

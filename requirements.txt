@@ -1,6 +1,7 @@
 bcrypt<4.1
 fastapi
 httpx
+numpy==2.2.6
 passlib[bcrypt]
 pydantic
 python-multipart

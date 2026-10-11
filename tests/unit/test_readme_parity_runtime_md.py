@@ -7,7 +7,7 @@ def test_readme_mentions_icecast_and_legacy_ui():
     )
     assert "Icecast" in text
     assert "/ws?token=" in text
-    assert "single supported product path" in text
+    assert "Windows" in text and "Linux" in text and "macOS" in text
     assert "On Air" in text
     assert "Playlists" in text
     assert "build_backend_onefile.ps1" in text

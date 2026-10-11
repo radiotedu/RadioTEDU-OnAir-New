@@ -46,6 +46,10 @@ def _configured_binary(executable_name: str) -> Path | None:
 
 
 def resolve_binary_details(executable_name: str) -> dict[str, str | bool]:
+    # Most callers retain the historical Windows spelling. POSIX tools on
+    # PATH and in packaged releases do not have an .exe suffix.
+    if os.name != "nt" and executable_name.lower().endswith(".exe"):
+        executable_name = executable_name[:-4]
     configured = _configured_binary(executable_name)
     if configured:
         return {

@@ -1,5 +1,6 @@
 import re
 import subprocess
+import sys
 
 from app.runtime_paths import require_binary
 
@@ -26,6 +27,10 @@ def parse_ffmpeg_dshow_audio_devices(stderr_output: str) -> list[str]:
 
 
 def list_output_devices(ffmpeg_bin: str | None = None) -> list[str]:
+    if sys.platform != 'win32':
+        # Physical microphone selection is performed by the browser on every
+        # platform. Do not run the Windows DirectShow probe on POSIX hosts.
+        return ['default']
     resolved = ffmpeg_bin or require_binary("ffmpeg.exe")
     cmd = [ffmpeg_bin, "-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"]
     cmd[0] = resolved
@@ -53,7 +58,9 @@ def parse_ffmpeg_dshow_input_devices(stderr_output: str) -> list[str]:
         if "directshow video devices" in lowered:
             in_audio_section = False
             continue
-        if not in_audio_section:
+        typed_audio = '(audio)' in lowered
+        typed_video = '(video)' in lowered
+        if typed_video or (not in_audio_section and not typed_audio):
             continue
         match = pattern.search(line)
         if not match:
@@ -70,6 +77,8 @@ def list_input_devices(
     timeout_seconds: float = 5.0,
 ) -> list[str]:
     """Enumerate physical DirectShow audio inputs without opening or recording them."""
+    if sys.platform != 'win32':
+        return []  # enumerateDevices/getUserMedia supplies browser input IDs.
     resolved = ffmpeg_bin or require_binary("ffmpeg.exe")
     proc = subprocess.run(
         [resolved, "-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"],

@@ -426,8 +426,9 @@ class StationWorker:
         return cleaned or stem
 
     def _default_crossfade_seconds(self) -> float:
-        raw_value = SettingsRepository(self.conn).get_system().get(
-            "default_crossfade_seconds", 5.0
+        repo = SettingsRepository(self.conn)
+        raw_value = repo.get_station(self.station_id).get(
+            "default_crossfade_seconds", repo.get_system().get("default_crossfade_seconds", 5.0)
         )
         try:
             return max(0.0, float(raw_value or 0.0))

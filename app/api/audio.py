@@ -1,7 +1,7 @@
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.audio.device_discovery import list_output_devices
 from app.audio.live_mic_registry import live_mic_registry
@@ -139,6 +139,45 @@ class LiveRenderStopPayload(BaseModel):
     station_id: int = 1
 
 
+class TransitionSettingsPayload(BaseModel):
+    station_id: int = Field(default=1, ge=1)
+    crossfade_seconds: float = Field(ge=0, le=10, allow_inf_nan=False)
+
+
+def _transition_snapshot(repo, station_id):
+    station = repo.get_station(station_id)
+    raw = station.get('default_crossfade_seconds', repo.get_system().get('default_crossfade_seconds', 5))
+    try:
+        seconds = max(0.0, min(10.0, float(raw or 0)))
+    except (ValueError, TypeError):
+        seconds = 0.0
+    return {'station_id': station_id, 'crossfade_seconds': seconds}
+
+
+@router.get('/api/audio/transitions/settings')
+def get_transition_settings(station_id: int = 1):
+    conn = get_connection()
+    try:
+        return _transition_snapshot(SettingsRepository(conn), int(station_id))
+    finally:
+        conn.close()
+
+
+@router.put('/api/audio/transitions/settings')
+def save_transition_settings(payload: TransitionSettingsPayload, request: Request):
+    actor = _request_user(request)
+    if actor['role'].lower() not in {'admin', 'superadmin'}:
+        _require_live_input_owner(payload.station_id, actor)
+    conn = get_connection()
+    try:
+        repo = SettingsRepository(conn)
+        # A transition edit never synchronizes, restarts or rewrites outputs.
+        repo.upsert_station(payload.station_id, {'default_crossfade_seconds': payload.crossfade_seconds})
+        return _transition_snapshot(repo, payload.station_id)
+    finally:
+        conn.close()
+
+
 @router.get("/api/audio/devices")
 def get_output_devices():
     try:
@@ -156,7 +195,11 @@ def get_live_audio_status(station_id: int = 1):
     init_db()
     conn = get_connection()
     try:
-        return _settings_snapshot(SettingsRepository(conn), int(station_id))
+        payload = _settings_snapshot(SettingsRepository(conn), int(station_id))
+        live = live_mic_registry.snapshot(int(station_id))
+        for key in ('live_input_enabled', 'transmitting', 'active_user'):
+            payload[key] = live[key]
+        return payload
     finally:
         conn.close()
 
@@ -232,11 +275,16 @@ def start_live_render(payload: LiveRenderStartPayload, request: Request):
 async def push_live_render_chunk(request: Request, station_id: int = 1):
     actor = _request_user(request)
     _require_live_input_owner(int(station_id), actor)
+    active = live_mic_registry.snapshot(int(station_id)).get("active_user") or {}
+    if int(active.get("id") or 0) != int(actor["id"]):
+        raise HTTPException(status_code=403, detail="live_input_owned_by_another_user")
     payload = await request.body()
     if not payload:
         raise HTTPException(status_code=400, detail="empty_render_chunk")
     try:
         return live_mic_registry.push_render_chunk(int(station_id), payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 

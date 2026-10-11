@@ -7,14 +7,15 @@ def test_purge_inactive_pending_preserves_playing_source() -> None:
     conn = sqlite3.connect(":memory:")
     conn.executescript(
         """
-        CREATE TABLE tracks (id INTEGER PRIMARY KEY, is_active INTEGER);
+        CREATE TABLE tracks (id INTEGER PRIMARY KEY, is_active INTEGER,
+                             track_type TEXT DEFAULT 'music');
         CREATE TABLE queue_items (
             id INTEGER PRIMARY KEY,
             station_id INTEGER NOT NULL,
             track_id INTEGER NOT NULL,
             status TEXT NOT NULL
         );
-        INSERT INTO tracks VALUES (1, 0), (2, 0), (3, 1);
+        INSERT INTO tracks (id,is_active) VALUES (1, 0), (2, 0), (3, 1);
         INSERT INTO queue_items VALUES
             (10, 4, 1, 'playing'),
             (11, 4, 2, 'pending'),

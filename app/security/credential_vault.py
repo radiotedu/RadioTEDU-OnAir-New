@@ -214,6 +214,15 @@ class CredentialVault:
             )
         )
         self._unprotect = unprotect or _default_unprotect
+        if os.name != 'nt' and protect is None and os.getenv('CLEANROOM_CREDENTIAL_BACKEND', '').lower() == 'fernet':
+            from app.security.portable_credentials import PortableCredentialProvider
+            provider = PortableCredentialProvider(
+                os.getenv('CLEANROOM_CREDENTIAL_KEY_FILE', '').strip()
+                or self.path.parent / 'credential-encryption.key'
+            )
+            self._protect = provider.protect
+            self._unprotect = provider.unprotect
+            self.protection_scope = 'portable'
         self._lock = threading.RLock()
 
     def _read(self) -> dict:
@@ -271,7 +280,7 @@ class CredentialVault:
         with self._lock:
             payload = self._read()
             payload["credentials"][normalized_reference] = encoded
-            if self.protection_scope in {"user", "machine"}:
+            if self.protection_scope in {"user", "machine", "portable"}:
                 payload["scope"] = self.protection_scope
             self._write(payload)
 

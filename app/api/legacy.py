@@ -7,6 +7,7 @@ import shutil
 import sqlite3
 import struct
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -332,6 +333,7 @@ class LibraryFolderSyncPayload(BaseModel):
     incremental: bool = False
     guard_configured_folder: bool = False
     allow_empty: bool = False
+    enqueue_new_music: bool = False
 
 
 class FolderPickerPayload(BaseModel):
@@ -801,8 +803,8 @@ def _simulate_ytdlp_import(job_id: str, request_payload: dict) -> dict:
     track_type = str(request_payload.get("track_type") or "music").strip().lower() or "music"
     station_id = int(request_payload.get("station_id") or 1)
     target_station_id = int(request_payload.get("target_station_id") or station_id)
-    audio_format = str(request_payload.get("audio_format") or "mp3").strip().lower() or "mp3"
-    audio_quality = str(request_payload.get("audio_quality") or "192").strip()
+    audio_format = str(request_payload.get("audio_format") or "best").strip().lower() or "best"
+    audio_quality = str(request_payload.get("audio_quality") or "0").strip()
     queue_mode = str(request_payload.get("queue_mode") or "library_only").strip().lower()
     url = str(request_payload.get("url") or "")
     download_playlist = bool(request_payload.get("download_playlist", False))
@@ -3494,7 +3496,7 @@ def legacy_queue_ytdlp_import(
     audio_format = str(payload.audio_format or "best").strip().lower()
     if audio_format not in {"best", "mp3", "m4a", "flac", "wav", "opus", "vorbis", "aac", "alac"}:
         raise HTTPException(status_code=400, detail="unsupported audio format")
-    queue_mode = str(payload.queue_mode or "replace_pending").strip().lower()
+    queue_mode = str(payload.queue_mode or "library_only").strip().lower()
     if queue_mode not in {"replace_pending", "append", "library_only"}:
         raise HTTPException(status_code=400, detail="unsupported playlist queue mode")
     audio_quality = str(payload.audio_quality or "0").strip().upper()
@@ -4025,7 +4027,9 @@ def _canonical_library_path(value: str | Path) -> str:
         resolved = path.resolve(strict=False)
     except (OSError, RuntimeError):
         resolved = path.absolute()
-    return str(resolved).replace("/", "\\").casefold()
+    if sys.platform == 'win32':
+        return str(resolved).replace("/", "\\").casefold()
+    return str(resolved)
 
 
 def _windows_process_session_id() -> int | None:
@@ -4292,15 +4296,20 @@ def _sync_station_library_folder_with_connection(
             return guard_result
 
     extensions = audio_upload_extensions()
-    iterator = base.rglob("*") if bool(payload.recursive) else base.iterdir()
+    from app.services.managed_media_scan import scan_managed_media
+    try:
+        inventory = scan_managed_media(base, recursive=bool(payload.recursive), extensions=extensions)
+    except OSError as exc:
+        raise HTTPException(status_code=409, detail='managed_folder_scan_incomplete') from exc
+    iterator = (path for path, _ in inventory)
     candidates_by_path: dict[str, Path] = {}
     for path in iterator:
         try:
-            if not path.is_file() or path.suffix.lower() not in extensions:
-                continue
+            if not path.is_file():
+                raise OSError('Managed media disappeared during inventory validation')
             resolved = path.resolve(strict=True)
-        except OSError:
-            continue
+        except OSError as exc:
+            raise HTTPException(status_code=409, detail='managed_folder_scan_incomplete') from exc
         candidates_by_path.setdefault(_canonical_library_path(resolved), resolved)
 
     candidates = [candidates_by_path[key] for key in sorted(candidates_by_path)]
@@ -4441,6 +4450,8 @@ def _sync_station_library_folder_with_connection(
     metadata_fallbacks = 0
     duplicate_rows_deactivated = 0
     target_track_ids: list[int] = []
+    introduced_track_ids: list[int] = []
+    pending_added = 0
     default_genre = str(payload.default_genre or "").strip()
     default_language = str(payload.default_language or "").strip()
     prefix = "library" if kind == "music" else f"{kind}_library"
@@ -4543,6 +4554,7 @@ def _sync_station_library_folder_with_connection(
                 track_id = int(primary["id"])
                 if not bool(primary["is_active"]):
                     reactivated += 1
+                    introduced_track_ids.append(track_id)
                 else:
                     retained += 1
                 conn.execute(
@@ -4608,6 +4620,7 @@ def _sync_station_library_folder_with_connection(
                 ),
             )
             target_track_ids.append(int(cursor.lastrowid))
+            introduced_track_ids.append(int(cursor.lastrowid))
             added += 1
 
         deactivated_ids: list[int] = []
@@ -4655,6 +4668,25 @@ def _sync_station_library_folder_with_connection(
                     )
                     schedules_removed = int(cursor.rowcount or 0)
                     _reindex_pending_queue(conn, sid)
+
+        if payload.enqueue_new_music and kind == 'music' and introduced_track_ids:
+            # Only fresh/reactivated files are appended. Existing operator rows
+            # and the playing item retain ownership; inventory + queue commit
+            # atomically, so a failed import cannot leave ghost queue entries.
+            active_queue_ids = {int(row['track_id']) for row in conn.execute(
+                "SELECT track_id FROM queue_items WHERE station_id=? AND status IN ('playing', 'pending')", (sid,)
+            )}
+            position = int(conn.execute(
+                "SELECT COALESCE(MAX(position), 0) FROM queue_items WHERE station_id=? AND status IN ('playing', 'pending')", (sid,)
+            ).fetchone()[0])
+            for track_id in introduced_track_ids:
+                if track_id in active_queue_ids:
+                    continue
+                position += 1
+                conn.execute("INSERT INTO queue_items (station_id, track_id, position, status) VALUES (?, ?, ?, 'pending')",
+                             (sid, track_id, position))
+                active_queue_ids.add(track_id)
+                pending_added += 1
 
         for key, value in profile_values.items():
             conn.execute(
@@ -4734,6 +4766,7 @@ def _sync_station_library_folder_with_connection(
         "invalid_files_skipped": len(unplayable),
         "invalid_files": unplayable[:50],
         "pending_queue_items_removed": pending_removed,
+        "pending_queue_items_added": pending_added,
         "program_queue_items_removed": program_items_removed,
         "pending_schedules_removed": schedules_removed,
     }

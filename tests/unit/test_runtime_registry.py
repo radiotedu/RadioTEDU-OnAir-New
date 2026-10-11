@@ -12,6 +12,13 @@ from app.repositories.settings_repo import SettingsRepository
 from app.repositories.station_output_repo import StationOutputRepository
 
 
+@pytest.fixture(autouse=True)
+def interactive_fake_outputs(monkeypatch):
+    # A service/bootstrap test elsewhere can leave this process-wide switch on.
+    # These fake-runtime cases exercise explicitly enabled interactive outputs.
+    monkeypatch.delenv('CLEANROOM_DISABLE_LOCAL_PLAYBACK', raising=False)
+
+
 def test_stale_high_quality_profile_uses_commissioned_aac_lc_192():
     settings = {
         "station_1_extra_icecast_outputs": json.dumps(

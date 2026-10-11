@@ -2,6 +2,14 @@ from fastapi.testclient import TestClient
 
 from app.db import get_connection, init_db
 from app.main import app
+import pytest
+from tests.media_fixtures import seed_track
+
+
+@pytest.fixture(autouse=True)
+def station_owned_media(tmp_path):
+    for track_id in (77,101,102,201,202,203,301,401,501):
+        seed_track(tmp_path, 1, track_id)
 
 
 def test_queue_push_writes_queue_and_outbox(tmp_path, monkeypatch):

@@ -25,8 +25,9 @@ def test_worker_marks_failed_when_track_uri_missing(tmp_path, monkeypatch):
     worker = StationWorker(station_id=1, worker_id="worker-1")
     out = worker.process_once()
 
-    assert out["source"] == "manual"
-    assert out["reason"] == "track_missing"
+    # Invalid rows are retired before selection; they must never become a
+    # manual playout source or block a valid successor.
+    assert out['source'] != 'manual'
     cur = conn.cursor()
     cur.execute("SELECT status FROM queue_items WHERE station_id=1 ORDER BY id ASC LIMIT 1")
     assert cur.fetchone()["status"] == "failed"
