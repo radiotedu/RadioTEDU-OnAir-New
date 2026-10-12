@@ -8,7 +8,7 @@
   <meta name="description" content="Deterministic RadioTEDU OnAir automation wall for any radio station">
   <title>RadioTEDU OnAir</title>
   <link rel="manifest" href="/static/manifest.json">
-  <link rel="stylesheet" href="/static/onair/styles.css?v=18">
+  <link rel="stylesheet" href="/static/onair/styles.css?v=19">
 </head>
 <body>
   <div id="authGate" class="auth-gate" hidden>
@@ -72,6 +72,7 @@
           <button class="operator-nav-button" type="button" data-operator-nav="stations"><span class="nav-icon" aria-hidden="true">ST</span><span><b>Stations</b><small>Fleet and outputs</small></span></button>
           <button class="operator-nav-button" type="button" data-operator-nav="queue"><span class="nav-icon" aria-hidden="true">Q</span><span><b>Queue</b><small>Durable playout order</small></span></button>
           <button class="operator-nav-button" type="button" data-operator-nav="scheduler"><span class="nav-icon" aria-hidden="true">SC</span><span><b>Scheduler</b><small>Exact-time events</small></span></button>
+          <button class="operator-nav-button" type="button" data-operator-nav="special-events"><span class="nav-icon" aria-hidden="true">ÖG</span><span><b>Özel günler</b><small>Dönemsel liste ve metadata</small></span></button>
           <button class="operator-nav-button" type="button" data-operator-nav="broadcast-planner"><span class="nav-icon" aria-hidden="true">BP</span><span><b>Broadcast planner</b><small>Ads, sweepers and programmes</small></span></button>
           <button class="operator-nav-button" type="button" data-operator-nav="dayparting"><span class="nav-icon" aria-hidden="true">DP</span><span><b>Dayparting</b><small>Weekly tempo clock</small></span></button>
           <button class="operator-nav-button" type="button" data-operator-nav="shows"><span class="nav-icon" aria-hidden="true">SH</span><span><b>Shows</b><small>Programs and presenters</small></span></button>
@@ -1061,6 +1062,41 @@
           <ol id="activityList" class="activity-list"></ol>
         </article>
       </section>
+      <section class="panel special-event-panel" data-operator-view="special-events" hidden>
+        <div class="panel-heading"><div><div class="eyebrow">ÖZEL GÜN YAYINLARI</div><h2>Dönemsel yayınlar</h2></div><button id="eventNew" class="button secondary" type="button">Yeni yayın</button></div>
+        <p class="card-copy">Seçtiğiniz kanalda belirli tarihler ve saatler arasında ayrı bir liste çalınır. Süre bitince normal sıraya dönülür. Planlar yeniden başlatmadan sonra da korunur.</p>
+        <label>Kanal<select id="eventStation"></select></label>
+        <div id="eventProgramList" class="record-list"></div>
+        <form id="eventForm" class="configuration-form">
+          <input id="eventId" type="hidden">
+          <div class="form-grid">
+            <label>Yayın adı<input id="eventName" required maxlength="120" placeholder="10 Kasım anma yayını"></label>
+            <label>Yayın türü<select id="eventMode"><option value="playlist">Özel şarkı listesi</option><option value="metadata">Yalnızca sabit metadata</option></select></label>
+            <label>Başlangıç tarihi<input id="eventStartDate" type="date" required></label>
+            <label>Son tarih<input id="eventEndDate" type="date" required></label>
+            <label>Başlangıç saati<input id="eventStartTime" type="time" value="00:00" required></label>
+            <label>Bitiş saati<input id="eventEndTime" type="time" value="00:00" required></label>
+            <label>Saat dilimi<input id="eventTimezone" value="Europe/Istanbul" required></label>
+            <label>Öncelik<input id="eventPriority" type="number" value="100" min="-100" max="1000"></label>
+            <label>Başlama<select id="eventBoundary"><option value="exact">Saatinde yumuşak geçiş</option><option value="boundary">Çalan şarkı bitince</option></select></label>
+            <label>Şarkı sırası<select id="eventOrder"><option value="ordered">Listedeki sıra</option><option value="shuffle">Karışık sıra</option></select></label>
+            <label>Crossfade (saniye)<input id="eventCrossfade" type="number" value="3" min="0" max="10" step="0.1"></label>
+            <label>Sabit metadata (isteğe bağlı)<input id="eventMetadata" maxlength="256" placeholder="10 Kasım — Saygıyla anıyoruz"></label>
+          </div>
+          <div class="button-row"><label><input id="eventAnnual" type="checkbox"> Her yıl tekrarla</label><label><input id="eventLoop" type="checkbox" checked> Liste bitince tekrarla</label><label><input id="eventEnabled" type="checkbox" checked> Etkin</label></div>
+          <p class="card-copy">Aynı başlangıç ve bitiş saati 24 saat demektir. Gece yarısını aşan aralıklar desteklenir. Tarih aralığında her gün bu saatler uygulanır. Çakışmada yüksek öncelikli plan seçilir. Metadata için ayrı, tüm gün süren bir plan da oluşturabilirsiniz.</p>
+          <div id="eventAudioFields">
+            <label>Kaynak klasör<input id="eventFolder" placeholder="C:\Users\...\Downloads\10 Kasım"></label>
+            <div class="button-row"><button id="eventPickFolder" class="button secondary" type="button">Klasör seç</button><button id="eventNativeFolder" class="button ghost" type="button">RadioTEDU masaüstünde yerinden seç</button><button id="eventScanFolder" class="button ghost" type="button">Klasörü tara / listeyi yenile</button><label><input id="eventRecursive" type="checkbox" checked> Alt klasörler dahil</label></div>
+            <input id="eventFolderFiles" type="file" webkitdirectory multiple hidden>
+            <p class="card-copy">Tarayıcıda seçilen şarkılar ayrı bir havuza kopyalanır; orijinal ses kalitesi korunur. Masaüstü klasör seçimi dosyaları yerinden okur. Klasöre şarkı eklediğinizde listeyi yenileyip kaydedin.</p>
+            <div class="button-row"><button id="eventSelectAll" class="button ghost" type="button">Hepsini seç</button><button id="eventSelectNone" class="button ghost" type="button">Seçimi temizle</button><span id="eventTrackCount" class="count-badge">0</span></div>
+            <ol id="eventTracks" class="event-track-list"></ol>
+          </div>
+          <div class="button-row"><button id="eventSave" class="button primary" type="submit">Planı kaydet ve doğrula</button></div>
+          <p id="eventResult" class="action-result" role="status" aria-live="polite"></p>
+        </form>
+      </section>
       </main>
     </div>
   </div>
@@ -1068,7 +1104,8 @@
   <div id="busyOverlay" class="busy-overlay" hidden><div class="busy-card"><span class="spinner"></span><b id="busyTitle">Working...</b><small id="busyDetail">Waiting for verified state</small></div></div>
   <div id="toastRegion" class="toast-region" aria-live="assertive"></div>
   <script src="/static/onair/live-microphone.js?v=1" defer></script>
-  <script src="/static/onair/app.js?v=52" defer></script>
+  <script src="/static/onair/special-events.js?v=1" defer></script>
+  <script src="/static/onair/app.js?v=53" defer></script>
     <script src="/static/onair/guest-room.js?v=6" defer></script>
     <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js', { scope: '/' });</script>
 </body>

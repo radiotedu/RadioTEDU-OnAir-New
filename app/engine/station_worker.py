@@ -3653,6 +3653,9 @@ class StationWorker:
         ):
             recover(self.station_id)
 
+        from app.services.special_events import refresh_special_metadata
+        refresh_special_metadata(self)
+
         # ── Show lifecycle check ──────────────────────────────
         show_session = self._get_active_show_session()
         show_result = self._process_show_lifecycle(show_session)
@@ -3669,6 +3672,11 @@ class StationWorker:
                 show_result = self._process_show_lifecycle(show_session)
         if show_result is not None:
             return show_result
+
+        from app.services.special_events import process_special_event
+        special_result = process_special_event(self)
+        if special_result is not None:
+            return special_result
 
         # A failed music crossfade can be deferred while the current decoder
         # finishes naturally. Keep that producer alive and let the pending

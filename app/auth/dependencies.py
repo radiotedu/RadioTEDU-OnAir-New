@@ -325,6 +325,10 @@ def user_is_allowed_for_request(user: dict, path: str, method: str) -> bool:
     permissions = _normalized_effective_permissions(user)
     user_role = str(user.get("role") or "")
 
+    if (normalized_path.startswith("/api/special-event-media/")
+            or (normalized_path.startswith("/api/stations/") and "/special-events" in normalized_path)):
+        return _normalize_legacy_role(user_role) in {"admin", "dj", "producer"}
+
     if _path_matches("/api/stream-config/", normalized_path):
         if _normalize_legacy_role(user_role) == "admin":
             return True

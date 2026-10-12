@@ -46,6 +46,7 @@ from app.api.setup import router as setup_router
 from app.api.stations import router as stations_router
 from app.api.studios import router as studios_router
 from app.api.tracks import router as tracks_router
+from app.api.special_events import router as special_events_router
 from app.api.users import router as users_router
 from app.api.webrtc import router as webrtc_router
 from app.auth.dependencies import (
@@ -595,6 +596,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(special_events_router)
 app.include_router(health_router)
 app.include_router(health_wall_router)
 app.include_router(ha_router)
