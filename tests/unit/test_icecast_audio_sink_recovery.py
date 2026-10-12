@@ -8,6 +8,69 @@ from app.audio.gst_pipeline import StationPipelineConfig
 from app.audio.icecast_audio_sink import IcecastAudioSink
 
 
+def test_replaced_encoder_pipe_resumes_the_pending_frame_without_queue_loss(monkeypatch):
+    monkeypatch.setattr(sink_module, "_PCM_PROGRAMME_START_RESERVE_BYTES", 1)
+    sink = IcecastAudioSink("ffmpeg", lambda *args, **kwargs: None)
+    first = b"\x01\x00\x02\x00" * 128
+    second = b"\x03\x00\x04\x00" * 128
+    failed = threading.Event()
+    delivered = threading.Event()
+    attempts = []
+    writes = []
+
+    class BrokenPipe:
+        def write(self, payload):
+            attempts.append(bytes(payload))
+            failed.set()
+            raise BrokenPipeError("old encoder pipe is closed")
+
+    class HealthyPipe:
+        def write(self, payload):
+            writes.append(bytes(payload))
+            if len(writes) == 2:
+                sink._writer_stop.set()
+                delivered.set()
+
+        def flush(self):
+            pass
+
+    sink._process = SimpleNamespace(stdin=BrokenPipe(), poll=lambda: None)
+    sink._pcm_queue.put(first)
+    sink._pcm_queue.put(second)
+    sink._start_writer_worker()
+    try:
+        assert failed.wait(2)
+        # Wait for the handler to record the failed old pipe, rather than
+        # replacing it between the write exception and its error bookkeeping.
+        deadline = time.monotonic() + 2
+        while not sink._writer_failed and time.monotonic() < deadline:
+            threading.Event().wait(0.01)
+        assert sink._writer_failed
+        assert sink._writer_pending_chunk == first
+        assert sink.is_running() is False
+        sink._process = SimpleNamespace(stdin=HealthyPipe(), poll=lambda: None)
+        assert delivered.wait(2), "The replacement encoder never received pending PCM"
+        sink._writer_thread.join(timeout=2)
+        assert attempts == [first]
+        assert writes == [first, second]
+        assert sink._writer_pending_chunk is None
+        assert sink._writer_dropped_chunks == 0
+        assert not sink._writer_failed
+    finally:
+        sink._writer_stop.set()
+        sink._writer_thread.join(timeout=2)
+        sink._process = None
+
+
+def test_a_dead_pcm_writer_remains_a_recovery_authority():
+    sink = IcecastAudioSink("ffmpeg", lambda *args, **kwargs: None)
+    sink._process = SimpleNamespace(stdin=object(), poll=lambda: None)
+    sink._writer_failed = True
+    sink._connector_thread = SimpleNamespace(is_alive=lambda: True)
+    assert sink.is_running() is False
+    assert sink.accepts_input() is False
+
+
 def test_mount_probe_requires_audio_bytes_after_valid_headers(monkeypatch):
     payload = b"a" * 512
 

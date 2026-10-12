@@ -6,7 +6,7 @@ from app.main import app
 def test_frontend_bootstrap_routes_exist_and_match_shapes(tmp_path, monkeypatch):
     monkeypatch.setenv("CLEANROOM_DB_PATH", str(tmp_path / "cleanroom.db"))
     monkeypatch.setattr("app.main.bootstrap_dependencies", lambda: {})
-    monkeypatch.setattr("app.main._autostart_station_worker_loops", lambda conn: None)
+    monkeypatch.setattr("app.main._autostart_station_worker_loops", lambda conn, **_kwargs: None)
     c = TestClient(app)
     route_paths = {getattr(route, "path", "") for route in app.routes}
 

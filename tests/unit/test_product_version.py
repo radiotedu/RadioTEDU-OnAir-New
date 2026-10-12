@@ -11,7 +11,7 @@ def test_repository_version_drives_api_and_release_manifest():
     root = Path(__file__).resolve().parents[2]
     source_version = (root / "VERSION").read_text(encoding="utf-8").strip()
 
-    assert source_version == "1.1.1"
+    assert source_version == "1.1.2"
     assert PRODUCT_VERSION == source_version
     assert app.version == source_version
     assert build_release_manifest()["version"] == source_version

@@ -1,3 +1,6 @@
+import threading
+import time
+
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -31,6 +34,13 @@ def _capture_worker_loop_start(monkeypatch):
     monkeypatch.setattr("app.api.runtime.worker_loop_manager.start", _fake_start)
     return started
 
+
+
+def _wait_for_started(started, count):
+    deadline = time.monotonic() + 3
+    while len(started) < count and time.monotonic() < deadline:
+        threading.Event().wait(0.01)
+    assert len(started) == count, "Background boot task did not start the authorized roster"
 
 def test_normal_startup_does_not_apply_a_legacy_codec_migration(monkeypatch):
     calls = []
@@ -74,6 +84,7 @@ def test_lifespan_autostarts_worker_loops_for_all_stations(
     with TestClient(app) as client:
         res = client.get("/api/health")
         assert res.status_code == 200
+        _wait_for_started(started, 3)
 
     assert started == [
         {
@@ -113,6 +124,7 @@ def test_lifespan_autostarts_worker_loop_with_station_specific_fallback(
     with TestClient(app) as client:
         res = client.get("/api/health")
         assert res.status_code == 200
+        _wait_for_started(started, 1)
 
     assert started == [
         {

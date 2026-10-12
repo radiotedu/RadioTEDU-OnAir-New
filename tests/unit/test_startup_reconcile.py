@@ -28,7 +28,7 @@ def test_app_startup_reconciles_stale_playing_queue_items(tmp_path, monkeypatch)
 def test_app_startup_backfills_missing_track_durations(tmp_path, monkeypatch):
     monkeypatch.setenv("CLEANROOM_DB_PATH", str(tmp_path / "cleanroom.db"))
     monkeypatch.setattr("app.main.bootstrap_dependencies", lambda: {})
-    monkeypatch.setattr("app.main._autostart_station_worker_loops", lambda _conn: None)
+    monkeypatch.setattr("app.main._autostart_station_worker_loops", lambda _conn, **_kwargs: None)
     init_db()
     conn = get_connection()
 
