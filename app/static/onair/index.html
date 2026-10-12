@@ -1078,7 +1078,8 @@
             <label>Bitiş saati<input id="eventEndTime" type="time" value="00:00" required></label>
             <label>Saat dilimi<input id="eventTimezone" value="Europe/Istanbul" required></label>
             <label>Öncelik<input id="eventPriority" type="number" value="100" min="-100" max="1000"></label>
-            <label>Başlama<select id="eventBoundary"><option value="exact">Saatinde yumuşak geçiş</option><option value="boundary">Çalan şarkı bitince</option></select></label>
+            <label>Başlama<select id="eventBoundary"><option value="boundary" selected>Çalan şarkı bitince (önerilen)</option><option value="exact">Saatinde devral (çalan şarkıyı kesebilir)</option></select></label>
+            <p class="muted">Program 09:00 için planlandıysa, çalan şarkı 09:02’de bittiğinde başlar. Bitiş saati değişmez. Sabit metadata belirlediğiniz saat aralığında uygulanır.</p>
             <label>Şarkı sırası<select id="eventOrder"><option value="ordered">Listedeki sıra</option><option value="shuffle">Karışık sıra</option></select></label>
             <label>Crossfade (saniye)<input id="eventCrossfade" type="number" value="3" min="0" max="10" step="0.1"></label>
             <label>Sabit metadata (isteğe bağlı)<input id="eventMetadata" maxlength="256" placeholder="10 Kasım — Saygıyla anıyoruz"></label>
@@ -1104,7 +1105,7 @@
   <div id="busyOverlay" class="busy-overlay" hidden><div class="busy-card"><span class="spinner"></span><b id="busyTitle">Working...</b><small id="busyDetail">Waiting for verified state</small></div></div>
   <div id="toastRegion" class="toast-region" aria-live="assertive"></div>
   <script src="/static/onair/live-microphone.js?v=1" defer></script>
-  <script src="/static/onair/special-events.js?v=1" defer></script>
+  <script src="/static/onair/special-events.js?v=2" defer></script>
   <script src="/static/onair/app.js?v=53" defer></script>
     <script src="/static/onair/guest-room.js?v=6" defer></script>
     <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js', { scope: '/' });</script>

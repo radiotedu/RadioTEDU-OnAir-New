@@ -2385,6 +2385,22 @@ class StationWorker:
 
         return False
 
+    def _complete_special_event_predecessor(self, runtime_status):
+        """Retire a proven EOF without replaying the song after a programme."""
+        for repo_name, advance in (
+            ('queue_repo', self._complete_queue_item),
+            ('ad_repo', lambda _item: self._advance_playing_ad_item()),
+            ('schedule_repo', lambda _item: self._advance_playing_schedule_item()),
+        ):
+            repo = getattr(self, repo_name, None)
+            current = getattr(repo, 'current_playing', None)
+            item = current(self.station_id) if callable(current) else None
+            if item is None:
+                continue
+            uri, *_ = self._track_runtime_fields(int(item['track_id'] or 0))
+            if self._runtime_source_finished_naturally(runtime_status, uri):
+                advance(item)
+
     def _finish_playing_queue_item(self):
         """Mark current playing queue item as done (used when another source preempts)."""
         playing = self.queue_repo.current_playing(self.station_id)

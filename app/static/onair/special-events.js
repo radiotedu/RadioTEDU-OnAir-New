@@ -15,7 +15,7 @@
     tracks.splice(to, 0, tracks.splice(from, 1)[0]); renderTracks();
   }
   function reset() {
-    $('eventForm').reset(); $('eventId').value = ''; tracks = []; renderTracks();
+    $('eventForm').reset(); $('eventId').value = ''; $('eventBoundary').value = 'boundary'; tracks = []; renderTracks();
     creationToken = window.crypto.randomUUID().replaceAll('-', '');
     const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/Istanbul' });
     $('eventStartDate').value = today; $('eventEndDate').value = today;
@@ -37,7 +37,7 @@
   function edit(id) {
     const p = programs.find((p) => p.id === id); if (!p) return;
     const fields = { eventId:'id', eventName:'name', eventMode:'mode', eventStartDate:'starts_on', eventEndDate:'ends_on', eventStartTime:'local_start', eventEndTime:'local_end', eventTimezone:'timezone', eventPriority:'priority', eventMetadata:'metadata_title', eventFolder:'source_folder', eventOrder:'order', eventBoundary:'start_policy', eventCrossfade:'crossfade_seconds' };
-    Object.entries(fields).forEach(([id, key]) => { $(id).value = p[key] ?? ''; });
+    Object.entries(fields).forEach(([id, key]) => { $(id).value = p[key] ?? (key === 'start_policy' ? 'boundary' : ''); });
     [['eventAnnual','annual'],['eventLoop','repeat_playlist'],['eventEnabled','enabled'],['eventRecursive','recursive']].forEach(([id,key]) => { $(id).checked = Boolean(p[key]); });
     tracks = p.tracks.map((t) => ({ ...t, selected:true })); renderTracks();
     $('eventAudioFields').hidden = p.mode === 'metadata'; message('Plan düzenleniyor: ' + p.name);
