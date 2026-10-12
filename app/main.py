@@ -219,7 +219,9 @@ def _prime_startup_ai_prefetch(conn, *, skip_startup_ai: bool) -> int:
     return started
 
 
-def _autostart_station_worker_loops(conn) -> None:
+def _autostart_station_worker_loops(
+    conn, *, station_ids: set[int] | None = None, stop_event: threading.Event | None = None
+) -> set[int]:
     repo = StationRepository(conn)
     settings_repo = SettingsRepository(conn)
     rows = list(repo.list_all())
@@ -232,7 +234,9 @@ def _autostart_station_worker_loops(conn) -> None:
     failed_autostarts = []
     for row in rows:
         station_id = int(row["id"])
-        if station_id <= 0:
+        if stop_event is not None and stop_event.is_set():
+            return set()
+        if station_id <= 0 or (station_ids is not None and station_id not in station_ids):
             continue
         station_settings = settings_repo.get_station(station_id)
         if not _truthy_setting(
@@ -281,27 +285,34 @@ def _autostart_station_worker_loops(conn) -> None:
             )
             failed_autostarts.append((station_id, fallback_uri))
 
-    # Retry isolated cold-start failures after sibling workers have initialized
-    # their shared dependencies and warmed the media/database caches.
+    # Give cold caches one immediate retry, then return the remaining station
+    # IDs to the persistent boot recovery task. Never retry healthy siblings.
+    pending: set[int] = set()
     for station_id, fallback_uri in failed_autostarts:
-        time.sleep(2.0)
+        if stop_event is not None:
+            if stop_event.wait(2.0):
+                return set()
+        else:
+            time.sleep(2.0)
         try:
+            current = settings_repo.get_station(station_id)
+            if not _truthy_setting(current.get("broadcast_autostart_enabled", "false")):
+                continue
+            fallback_uri = resolve_station_fallback_uri(station_id=station_id, conn=conn)
             worker_loop_manager.start(
                 station_id=station_id,
                 fallback_uri=fallback_uri,
                 interval_sec=0.1,
                 readiness_timeout_seconds=45.0,
             )
-            logger.info(
-                "Station %d worker autostart recovered on retry",
-                station_id,
-            )
+            logger.info("Station %d worker autostart recovered on retry", station_id)
         except Exception as exc:
+            pending.add(station_id)
             logger.exception(
-                "Station %d worker autostart retry failed; watchdog recovery remains enabled: %s",
-                station_id,
-                exc,
+                "Station %d worker autostart retry failed; durable boot recovery will retry: %s",
+                station_id, exc,
             )
+    return pending
 
 
 def _run_dependency_bootstrap_background() -> None:
@@ -335,16 +346,16 @@ def _run_music_usage_export_background() -> None:
         logger.warning("Music-use daily export failed; will retry: %s", exc)
 
 
-def _autostart_station_worker_loops_background() -> None:
-    conn = get_connection()
-    try:
-        _autostart_station_worker_loops(conn)
-    except Exception as exc:
-        # One stale station lease must not prevent the API or other stations
-        # from becoming available.  The worker manager/watchdog retries it.
-        logger.warning("Station worker background autostart failed: %s", exc)
-    finally:
-        conn.close()
+def _autostart_station_worker_loops_background(stop_event: threading.Event) -> None:
+    from app.services.startup_recovery import recover_station_startup
+
+    recover_station_startup(
+        get_connection,
+        lambda conn, pending, stop: _autostart_station_worker_loops(
+            conn, station_ids=pending, stop_event=stop
+        ),
+        stop_event,
+    )
 
 
 def _broadcast_live_mic_status_event(_event_type: str, station_id: int, snapshot: dict) -> None:
@@ -403,6 +414,7 @@ async def lifespan(_app: FastAPI):
     shutdown_music_usage_export = None
     shutdown_bpm_maintenance = None
     shutdown_broadcast_planner = None
+    shutdown_autostart = threading.Event()
     threading.Thread(
         target=_run_dependency_bootstrap_background,
         daemon=True,
@@ -522,6 +534,7 @@ async def lifespan(_app: FastAPI):
         else:
             threading.Thread(
                 target=_autostart_station_worker_loops_background,
+                args=(shutdown_autostart,),
                 daemon=True,
                 name="station-worker-autostart",
             ).start()
@@ -539,6 +552,7 @@ async def lifespan(_app: FastAPI):
     try:
         yield
     finally:
+        shutdown_autostart.set()
         if shutdown_broadcast_planner is not None:
             shutdown_broadcast_planner.stop()
         connection_manager.reset()

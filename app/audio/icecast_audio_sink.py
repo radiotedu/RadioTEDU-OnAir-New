@@ -808,6 +808,16 @@ class IcecastAudioSink:
                     # connector observes the encoder exit and opens a new one.
                     self._writer_stop.wait(0.05)
                     continue
+                if stdin is not None and failed_stdin is not None:
+                    process = self._process
+                    if process is not None and process.poll() is None:
+                        # The connector replaced the broken encoder pipe. This
+                        # live writer owns the pending PCM frame and can resume
+                        # it; its old failure flag must not make accepts_input()
+                        # refuse the new pipe forever. A dead writer still reports
+                        # failure and requires the existing supervised recovery.
+                        with self._writer_lock:
+                            self._writer_failed = False
                 if stdin is None or not self.accepts_input():
                     # Do not carry a synthetic-silence deadline across an
                     # encoder reconnect. The first frame starts a fresh clock.

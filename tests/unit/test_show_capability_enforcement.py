@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 def _make_app(tmp_path, monkeypatch):
     db_path = tmp_path / "test.db"
     monkeypatch.setenv("CLEANROOM_DB_PATH", str(db_path))
-    monkeypatch.setattr("app.main._autostart_station_worker_loops", lambda conn: None)
+    monkeypatch.setattr("app.main._autostart_station_worker_loops", lambda conn, **_kwargs: None)
 
     from app.main import app
     from app.db import get_connection, init_db
