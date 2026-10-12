@@ -1,3 +1,4 @@
+from dataclasses import replace
 import base64
 import json
 import logging
@@ -514,6 +515,8 @@ class StationRuntimeRegistry:
         # metadata push that failed at track-start self-heals once the origin's
         # (unreliable) HTTP interface is reachable again.
         self._last_metadata_cfg: dict[int, StationPipelineConfig] = {}
+        self._program_metadata_overrides: dict[int, str] = {}
+        self._program_metadata_base: dict[int, StationPipelineConfig] = {}
         # Last now-playing string CONFIRMED delivered to the origin per station, so
         # the refresh loop only re-pushes what is actually missing/stale and keeps
         # retrying a failed push until it lands.
@@ -535,6 +538,35 @@ class StationRuntimeRegistry:
             register_listener = getattr(self._live_mic_registry, "register_listener", None)
             if callable(register_listener):
                 register_listener(self._handle_live_mic_event)
+
+    def _apply_program_metadata(self, station_id: int, cfg):
+        title = self._program_metadata_overrides.get(int(station_id))
+        if not title:
+            return cfg
+        return replace(cfg, stream_title=title, stream_artist='', stream_album='',
+                       metadata_suppressed=False,
+                       extra_icecast_outputs=tuple(dict(output, metadata_suppressed=False)
+                           for output in cfg.extra_icecast_outputs or ()))
+
+    def set_program_metadata_override(self, station_id: int, title: str | None):
+        """Change/release a scheduled title without starting or stopping audio."""
+        sid = int(station_id)
+        with self._operation_lock(sid):
+            title = str(title or '').strip()
+            if self._program_metadata_overrides.get(sid, '') == title:
+                return
+            if title:
+                self._program_metadata_overrides[sid] = title
+            else:
+                self._program_metadata_overrides.pop(sid, None)
+            cfg = self._program_metadata_base.get(sid) or self._last_metadata_cfg.get(sid)
+            if cfg is None:
+                return
+            self._program_metadata_base[sid] = cfg
+            cfg = self._apply_program_metadata(sid, cfg)
+            self._last_metadata_cfg[sid] = cfg
+            generation = self._next_metadata_generation(sid)
+            self._schedule_icecast_metadata_update(sid, cfg, generation)
 
     def _operation_lock(self, station_id: int) -> threading.RLock:
         sid = int(station_id)
@@ -1326,6 +1358,8 @@ class StationRuntimeRegistry:
             ),
             **stream_features,
         )
+        self._program_metadata_base[int(station_id)] = cfg
+        cfg = self._apply_program_metadata(station_id, cfg)
         # Release the per-track configuration connection before process
         # startup.  Long-running stations change tracks indefinitely; relying
         # on interpreter garbage collection here can retain SQLite handles and

@@ -243,6 +243,10 @@ def _post_version_repairs_needed(cur) -> bool:
     }
     if not {"cadence_mode", "repeat_every_songs"}.issubset(plan_columns):
         return True
+    for table_name in ("special_event_programs", "special_event_playout"):
+        cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table_name,))
+        if cur.fetchone() is None:
+            return True
     retry_columns = {"retry_after", "retry_count", "last_error"}
     for table_name in ("queue_items", "ad_break_items", "schedule_items"):
         cur.execute(
@@ -1449,6 +1453,11 @@ def database_health_snapshot(
 
 
 def _bootstrap_schema(cur) -> None:
+    from app.services.special_events import ensure_schema
+    # Additive event tables keep large playlists out of frequently-read station settings.
+    # Stations must exist before their foreign-key children.
+    cur.execute("CREATE TABLE IF NOT EXISTS stations (id INTEGER PRIMARY KEY, name TEXT NOT NULL)")
+    ensure_schema(cur)
     cur.execute(
         "CREATE TABLE IF NOT EXISTS users ("
         "id INTEGER PRIMARY KEY AUTOINCREMENT, "

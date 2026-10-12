@@ -51,6 +51,8 @@ def main():
                     raise RuntimeError('Compiled app reports an unexpected version')
                 with urllib.request.urlopen(f'http://127.0.0.1:{port}/app', timeout=5) as response:
                     panel = response.read().decode('utf-8')
+                if 'special-events.js' not in panel or 'eventFolderFiles' not in panel:
+                    raise RuntimeError('Compiled app is missing special event folder controls')
                 if 'live-microphone.js' not in panel:
                     raise RuntimeError('Compiled app is missing microphone panel assets')
                 with urllib.request.urlopen(f'http://127.0.0.1:{port}/static/onair/microphone-worklet.js', timeout=5) as response:

@@ -139,13 +139,14 @@ def test_every_static_operator_control_has_a_dom_target_and_event_owner():
     html = (ONAIR / "index.html").read_text(encoding="utf-8")
     javascript = (ONAIR / "app.js").read_text(encoding="utf-8")
     guest_javascript = (ONAIR / "guest-room.js").read_text(encoding="utf-8")
-    all_javascript = f"{javascript}\n{guest_javascript}"
+    special_javascript = (ONAIR / "special-events.js").read_text(encoding="utf-8")
+    all_javascript = f"{javascript}\n{guest_javascript}\n{special_javascript}"
 
     ids = re.findall(r'\bid="([A-Za-z][A-Za-z0-9_-]*)"', html)
     assert len(ids) == len(set(ids)), "Duplicate HTML ids make button routing nondeterministic"
     id_set = set(ids)
 
-    referenced_ids = set(re.findall(r"\$\('([^']+)'\)", javascript))
+    referenced_ids = set(re.findall(r"\$\('([^']+)'\)", all_javascript))
     referenced_ids.update(re.findall(r"byId\('([^']+)'\)", guest_javascript))
     assert referenced_ids <= id_set, f"JavaScript references missing DOM ids: {sorted(referenced_ids - id_set)}"
 

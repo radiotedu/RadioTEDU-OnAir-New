@@ -286,3 +286,11 @@ input:focus, select:focus, textarea:focus { border-color: var(--blue); box-shado
 .planner-plan-status.enabled { color: var(--green); }
 @media (max-width: 760px) { .planner-weekday-list { grid-template-columns: repeat(4, minmax(65px, 1fr)); }.planner-plan-card { grid-template-columns: 1fr; }.planner-plan-actions { justify-content: start; } }
 .stream-wizard-step{display:grid;gap:10px;padding:16px;margin:12px 0;border:1px solid var(--line);border-radius:14px;background:var(--panel-soft)}.stream-wizard-step h3{margin:0}.stream-wizard-step details{border-top:1px solid var(--line);padding-top:12px}.stream-wizard-step summary{cursor:pointer;font-weight:800}.stream-wizard-checks{display:grid;gap:7px}.stream-check{padding:9px 11px;border-radius:9px;border:1px solid var(--line)}.stream-check.ready{border-color:var(--success)}.stream-check.unsafe{border-color:var(--danger)}
+
+.special-event-panel { grid-column: 1 / -1; }
+.special-event-panel .form-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:16px; }
+.event-track-list { max-height:420px; overflow:auto; padding-left:28px; }
+.event-track-list li { padding:8px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:10px; }
+.event-track-list li span { flex:1; overflow-wrap:anywhere; }
+.event-track-list li[draggable="true"] { cursor:grab; }
+.event-track-list .button { flex:none; }

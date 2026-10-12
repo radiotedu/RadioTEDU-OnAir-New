@@ -34,7 +34,7 @@ function classList() {
 function createMouseHarness() {
   const views = [
     'onair', 'media', 'playlists', 'automation', 'emergency', 'services', 'settings', 'diagnostics',
-    'stations', 'queue', 'scheduler', 'broadcast-planner', 'dayparting', 'shows', 'compliance', 'ads', 'streaming', 'recovery',
+    'stations', 'queue', 'scheduler', 'special-events', 'broadcast-planner', 'dayparting', 'shows', 'compliance', 'ads', 'streaming', 'recovery',
   ];
   const attributes = new WeakMap();
   const buttons = views.map((view) => ({
@@ -421,7 +421,7 @@ test('mouse navigation activates exactly one current operator workspace and pers
   const harness = createMouseHarness();
   const expectedViews = [
     'onair', 'media', 'playlists', 'automation', 'emergency', 'services', 'settings', 'diagnostics',
-    'stations', 'queue', 'scheduler', 'broadcast-planner', 'dayparting', 'shows', 'compliance', 'ads', 'streaming', 'recovery',
+    'stations', 'queue', 'scheduler', 'special-events', 'broadcast-planner', 'dayparting', 'shows', 'compliance', 'ads', 'streaming', 'recovery',
   ];
   const markupViews = [...html.matchAll(/data-operator-nav="([^"]+)"/g)].map((match) => match[1]);
 

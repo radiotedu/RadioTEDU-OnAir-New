@@ -16,6 +16,7 @@ const OPERATOR_VIEWS = Object.freeze({
   playlists: { eyebrow: 'REUSABLE PROGRAMMING', title: 'Playlists', description: 'Create reusable track lists and verify every ordering change.' },
   queue: { eyebrow: 'DURABLE PLAYOUT', title: 'Queue', description: 'Inspect, reorder, skip, and verify the selected station queue.' },
   scheduler: { eyebrow: 'EXACT-TIME EVENTS', title: 'Scheduler', description: 'Schedule station tracks inside explicit playout windows.' },
+  'special-events': { eyebrow: 'ÖZEL GÜN YAYINLARI', title: 'Dönemsel yayınlar', description: 'Kanal, özel şarkı listesi, tarih/saat ve sabit metadata.' },
   'broadcast-planner': { eyebrow: 'MULTI-STATION SCHEDULING', title: 'Broadcast planner', description: 'Schedule ads, sweepers, and recorded programmes by station, weekday, time, or song count.' },
   dayparting: { eyebrow: 'WEEKLY CLOCK', title: 'Dayparting', description: 'Define timezone-aware tempo programs for every day.' },
   automation: { eyebrow: 'DETERMINISTIC RULES', title: 'Automation', description: 'Manage jingles and exact, operator-defined insertion rules.' },
@@ -6231,6 +6232,9 @@ async function loadOperatorViewData(view) {
   if (view === 'ads') {
     try { await loadAdvertising(); } catch (error) { setResult('adItemResult', errorMessage(error), 'error'); }
   }
+  if (view === 'special-events') {
+    await window.RadioSpecialEvents?.load(state.stationId);
+  }
   if (view === 'broadcast-planner') {
     try { await loadBroadcastPlanner(); } catch (error) { setResult('broadcastPlanResult', errorMessage(error), 'error'); }
   }
@@ -6593,6 +6597,7 @@ async function boot() {
   initializeBroadcastPlanDefaults();
   initializeOperatorNavigation();
   bindEvents();
+  window.RadioSpecialEvents?.mount({ api, pickOperatorPath, escapeHtml, getStations: () => state.stations });
   toggleIcecastFields();
   toggleCurrentOutputFields();
   setConnection('', 'Connecting');

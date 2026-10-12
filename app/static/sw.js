@@ -1,4 +1,4 @@
-const CACHE_NAME = 'RadioTEDU-OnAir-shell-v31';
+const CACHE_NAME = 'RadioTEDU-OnAir-shell-v32';
 const SHELL_ASSETS = [
     '/',
     '/app',
