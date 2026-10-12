@@ -2,14 +2,15 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { appJs, section } = require('./unified_test_helpers.cjs');
 
-test('broadcast start requires two clicks and end-to-end listener evidence', () => {
+test('broadcast start requires two clicks; live claims still require source and listener evidence', () => {
   const source = section(appJs, 'async function startBroadcast(', 'async function stopBroadcast(');
   assert.match(source, /state\.startArmedUntil <= Date\.now\(\)/);
   assert.match(source, /return;/);
   assert.match(source, /verifiedMutation/);
-  assert.match(source, /health\.engine_running/);
-  assert.match(source, /runtime\.output_feed_active/);
-  assert.match(source, /isBroadcastVerifiedLive\(publicStation\)/);
+  assert.match(source, /health\.worker_loop\?\.running/);
+  assert.match(source, /asBool\(settings\.broadcast_autostart_enabled\)/);
+  assert.match(source, /sourceSnapshot\.publicVerified && sourceSnapshot\.sourceReady/);
+  assert.match(source, /public listener verification is pending/);
 });
 
 test('broadcast stop requires confirmation and verifies preserved scheduler state', () => {

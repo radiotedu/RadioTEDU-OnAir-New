@@ -59,6 +59,10 @@ function createCoreHarness() {
     Array,
     Object,
     IS_RTAI_ONAIR: false,
+    loadOperatorProgrammes: async (stationId) => {
+      if (stationId === 4) await oldStationGate.promise;
+      return [{ id: `programme-${stationId}` }];
+    },
     api: async (url) => {
       const match = String(url).match(/station_id=(\d+)|\/runtime\/(\d+)\//);
       const stationId = Number(match?.[1] || match?.[2] || 0);
@@ -106,12 +110,37 @@ test('late core status for the previous station cannot overwrite the selected st
 
   assert.equal(state.health.station_id, 11);
   assert.equal(state.publicStation.id, 11);
+  assert.equal(state.operatorProgrammes[0].id, 'programme-11');
   assert.equal(state.stationStatusLoading, false);
 
   oldStationGate.resolve();
   await previousStationRequest;
   assert.equal(state.health.station_id, 11);
   assert.equal(state.publicStation.id, 11);
+  assert.equal(state.operatorProgrammes[0].id, 'programme-11');
+});
+
+test('current source controls render before a slow broad health report without resetting the playback clock', async () => {
+  const { context, state, oldStationGate } = createCoreHarness();
+  oldStationGate.resolve();
+  const healthGate = deferred();
+  const originalApi = context.api;
+  let renders = 0;
+  state.stationId = 11;
+  context.api = (url) => String(url).startsWith('/api/health')
+    ? healthGate.promise : originalApi(url);
+  context.renderCoreStatus = () => { renders += 1; };
+  const pending = context.__loadCoreStatus();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(state.stationStatusLoading, false);
+  assert.equal(state.runtime.station_id, 11);
+  assert.equal(state.health.engine_running, true);
+  assert.equal(renders, 1);
+  const originalAnchor = state.timelineAnchorAt;
+  healthGate.resolve({ station_id: 11, runtime: { running: true } });
+  await pending;
+  assert.equal(renders, 2);
+  assert.equal(state.timelineAnchorAt, originalAnchor);
 });
 
 test('late queue response for the previous station cannot replace the selected station queue', async () => {

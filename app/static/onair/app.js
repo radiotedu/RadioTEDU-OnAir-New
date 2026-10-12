@@ -9,6 +9,7 @@ let PRODUCT_EDITION = String(document.querySelector('meta[name="onair-edition"]'
 let IS_RTAI_ONAIR = ['rtai', 'rtai-onair', 'rtai_onair'].includes(PRODUCT_EDITION);
 const IDLE_TIMEOUT_MS = 15 * 60 * 1000;
 const IDLE_WARNING_MS = 60 * 1000;
+const OPERATOR_ACTIVITY_KEY = 'radiotedu_operator_activity_v1';
 const OPERATOR_VIEWS = Object.freeze({
   onair: { eyebrow: 'LIVE CONTROL', title: 'On Air', description: 'Control the active broadcast and see what plays next.' },
   stations: { eyebrow: 'STATION FLEET', title: 'Stations', description: 'Create stations and configure independent broadcast outputs.' },
@@ -480,6 +481,7 @@ function saveSession(payload) {
 
 function clearSession() {
   Object.values(AUTH_KEYS).forEach((key) => localStorage.removeItem(key));
+  localStorage.removeItem(OPERATOR_ACTIVITY_KEY);
 }
 
 let refreshSessionPromise = null;
@@ -641,13 +643,31 @@ function showLogin() {
   $('loginUsername').focus();
 }
 
+function sharedOperatorActivityAt(now = Date.now()) {
+  try {
+    const shared = JSON.parse(localStorage.getItem(OPERATOR_ACTIVITY_KEY) || 'null');
+    const identity = String(currentUser().id || currentUser().username || 'operator');
+    const at = Number(shared?.at);
+    return shared?.identity === identity && Number.isFinite(at) && at >= 0 && at <= now ? at : 0;
+  } catch (_) { return 0; }
+}
+
 function recordUserActivity() {
   if ($('appShell').hidden) return;
   state.lastUserActivityAt = Date.now();
+  try {
+    localStorage.setItem(OPERATOR_ACTIVITY_KEY, JSON.stringify({
+      identity: String(currentUser().id || currentUser().username || 'operator'),
+      at: state.lastUserActivityAt,
+    }));
+  } catch (_) { /* This tab's original idle deadline remains authoritative. */ }
   $('idleTimeoutBanner').hidden = true;
 }
 
 async function expireIdleSession() {
+  // An idle tab must not revoke the session being used in another tab.
+  state.lastUserActivityAt = Math.max(state.lastUserActivityAt, sharedOperatorActivityAt());
+  if (Date.now() - state.lastUserActivityAt < IDLE_TIMEOUT_MS) return;
   stopIdleTimer();
   try { await api('/api/auth/logout', { method: 'POST' }); } catch (_) { /* local lock still succeeds */ }
   clearSession();
@@ -657,8 +677,9 @@ async function expireIdleSession() {
 
 function startIdleTimer() {
   stopIdleTimer();
-  state.lastUserActivityAt = Date.now();
+  recordUserActivity();
   state.idleTimer = window.setInterval(() => {
+    state.lastUserActivityAt = Math.max(state.lastUserActivityAt, sharedOperatorActivityAt());
     const remaining = IDLE_TIMEOUT_MS - (Date.now() - state.lastUserActivityAt);
     if (remaining <= 0) {
       expireIdleSession();
@@ -699,6 +720,7 @@ async function loadStations(preferredId = null) {
     state.stationStatusLoading = true;
     state.health = null;
     state.runtime = null;
+    state.operatorProgrammes = [];
     state.publicStation = null;
     state.ai = null;
     state.sweeper = null;
@@ -729,25 +751,56 @@ async function loadCoreStatus() {
   const sid = Number(state.stationId);
   const revision = stationContextRevision;
   const requestSequence = ++coreStatusRequestSequence;
-  const [health, runtime, ai, sweeper, dayparts, publicStations, stationSettings, stationOutput, libraryWatcher, productCatalog] = await Promise.all([
-    api(`/api/health?station_id=${sid}`),
-    api(`/api/runtime/${sid}/status`),
-    api(`/api/ai/settings?station_id=${sid}`),
+  const runtimeRead = api(`/api/runtime/${sid}/status`);
+  const settingsRead = api(`/api/settings/station?station_id=${sid}`);
+  const outputRead = api(`/api/stations/output?station_id=${sid}`);
+  const aiRead = api(`/api/ai/settings?station_id=${sid}`);
+  const programmesRead = loadOperatorProgrammes(sid);
+  // Start all reads together, but do not let a broad dependency/self-check
+  // report hide the already-running source and basic operator controls.
+  const detailedRead = Promise.all([
+    api(`/api/health?station_id=${sid}`).catch(() => null),
+    runtimeRead,
+    aiRead,
     api(`/api/sweeper/config?station_id=${sid}`),
     api(`/api/dayparts?station_id=${sid}`).catch(() => null),
-    rawFetch('/api/public/stations', { cache: 'no-store' }, 12000).then((response) => response.ok ? response.json() : { stations: [] }),
-    api(`/api/settings/station?station_id=${sid}`),
-    api(`/api/stations/output?station_id=${sid}`),
+    rawFetch('/api/public/stations', { cache: 'no-store' }, 12000)
+      .then((response) => response.ok ? response.json() : { stations: [] }).catch(() => ({ stations: [] })),
+    settingsRead,
+    outputRead,
     api('/api/library/watcher/status').catch(() => ({ running: false, profiles: [] })),
     IS_RTAI_ONAIR
       ? Promise.resolve({ running: false, products: [] })
       : api('/api/library/product-catalog/status').catch(() => ({ running: false, products: [] })),
+    programmesRead,
+  ]).then((values) => ({ values }), (error) => ({ error }));
+  const [fastRuntime, fastSettings, fastOutput, fastAi, fastProgrammes] = await Promise.all([
+    runtimeRead, settingsRead, outputRead, aiRead, programmesRead,
   ]);
+  const runtimeReceivedAt = Date.now();
   if (!isCurrentStationContext(sid, revision) || requestSequence !== coreStatusRequestSequence) return false;
-  state.health = health;
+  const settings = fastSettings?.settings || fastSettings || {};
+  const previousHealth = Number(state.health?.station_id) === sid ? state.health : {};
+  const sourceHealth = {
+    ...previousHealth, station_id: sid, runtime: fastRuntime, engine_running: Boolean(fastRuntime.running),
+    worker_loop: fastRuntime.worker_loop || {}, output_mode: settings.output_mode || 'icecast',
+    runtime_branch_health: fastRuntime.branch_health || {}, runtime_delivery_health: fastRuntime.delivery_health || {},
+  };
+  state.runtime = fastRuntime; state.health = sourceHealth;
+  state.stationSettings = settings; state.stationOutput = fastOutput || {};
+  state.ai = fastAi; state.operatorProgrammes = fastProgrammes;
+  state.stationStatusLoading = false; state.timelineAnchorAt = runtimeReceivedAt;
+  renderCoreStatus(); renderOutputConfiguration(); renderTimeline();
+  refreshMicrophoneControls(sid);
+  const detailed = await detailedRead;
+  if (detailed.error) throw detailed.error;
+  const [health, runtime, ai, sweeper, dayparts, publicStations, stationSettings, stationOutput, libraryWatcher, productCatalog, operatorProgrammes] = detailed.values;
+  if (!isCurrentStationContext(sid, revision) || requestSequence !== coreStatusRequestSequence) return false;
+  state.health = health || sourceHealth;
   state.runtime = runtime;
+  state.operatorProgrammes = operatorProgrammes;
   state.stationStatusLoading = false;
-  state.timelineAnchorAt = Date.now();
+  state.timelineAnchorAt = runtimeReceivedAt;
   state.ai = ai;
   state.sweeper = sweeper;
   state.dayparts = dayparts;
@@ -1261,6 +1314,81 @@ async function pickRadioTEDUServicePath(button) {
   }
 }
 
+const operatorProgrammeCache = new Map();
+
+async function loadOperatorProgrammes(stationId) {
+  if (!['admin', 'superadmin', 'producer', 'dj'].includes(String(currentUser().role || ''))) return [];
+  const existing = operatorProgrammeCache.get(stationId);
+  if (existing?.promise) return existing.promise;
+  if (existing && Date.now() - existing.at < 30000) return existing.programmes;
+  const entry = { at: Date.now(), programmes: existing?.programmes || [] };
+  entry.promise = api(`/api/stations/${stationId}/special-events`)
+    .then((value) => { entry.programmes = value.programs || []; return entry.programmes; })
+    .catch(() => entry.programmes)
+    .finally(() => { entry.promise = null; });
+  operatorProgrammeCache.set(stationId, entry);
+  return entry.promise;
+}
+
+function operatorSourceSnapshot(health = state.health || {}, rawRuntime = state.runtime || {}, publicStation = state.publicStation) {
+  const runtime = { ...rawRuntime, ...(health.runtime || {}) };
+  const loop = health.worker_loop || rawRuntime.worker_loop || {};
+  const source = runtime.source_health || runtime.branch_health || health.runtime_branch_health || {};
+  const required = [...new Set([
+    ...Object.entries(runtime.required_outputs || {}).filter(([, enabled]) => enabled).map(([branch]) => branch),
+    ...(runtime.extra_icecast_mounts || []).map((item) => item.branch).filter(Boolean),
+  ])];
+  const sourceActive = Boolean(runtime.running && runtime.output_feed_active
+    && !runtime.program_pcm_stalled && !runtime.program_fanout_blocked);
+  const sourceReady = sourceActive && (required.length
+    ? required.every((branch) => source[branch] === true)
+    : (source.icecast === true || source.local === true));
+  const publicVerified = isBroadcastVerifiedLive(publicStation);
+  // Older adapters may expose only the verified public snapshot.
+  const presentationActive = sourceActive || (publicVerified && runtime.output_feed_active === undefined && runtime.running !== false);
+  return { runtime, loop, source, sourceActive, sourceReady, publicVerified, presentationActive };
+}
+
+function normalizedOperatorMedia(value) {
+  let token = String(value || '').replaceAll('\\', '/');
+  try {
+    if (/^file:/i.test(token)) {
+      const uri = new URL(token);
+      token = decodeURIComponent(uri.pathname);
+      if (uri.hostname && uri.hostname !== 'localhost') token = '//' + uri.hostname + token;
+    }
+  } catch (_) { /* Keep an undecodable path intact for an exact comparison. */ }
+  if (/^\/[a-z]:\//i.test(token)) token = token.slice(1);
+  return /^[a-z]:\//i.test(token) || token.startsWith('//') ? token.toLowerCase() : token;
+}
+
+function operatorCurrentAudio() {
+  const snapshot = operatorSourceSnapshot();
+  if (!snapshot.presentationActive) return null;
+  const activeUri = normalizedOperatorMedia(snapshot.runtime.active_input_uri);
+  const result = snapshot.loop.last_result || {};
+  const programmes = state.operatorProgrammes || [];
+  for (const programme of programmes) {
+    const track = activeUri && (programme.tracks || []).find((item) => normalizedOperatorMedia(item.path) === activeUri);
+    if (track && (result.source === 'special_event' || !result.source)) {
+      return { ...track, source: 'special_event', track_type: 'music', programme_name: programme.name, programme_end: programme.active_until };
+    }
+  }
+  if (result.source === 'special_event') {
+    const programme = programmes.find((item) => item.id === result.program_id);
+    return { title: programme?.name || result.title || 'Özel yayın', artist: 'Özel yayın ses kaynağı',
+      source: 'special_event', track_type: 'music', duration: 0,
+      programme_name: programme?.name || '', programme_end: programme?.active_until };
+  }
+  const current = state.queue.find((item) => item.is_current || String(item.status || '').toLowerCase() === 'playing');
+  if (current) {
+    const expected = normalizedOperatorMedia(current.file_path || current.input_uri);
+    if (!activeUri || !expected || activeUri === expected) return current;
+  }
+  const reported = state.publicStation?.now_playing;
+  return reported?.title ? { ...reported, duration: Number(reported.duration || 0) } : null;
+}
+
 function isBroadcastVerifiedLive(publicStation = state.publicStation) {
   return String(publicStation?.status || '').toLowerCase() === 'live';
 }
@@ -1268,17 +1396,22 @@ function isBroadcastVerifiedLive(publicStation = state.publicStation) {
 function renderCoreStatus(publicStation = state.publicStation) {
   const statusLoading = Boolean(state.stationStatusLoading);
   const health = state.health || {};
-  const runtime = health.runtime || state.runtime || {};
+  const runtime = { ...(state.runtime || {}), ...(health.runtime || {}) };
   const loop = health.worker_loop || state.runtime?.worker_loop || {};
   const branches = health.runtime_branch_health || runtime.branch_health || {};
   const deliveries = health.runtime_delivery_health || runtime.delivery_health || branches;
   const onAir = isBroadcastVerifiedLive(publicStation);
-  $('broadcastTitle').textContent = statusLoading ? `Loading ${selectedStationName()} status` : (onAir ? 'Broadcast is live' : 'Broadcast is stopped');
-  $('onAirLamp').className = `status-lamp ${statusLoading ? 'warming' : (onAir ? 'live' : 'off')}`;
-  $('onAirLamp').innerHTML = `<span></span><b>${statusLoading ? 'CHECKING' : (onAir ? 'ON AIR' : 'OFF AIR')}</b>`;
+  const sourceSnapshot = operatorSourceSnapshot(health, state.runtime || {}, publicStation);
+  $('broadcastTitle').textContent = statusLoading ? `Loading ${selectedStationName()} status`
+    : (onAir ? 'Broadcast is live' : sourceSnapshot.sourceReady ? 'Sending audio — public verification pending'
+      : sourceSnapshot.sourceActive ? 'Audio engine running — checking output' : 'Broadcast is stopped');
+  $('onAirLamp').className = `status-lamp ${statusLoading || (!onAir && sourceSnapshot.sourceActive) ? 'warming' : (onAir ? 'live' : 'off')}`;
+  $('onAirLamp').innerHTML = `<span></span><b>${statusLoading ? 'CHECKING' : onAir ? 'ON AIR' : sourceSnapshot.sourceActive ? 'SOURCE ACTIVE' : 'OFF AIR'}</b>`;
   $('engineState').textContent = statusLoading ? 'Checking' : (runtime.running || health.engine_running ? 'Running' : 'Stopped');
   $('loopState').textContent = statusLoading ? 'Checking' : (loop.running ? 'Running' : 'Stopped');
-  $('icecastState').textContent = statusLoading ? 'Checking' : (deliveries.icecast ? 'Connected' : (health.output_mode === 'icecast' ? 'Disconnected' : 'Not selected'));
+  $('icecastState').textContent = statusLoading ? 'Checking' : (deliveries.icecast ? 'Connected'
+    : sourceSnapshot.source.icecast === true ? 'Connected · listener unverified'
+      : (health.output_mode === 'icecast' ? 'Disconnected' : 'Not selected'));
   const recovery = runtime.recovery || state.runtime?.recovery || {};
   $('recoveryState').textContent = recovery.state === 'retry_wait'
     ? `Retry in ${Math.ceil(Number(recovery.retry_in_seconds || 0))}s`
@@ -1286,10 +1419,11 @@ function renderCoreStatus(publicStation = state.publicStation) {
   $('recoveryState').title = recovery.message || recovery.error_code || '';
   const nowPlaying = publicStation?.now_playing || {};
   const preservedItem = publicStation?.preserved_item || {};
-  $('nowPlayingTitle').textContent = statusLoading ? 'Loading current track…' : (nowPlaying.title || preservedItem.title || 'No track reported');
-  $('nowPlayingArtist').textContent = nowPlaying.artist || (preservedItem.title
+  const sourceAudio = operatorCurrentAudio();
+  $('nowPlayingTitle').textContent = statusLoading ? 'Loading current track…' : (sourceAudio?.title || nowPlaying.title || preservedItem.title || 'No track reported');
+  $('nowPlayingArtist').textContent = sourceAudio?.programme_name ? `Özel yayın: ${sourceAudio.programme_name}` : sourceAudio?.artist || nowPlaying.artist || (preservedItem.title
     ? `Preserved at the front of the queue — ${preservedItem.artist || 'artist not provided'}`
-    : (statusLoading ? selectedStationName() : (onAir ? selectedStationName() : 'Broadcast is not running')));
+    : (statusLoading ? selectedStationName() : ((onAir || sourceSnapshot.sourceActive) ? selectedStationName() : 'Broadcast is not running')));
 
   const aiEnabled = asBool(state.ai?.ai_host_enabled);
   const readiness = health.ai_prefetch?.startup_state || {};
@@ -1582,9 +1716,11 @@ function syncActionButtons() {
   const loop = state.health?.worker_loop || state.runtime?.worker_loop || {};
   const running = Boolean(state.health?.engine_running && runtime.running && runtime.output_feed_active);
   const verifiedLive = isBroadcastVerifiedLive();
+  const sourceReady = operatorSourceSnapshot().sourceReady;
   const stationReady = Number(state.stationId || 0) > 0;
-  $('startBroadcastButton').disabled = !stationReady || (verifiedLive && running && loop.running);
-  $('startBroadcastButton').textContent = state.startArmedUntil > Date.now() ? 'Confirm start broadcast' : 'Start broadcast';
+  $('startBroadcastButton').disabled = !stationReady || ((verifiedLive || sourceReady) && running && loop.running);
+  $('startBroadcastButton').textContent = state.startArmedUntil > Date.now() ? 'Confirm start broadcast'
+    : sourceReady && loop.running ? 'Source running' : 'Start broadcast';
   $('stopBroadcastButton').disabled = !stationReady || (!running && !loop.running);
   $('stopBroadcastButton').textContent = state.stopArmedUntil > Date.now() ? 'Confirm stop — keep playlist' : 'Stop stream — keep playlist';
   const aiEnabled = asBool(state.ai?.ai_host_enabled);
@@ -2059,8 +2195,7 @@ async function verifyRecoveryPoint(pointId) {
 
 function timelineSnapshot(now = new Date()) {
   const activeItems = state.queue.filter((item) => !item.is_played && String(item.status || '').toLowerCase() !== 'done');
-  const reportedCurrent = activeItems.find((item) => item.is_current || String(item.status || '').toLowerCase() === 'playing') || null;
-  const current = isBroadcastVerifiedLive() ? reportedCurrent : null;
+  const current = operatorCurrentAudio();
   const pending = activeItems.filter((item) => item !== current);
   const duration = Math.max(0, Number(current?.duration || 0));
   const anchorAge = state.timelineAnchorAt ? Math.max(0, (Date.now() - state.timelineAnchorAt) / 1000) : 0;
@@ -2166,9 +2301,12 @@ function renderTimeline() {
     $('timelineProgressBar').style.width = '0%';
   } else {
     $('timelineNowTitle').textContent = timeline.current.title || 'Untitled';
-    $('timelineNowArtist').textContent = timeline.current.artist || timeline.current.track_type || selectedStationName();
+    $('timelineNowArtist').textContent = timeline.current.programme_name
+      ? `Özel yayın: ${timeline.current.programme_name}` : timeline.current.artist || timeline.current.track_type || selectedStationName();
     $('timelineRemaining').textContent = timeline.remaining === null ? '--:--' : formatDuration(timeline.remaining);
-    $('timelineEndTime').textContent = timeline.endsAt ? `Ends ${formatClock(timeline.endsAt)}` : 'Duration unavailable';
+    $('timelineEndTime').textContent = timeline.endsAt ? `Ends ${formatClock(timeline.endsAt)}`
+      : timeline.current.programme_end ? `Program window ends ${formatClock(new Date(timeline.current.programme_end))}`
+        : `Elapsed ${formatDuration(timeline.elapsed)} · duration unavailable`;
     const progress = timeline.duration > 0 ? Math.max(0, Math.min(100, (timeline.elapsed / timeline.duration) * 100)) : 0;
     $('timelineProgressBar').style.width = `${progress.toFixed(2)}%`;
   }
@@ -2496,7 +2634,7 @@ async function startBroadcast() {
   disarmStartBroadcast();
   disarmStopBroadcast();
   const resumeAfterRestart = $('broadcastAutostartEnabled').checked;
-  setBusy(true, 'Starting broadcast…', 'Starting scheduler and verifying live output');
+  setBusy(true, 'Starting broadcast…', 'Starting scheduler and verifying the saved restart policy');
   setResult('broadcastResult');
   try {
     const current = await api(`/api/runtime/${state.stationId}/status`);
@@ -2519,32 +2657,33 @@ async function startBroadcast() {
           .then((response) => response.ok ? response.json() : { stations: [] }),
       ]);
       const settings = settingPayload?.settings || settingPayload || {};
-      const runtime = health.runtime || {};
-      const delivery = health.runtime_delivery_health || runtime.delivery_health || {};
       const publicStation = (publicStations.stations || [])
         .find((station) => Number(station.id) === Number(state.stationId)) || null;
       const verified = Boolean(
         asBool(settings.broadcast_autostart_enabled) === resumeAfterRestart
         && health.worker_loop?.running
-        && health.engine_running
-        && runtime.running
-        && runtime.output_feed_active
-        && (delivery.icecast || delivery.local)
-        && isBroadcastVerifiedLive(publicStation)
       );
+      // A pending listener probe must not keep a successfully-started
+      // controller in an endless busy overlay. Never call that probe live.
       return { verified, value: { health, publicStation } };
-    }, { attempts: 50, interval: 500, description: 'broadcast output' });
+    }, { attempts: 8, interval: 500, description: 'broadcast controller and restart policy' });
     state.health = started.value.health;
     state.runtime = started.value.health?.runtime || state.runtime;
     state.publicStation = started.value.publicStation;
     renderCoreStatus(state.publicStation);
+    const sourceSnapshot = operatorSourceSnapshot();
+    const startMessage = sourceSnapshot.publicVerified && sourceSnapshot.sourceReady
+      ? `Verified end to end: scheduler, engine, output feed, and the public stream are live. Restart policy is ${resumeAfterRestart ? 'enabled' : 'disabled'}. Any preserved item resumes from the front without changing queue order.`
+      : sourceSnapshot.sourceReady
+        ? 'Scheduler and saved restart policy verified. Audio is reaching the configured source connections; public listener verification is pending.'
+        : 'Scheduler and saved restart policy verified. Audio output is reconnecting; the On Air panel will show its current progress.';
     setResult(
       'broadcastResult',
-      `Verified end to end: scheduler, engine, output feed, and the public stream are live. Restart policy is ${resumeAfterRestart ? 'enabled' : 'disabled'}. Any preserved item resumes from the front without changing queue order.`,
-      'success',
+      startMessage,
+      sourceSnapshot.publicVerified && sourceSnapshot.sourceReady ? 'success' : 'pending',
     );
-    logActivity(`Started broadcasting ${selectedStationName()}`);
-    toast('Broadcast start verified');
+    logActivity(`${selectedStationName()}: ${startMessage}`);
+    toast(sourceSnapshot.publicVerified && sourceSnapshot.sourceReady ? 'Broadcast start verified' : 'Broadcast controller started');
   } catch (error) {
     const message = errorMessage(error);
     setResult('broadcastResult', message, 'error');
@@ -6279,7 +6418,8 @@ function bindEvents() {
   $('loginForm').addEventListener('submit', login);
   $('logoutButton').addEventListener('click', logout);
   $('continueSessionButton').addEventListener('click', recordUserActivity);
-  ['pointerdown', 'keydown', 'touchstart'].forEach((eventName) => document.addEventListener(eventName, recordUserActivity, { passive: true }));
+  ['pointerdown', 'keydown', 'touchstart'].concat(['click', 'input', 'change'])
+    .forEach((eventName) => document.addEventListener(eventName, recordUserActivity, { passive: true }));
   $('refreshButton').addEventListener('click', () => refreshAll(false));
   $('queueRefreshButton').addEventListener('click', () => loadQueue().catch((error) => toast(errorMessage(error), 'error')));
   $('speakerMonitorForm').addEventListener('submit', saveSpeakerMonitor);
@@ -6326,6 +6466,7 @@ function bindEvents() {
     state.stationStatusLoading = true;
     state.health = null;
     state.runtime = null;
+    state.operatorProgrammes = [];
     state.publicStation = null;
     state.ai = null;
     state.sweeper = null;
