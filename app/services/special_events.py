@@ -177,11 +177,16 @@ def _write_state(conn, station_id, state):
 
 
 def _same_media(left, right):
-    from urllib.parse import unquote
+    from urllib.parse import unquote, urlsplit
     def normalize(value):
         token = str(value or '').replace('\\', '/')
-        if token.lower().startswith('file:///'):
-            token = unquote(token[8:])
+        if token.lower().startswith('file://'):
+            parts = urlsplit(token)
+            token = unquote(parts.path)
+            if parts.netloc and parts.netloc.lower() != 'localhost':
+                token = '//' + parts.netloc + token
+            if os.name == 'nt' and len(token) > 2 and token[0] == '/' and token[2] == ':':
+                token = token[1:]
         return os.path.normcase(os.path.abspath(token)) if token else ''
     return bool(left) and bool(right) and normalize(left) == normalize(right)
 

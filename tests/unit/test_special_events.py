@@ -255,3 +255,9 @@ def test_large_plan_payload_never_enters_normal_station_settings(tmp_path):
     assert conn.execute('SELECT COUNT(*) FROM special_event_programs WHERE station_id=1').fetchone()[0]==1
     assert not conn.execute('SELECT 1 FROM station_settings WHERE key=?',(CONFIG_KEY,)).fetchone()
     conn.close()
+
+
+def test_file_uri_identity_preserves_absolute_path_and_spaces(tmp_path):
+    from app.services.special_events import _same_media
+    file=tmp_path/'memorial song.wav'
+    assert _same_media(str(file),file.as_uri())
