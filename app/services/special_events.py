@@ -229,9 +229,10 @@ def process_special_event(worker, now=None):
     runtime = worker.runtime_registry.status(worker.station_id) or {}
     running = worker._runtime_playback_alive(runtime)
     if not same:
-        if plan.get('start_policy') == 'boundary' and running:
+        if plan.get('start_policy', 'boundary') == 'boundary':
             # A previously-owned special programme is also allowed to reach EOF.
-            if not worker._runtime_source_finished_naturally(runtime, runtime.get('active_input_uri', '')):
+            uri = runtime.get('active_input_uri', '')
+            if (running or worker._runtime_source_is_draining(runtime, uri)) and not worker._runtime_source_finished_naturally(runtime, uri):
                 return {'source': 'playing', 'reason': 'special_event_waiting_for_boundary'}
         state = {'occurrence': window['key'], 'revision': plan['revision'], 'index': 0,
                  'cycle': 0, 'uri': '', 'started_epoch': 0, 'failed_paths': []}
@@ -299,9 +300,14 @@ def process_special_event(worker, now=None):
             if (runtime.get('producer_eof') and _same_media(str(file), runtime.get('active_input_uri', ''))
                     and worker.runtime_registry.is_process_running(worker.station_id)):
                 restart = {'force_restart': True, 'expected_active_input_uri': str(file)}
+            if not same:
+                # Complete only rows whose own media has proven EOF, before
+                # the registry changes URI. Keep the normal ledger callbacks.
+                worker._complete_special_event_predecessor(runtime)
+            first_boundary = not same and plan.get('start_policy', 'boundary') == 'boundary'
             worker._start_runtime_station(worker.station_id, str(file),
                 stream_title=track.get('title') or file.stem, stream_artist=track.get('artist', ''),
-                track_type='music', crossfade_seconds=float(plan.get('crossfade_seconds', 3)),
+                track_type='music', crossfade_seconds=0.0 if first_boundary else float(plan.get('crossfade_seconds', 3)),
                 start_offset_seconds=resume, **restart)
             # Requeue, rather than consume, interrupted regular automation items.
             # Their content is not edited or deleted and resumes when the window ends.

@@ -48,7 +48,7 @@ class EventPayload(BaseModel):
     tracks: list[EventTrack] = Field(default_factory=list, max_length=MAX_TRACKS)
     order: Literal['ordered', 'shuffle'] = 'ordered'
     repeat_playlist: bool = True
-    start_policy: Literal['exact', 'boundary'] = 'exact'
+    start_policy: Literal['exact', 'boundary'] = 'boundary'
     crossfade_seconds: float = Field(default=3, ge=0, le=10)
 
 
