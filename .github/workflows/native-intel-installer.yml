@@ -1,0 +1,100 @@
+name: native-intel-installer
+on:
+  workflow_dispatch:
+  pull_request:
+    paths: ['.github/workflows/native-intel-installer.yml', 'installer/build_posix_installers.py']
+  push:
+    branches: ['portable-installers-20261015']
+    paths: ['.github/workflows/native-intel-installer.yml', 'installer/build_posix_installers.py']
+permissions:
+  contents: read
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y autoconf automake libtool pkg-config nasm build-essential perl
+          else
+            brew install autoconf automake libtool pkgconf nasm
+          fi
+          python -m pip install -r requirements.lock pyinstaller==6.16.0
+          python -m pip check
+      - name: Build pinned FDK-AAC and TLS-enabled FFmpeg tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .codec-build
+          prefix="$PWD/.codec-build/prefix"
+          git clone --depth 1 --branch v2.0.3 https://github.com/mstorsjo/fdk-aac.git .codec-build/fdk
+          git clone --depth 1 --branch openssl-3.5.0 https://github.com/openssl/openssl.git .codec-build/openssl
+          git clone --depth 1 --branch n8.0 https://github.com/FFmpeg/FFmpeg.git .codec-build/ffmpeg
+          cd .codec-build/openssl
+          if [ "$RUNNER_OS" = macOS ]; then
+            case "$(uname -m)" in arm64) target=darwin64-arm64-cc ;; *) target=darwin64-x86_64-cc ;; esac
+          else target=linux-x86_64; fi
+          ./Configure "$target" no-shared no-tests --prefix="$prefix" --libdir=lib
+          make -j3
+          make install_sw
+          cd ../fdk
+          autoreconf -fiv
+          ./configure --prefix="$prefix" --disable-shared --enable-static
+          make -j3
+          make install
+          cd ../ffmpeg
+          export PKG_CONFIG_PATH="$prefix/lib/pkgconfig"
+          ./configure --prefix="$prefix" --disable-shared --enable-static --disable-debug --disable-doc --disable-ffplay --disable-autodetect --enable-libfdk-aac --enable-openssl --enable-nonfree --pkg-config-flags=--static --extra-cflags="-I$prefix/include" --extra-ldflags="-L$prefix/lib"
+          make -j3
+          make install
+      - name: Verify configured AAC and lossless codec outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          ffmpeg="$PWD/.codec-build/prefix/bin/ffmpeg"
+          ffprobe="$PWD/.codec-build/prefix/bin/ffprobe"
+          "$ffmpeg" -v error -f lavfi -i sine=frequency=440:sample_rate=48000:duration=3 -ac 2 -c:a libfdk_aac -profile:a aac_low -b:a 192k -f adts /tmp/onair-lc.aac
+          "$ffmpeg" -v error -f lavfi -i sine=frequency=440:sample_rate=48000:duration=3 -ac 2 -c:a libfdk_aac -profile:a aac_he_v2 -b:a 64k -f adts /tmp/onair-he.aac
+          "$ffmpeg" -v error -f lavfi -i sine=frequency=440:sample_rate=48000:duration=3 -ac 2 -c:a flac -f ogg /tmp/onair-flac.ogg
+          "$ffprobe" -v error -show_entries stream=codec_name,profile -of json /tmp/onair-he.aac
+          "$ffmpeg" -v error -i /tmp/onair-he.aac -f s16le -acodec pcm_s16le /tmp/onair-he.pcm
+          test -s /tmp/onair-he.pcm
+      - name: Verify portable platform contracts
+        shell: bash
+        run: python -m pytest -q tests/unit/test_portable_credentials.py tests/unit/test_portable_launcher.py tests/unit/test_runtime_paths.py
+      - name: Build the native app
+        shell: bash
+        run: |
+          export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
+          python -m PyInstaller --noconfirm --clean --onedir --name RadioTEDU-OnAir --add-data 'VERSION:.' --add-data 'app/static:app/static' --collect-submodules app --collect-submodules uvicorn --collect-submodules passlib --collect-data certifi onair_portable.py
+      - name: Assemble and exercise the installer
+        shell: bash
+        run: |
+          export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
+          python installer/build_posix_installers.py --tools "$PWD/.codec-build/prefix"
+      - name: Upload tested native installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: RadioTEDU-Native-${{ runner.os }}-${{ runner.arch }}
+          path: release/*.tar.gz
+          if-no-files-found: error
+      - name: Retain build diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: RadioTEDU-Build-Diagnostics-${{ runner.os }}-${{ runner.arch }}
+          path: |
+            .codec-build/ffmpeg/ffbuild/config.log
+            .codec-build/openssl/configdata.pm
+            build/RadioTEDU-OnAir/warn-RadioTEDU-OnAir.txt
