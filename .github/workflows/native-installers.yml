@@ -1,6 +1,8 @@
 name: native-installers
 on:
   workflow_dispatch:
+  pull_request:
+    paths: ['.github/workflows/native-installers.yml', 'installer/build_posix_installers.py']
   push:
     branches: ['portable-installers-20261015']
     paths: ['.github/workflows/native-installers.yml', 'installer/build_posix_installers.py']
